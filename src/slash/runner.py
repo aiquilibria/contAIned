@@ -164,26 +164,29 @@ async def _can_use_tool(name: str, input_data: dict, context: object) -> object:
     return PermissionResultAllow(behavior="allow")
 
 
-async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose") -> None:
+def _build_client(root: Path):
     """
-    Stream agent output with verbosity controlled by the manifest's
-    ``agent.verbosity`` setting:
+    Validate the workspace and return a ``ClaudeSDKClient`` instance.
 
-    - ``verbose``  — full output: thinking blocks, text, every tool call and result
-    - ``concise``  — single updating status line with the current tool call
-    - ``none``     — silent during execution; only the final result is shown
+    The returned client is intended to be used as an async context manager::
+
+        async with _build_client(root) as client:
+            await client.query(prompt)
+            async for message in client.receive_response():
+                ...
+
+    Raises ``SystemExit(1)`` if the workspace has not been initialised.
     """
-    from claude_agent_sdk import (
-        AssistantMessage,
-        ClaudeAgentOptions,
-        ClaudeSDKClient,
-        ResultMessage,
-        TextBlock,
-        ThinkingBlock,
-        ToolResultBlock,
-        ToolUseBlock,
-        UserMessage,
-    )
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
+    missing = _check_initialised(root)
+    if missing:
+        console.print("\n[red]Error:[/red] workspace not initialised. Run [bold]slash init[/bold] first.\n")
+        console.print("Missing:")
+        for m in missing:
+            console.print(f"  [dim]{m}[/dim]")
+        console.print()
+        raise SystemExit(1)
 
     options = ClaudeAgentOptions(
         setting_sources=["project"],
@@ -200,6 +203,163 @@ async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose
         can_use_tool=_can_use_tool,
     )
 
+    return ClaudeSDKClient(options)
+
+
+def _render_message(message: object, verbosity: str, live=None) -> None:
+    """
+    Render one SDK response message to the console.
+
+    Parameters
+    ----------
+    message:
+        An SDK message object (``AssistantMessage``, ``UserMessage``,
+        ``ResultMessage``, …).
+    verbosity:
+        One of ``"verbose"``, ``"concise"``, or ``"none"``.
+    live:
+        A :class:`rich.live.Live` instance, required when *verbosity* is
+        ``"concise"`` so tool-call updates can overwrite the status line.
+        Ignored for other verbosity levels.
+    """
+    from claude_agent_sdk import (
+        AssistantMessage,
+        ResultMessage,
+        TextBlock,
+        ThinkingBlock,
+        ToolResultBlock,
+        ToolUseBlock,
+        UserMessage,
+    )
+
+    if verbosity == "verbose":
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, ThinkingBlock) and block.thinking.strip():
+                    console.print(f"[dim italic]{escape(block.thinking)}[/dim italic]")
+
+                elif isinstance(block, TextBlock) and block.text.strip():
+                    console.print(escape(block.text))
+
+                elif isinstance(block, ToolUseBlock):
+                    if block.name == "AskUserQuestion":
+                        continue
+                    summary = _tool_input_summary(block.name, block.input)
+                    console.print(
+                        f"  [bold cyan]→[/bold cyan] [cyan]{escape(block.name)}[/cyan]"
+                        f"  [dim]{escape(summary)}[/dim]"
+                    )
+
+        elif isinstance(message, UserMessage):
+            content = message.content if isinstance(message.content, list) else []
+            for block in content:
+                if isinstance(block, ToolResultBlock):
+                    if block.is_error:
+                        raw = block.content if isinstance(block.content, str) else str(block.content or "")
+                        first_line = raw.splitlines()[0] if raw else "error"
+                        if first_line.startswith("User answered:"):
+                            return
+                        if len(first_line) > 80:
+                            first_line = first_line[:77] + "…"
+                        console.print(f"  [bold red]✗[/bold red] [dim red]{escape(first_line)}[/dim red]")
+                    else:
+                        raw = block.content if isinstance(block.content, str) else str(block.content or "")
+                        first_line = raw.splitlines()[0] if raw else ""
+                        if len(first_line) > 80:
+                            first_line = first_line[:77] + "…"
+                        display = first_line or f"{len(raw)} chars"
+                        console.print(f"  [bold green]✓[/bold green] [dim]{escape(display)}[/dim]")
+
+    elif verbosity == "concise" and live is not None:
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, ToolUseBlock):
+                    if block.name == "AskUserQuestion":
+                        continue
+                    summary = _tool_input_summary(block.name, block.input)
+                    live.update(Text.from_markup(
+                        f"  [bold cyan]→[/bold cyan] [cyan]{escape(block.name)}[/cyan]"
+                        f"  [dim]{escape(summary)}[/dim]"
+                    ))
+
+        elif isinstance(message, ResultMessage):
+            live.update(Text(""))  # clear the status line before exit
+
+
+def _print_result_summary(result_message: object, verbosity: str) -> None:
+    """Print the cost/usage footer after a completed turn."""
+    from claude_agent_sdk import ResultMessage
+
+    if result_message is None:
+        return
+
+    if not isinstance(result_message, ResultMessage):
+        return
+
+    if result_message.subtype == "success":
+        console.print("\n[green]✓ Task complete[/green]")
+    else:
+        console.print(f"\n[yellow]! Task ended: {escape(result_message.subtype)}[/yellow]")
+
+    if verbosity == "none" and hasattr(result_message, "result") and result_message.result:
+        console.print(f"\n[dim]{escape(result_message.result)}[/dim]")
+
+    cost_parts: list[str] = []
+
+    cost = getattr(result_message, "total_cost_usd", None)
+    if cost is not None:
+        cost_parts.append(f"[bold]cost:[/bold] [green]${cost:.4f}[/green]")
+
+    usage = getattr(result_message, "usage", None) or {}
+    input_tokens  = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    cache_read    = usage.get("cache_read_input_tokens")
+    cache_create  = usage.get("cache_creation_input_tokens")
+    # Some CLI/SDK versions aggregate all token consumption into a single
+    # ``total_tokens`` counter (matching the ``TaskUsage`` shape) rather than
+    # reporting separate input/output counts.  Use it as a fallback so we
+    # always display a meaningful number instead of nothing — or instead of a
+    # suspiciously small figure that merely counts API invocations.
+    total_tokens  = usage.get("total_tokens")
+
+    token_parts: list[str] = []
+    if input_tokens is not None:
+        token_parts.append(f"in {input_tokens:,}")
+    if output_tokens is not None:
+        token_parts.append(f"out {output_tokens:,}")
+    if input_tokens is None and output_tokens is None and total_tokens is not None:
+        token_parts.append(f"total {total_tokens:,}")
+    if cache_read:
+        token_parts.append(f"cache-read {cache_read:,}")
+    if cache_create:
+        token_parts.append(f"cache-write {cache_create:,}")
+    if token_parts:
+        cost_parts.append(f"[bold]tokens:[/bold] [dim]{' · '.join(token_parts)}[/dim]")
+
+    turns = getattr(result_message, "num_turns", None)
+    if turns is not None:
+        cost_parts.append(f"[bold]turns:[/bold] [dim]{turns}[/dim]")
+
+    duration_ms = getattr(result_message, "duration_ms", None)
+    if duration_ms is not None:
+        secs = duration_ms / 1000
+        cost_parts.append(f"[bold]time:[/bold] [dim]{secs:.1f}s[/dim]")
+
+    if cost_parts:
+        console.print("  " + "  ·  ".join(cost_parts))
+
+
+async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose") -> None:
+    """
+    Stream agent output with verbosity controlled by the manifest's
+    ``agent.verbosity`` setting:
+
+    - ``verbose``  — full output: thinking blocks, text, every tool call and result
+    - ``concise``  — single updating status line with the current tool call
+    - ``none``     — silent during execution; only the final result is shown
+    """
+    from claude_agent_sdk import ResultMessage
+
     # ── Header ────────────────────────────────────────────────────────────────
     if verbosity != "none":
         console.print(f"\n[bold]Task:[/bold] {escape(prompt)}\n")
@@ -207,57 +367,14 @@ async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose
 
     result_message = None
 
-    async with ClaudeSDKClient(options) as client:
+    async with _build_client(root) as client:
         await client.query(prompt)
 
         # ── verbose ───────────────────────────────────────────────────────────
         if verbosity == "verbose":
             async for message in client.receive_response():
-                if isinstance(message, AssistantMessage):
-                    for block in message.content:
-                        if isinstance(block, ThinkingBlock) and block.thinking.strip():
-                            console.print(f"[dim italic]{escape(block.thinking)}[/dim italic]")
-
-                        elif isinstance(block, TextBlock) and block.text.strip():
-                            console.print(escape(block.text))
-
-                        elif isinstance(block, ToolUseBlock):
-                            # AskUserQuestion is handled interactively by the
-                            # can_use_tool callback; skip the raw tool-call line
-                            # so it doesn't appear twice.
-                            if block.name == "AskUserQuestion":
-                                continue
-                            summary = _tool_input_summary(block.name, block.input)
-                            console.print(
-                                f"  [bold cyan]→[/bold cyan] [cyan]{escape(block.name)}[/cyan]"
-                                f"  [dim]{escape(summary)}[/dim]"
-                            )
-
-                elif isinstance(message, UserMessage):
-                    content = message.content if isinstance(message.content, list) else []
-                    for block in content:
-                        if isinstance(block, ToolResultBlock):
-                            if block.is_error:
-                                raw = block.content if isinstance(block.content, str) else str(block.content or "")
-                                first_line = raw.splitlines()[0] if raw else "error"
-                                # The can_use_tool handler encodes the user's
-                                # answer as "User answered: …" in the deny
-                                # message; suppress the red ✗ for that so the
-                                # interactive exchange above is the only output.
-                                if first_line.startswith("User answered:"):
-                                    continue
-                                if len(first_line) > 80:
-                                    first_line = first_line[:77] + "…"
-                                console.print(f"  [bold red]✗[/bold red] [dim red]{escape(first_line)}[/dim red]")
-                            else:
-                                raw = block.content if isinstance(block.content, str) else str(block.content or "")
-                                first_line = raw.splitlines()[0] if raw else ""
-                                if len(first_line) > 80:
-                                    first_line = first_line[:77] + "…"
-                                display = first_line or f"{len(raw)} chars"
-                                console.print(f"  [bold green]✓[/bold green] [dim]{escape(display)}[/dim]")
-
-                elif isinstance(message, ResultMessage):
+                _render_message(message, "verbose")
+                if isinstance(message, ResultMessage):
                     result_message = message
 
         # ── concise ───────────────────────────────────────────────────────────
@@ -265,23 +382,9 @@ async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose
             initial = Text.from_markup("  [dim]Starting…[/dim]")
             with Live(initial, console=console, refresh_per_second=10) as live:
                 async for message in client.receive_response():
-                    if isinstance(message, AssistantMessage):
-                        for block in message.content:
-                            if isinstance(block, ToolUseBlock):
-                                # AskUserQuestion is handled interactively by
-                                # _can_use_tool; skip it here so the Live
-                                # status line doesn't overwrite the prompt.
-                                if block.name == "AskUserQuestion":
-                                    continue
-                                summary = _tool_input_summary(block.name, block.input)
-                                live.update(Text.from_markup(
-                                    f"  [bold cyan]→[/bold cyan] [cyan]{escape(block.name)}[/cyan]"
-                                    f"  [dim]{escape(summary)}[/dim]"
-                                ))
-
-                    elif isinstance(message, ResultMessage):
+                    _render_message(message, "concise", live=live)
+                    if isinstance(message, ResultMessage):
                         result_message = message
-                        live.update(Text(""))  # clear the status line before exit
 
         # ── none ──────────────────────────────────────────────────────────────
         else:
@@ -293,65 +396,12 @@ async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose
     if verbosity == "verbose":
         console.rule(style="dim")
 
-    if result_message is not None:
-        if result_message.subtype == "success":
-            console.print("\n[green]✓ Task complete[/green]")
-        else:
-            console.print(f"\n[yellow]! Task ended: {escape(result_message.subtype)}[/yellow]")
-
-        if verbosity == "none" and hasattr(result_message, "result") and result_message.result:
-            console.print(f"\n[dim]{escape(result_message.result)}[/dim]")
-
-        # ── Cost & usage summary ───────────────────────────────────────────
-        cost_parts: list[str] = []
-
-        cost = getattr(result_message, "total_cost_usd", None)
-        if cost is not None:
-            cost_parts.append(f"[bold]cost:[/bold] [green]${cost:.4f}[/green]")
-
-        usage = getattr(result_message, "usage", None) or {}
-        input_tokens  = usage.get("input_tokens")
-        output_tokens = usage.get("output_tokens")
-        cache_read    = usage.get("cache_read_input_tokens")
-        cache_create  = usage.get("cache_creation_input_tokens")
-
-        token_parts: list[str] = []
-        if input_tokens is not None:
-            token_parts.append(f"in {input_tokens:,}")
-        if output_tokens is not None:
-            token_parts.append(f"out {output_tokens:,}")
-        if cache_read:
-            token_parts.append(f"cache-read {cache_read:,}")
-        if cache_create:
-            token_parts.append(f"cache-write {cache_create:,}")
-        if token_parts:
-            cost_parts.append(f"[bold]tokens:[/bold] [dim]{' · '.join(token_parts)}[/dim]")
-
-        turns = getattr(result_message, "num_turns", None)
-        if turns is not None:
-            cost_parts.append(f"[bold]turns:[/bold] [dim]{turns}[/dim]")
-
-        duration_ms = getattr(result_message, "duration_ms", None)
-        if duration_ms is not None:
-            secs = duration_ms / 1000
-            cost_parts.append(f"[bold]time:[/bold] [dim]{secs:.1f}s[/dim]")
-
-        if cost_parts:
-            console.print("  " + "  ·  ".join(cost_parts))
+    _print_result_summary(result_message, verbosity)
 
     console.print(f"\nAudit log: [dim].slash/audit/pipeline.jsonl[/dim]\n")
 
 
 def run_task(prompt: str, root: Path) -> None:
     """Entry point called from the CLI."""
-    missing = _check_initialised(root)
-    if missing:
-        console.print("\n[red]Error:[/red] workspace not initialised. Run [bold]slash init[/bold] first.\n")
-        console.print("Missing:")
-        for m in missing:
-            console.print(f"  [dim]{m}[/dim]")
-        console.print()
-        raise SystemExit(1)
-
     verbosity = _load_verbosity_config(root)
     anyio.run(_run_task_streaming, prompt, root, verbosity)

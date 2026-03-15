@@ -79,6 +79,28 @@ slash status
 slash status --tail 50
 ```
 
+### `slash repl`
+
+Start an interactive REPL session. Every message you type is forwarded to the **same living agent session** — conversation history accumulates turn-by-turn so the agent remembers prior context within the session.
+
+```bash
+slash repl
+slash repl --verbosity concise
+```
+
+Built-in commands (handled locally, never sent to the agent):
+
+| Command | What it does |
+|---|---|
+| `/new` | Start a fresh session (new `session_id`, empty history) |
+| `/sh <cmd>` | Run a shell command directly without involving the agent (e.g. `/sh git status`) |
+| `/status` | Show the last 20 audit-log entries |
+| `/help` | Print the built-in command list |
+| `/clear` | Clear the terminal |
+| `/exit` · `/quit` | Exit the REPL (also: Ctrl-D) |
+
+Any other input is forwarded verbatim to the agent. All hooks, policy rules, and audit logging work identically to `slash run`.
+
 ### `slash update`
 
 Refreshes managed hook files from the latest bundled templates. Safe to run after upgrading. Never touches user-editable files (e.g. `manifest.yaml`).

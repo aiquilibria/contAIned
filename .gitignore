@@ -25,3 +25,4 @@ node_modules/
 # The .slash/ directory contains hooks, policy, and audit logs managed by slash.
 # Keep it out of version control.
 .slash/
+docs/*

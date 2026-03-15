@@ -122,24 +122,13 @@ def run(task: str, dir: str | None) -> None:
 
 # ── status ────────────────────────────────────────────────────────────────────
 
-@main.command()
-@click.option(
-    "--dir", "-d",
-    default=None,
-    type=click.Path(file_okay=False, exists=True, resolve_path=True),
-    help="Workspace root (default: auto-detected from cwd)",
-)
-@click.option("--tail", "-n", default=20, help="Number of most recent entries to show")
-def status(dir: str | None, tail: int) -> None:
+def _print_status(root: Path, tail: int = 20) -> None:
     """
-    Show a summary of the audit log.
+    Print a summary of the audit log for *root*.
 
-    \b
-    Examples:
-      slash status
-      slash status --tail 50
+    Extracted as a standalone callable so it can be reused by the REPL's
+    ``/status`` built-in without going through Click.
     """
-    root = Path(dir) if dir else _find_root()
     log_path = root / ".slash" / "audit" / "pipeline.jsonl"
 
     if not log_path.exists():
@@ -193,3 +182,64 @@ def status(dir: str | None, tail: int) -> None:
 
     console.print(table)
     console.print(f"\n[dim]Full log: {log_path}[/dim]\n")
+
+
+@main.command()
+@click.option(
+    "--dir", "-d",
+    default=None,
+    type=click.Path(file_okay=False, exists=True, resolve_path=True),
+    help="Workspace root (default: auto-detected from cwd)",
+)
+@click.option("--tail", "-n", default=20, help="Number of most recent entries to show")
+def status(dir: str | None, tail: int) -> None:
+    """
+    Show a summary of the audit log.
+
+    \b
+    Examples:
+      slash status
+      slash status --tail 50
+    """
+    root = Path(dir) if dir else _find_root()
+    _print_status(root, tail)
+
+
+# ── repl ──────────────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option(
+    "--dir", "-d",
+    default=None,
+    type=click.Path(file_okay=False, exists=True, resolve_path=True),
+    help="Workspace root (default: auto-detected from cwd)",
+)
+@click.option(
+    "--verbosity",
+    type=click.Choice(["verbose", "concise", "none"]),
+    default=None,
+    help="Override manifest verbosity for this session.",
+)
+def repl(dir: str | None, verbosity: str | None) -> None:
+    """
+    Start an interactive REPL session (persistent agent conversation).
+
+    Every message you type is forwarded to the same living agent session.
+    Conversation history accumulates turn-by-turn until you type /new or exit.
+
+    \b
+    Built-in commands (handled locally, never sent to the agent):
+      /new      Start a fresh session
+      /status   Show recent audit-log entries
+      /help     Show the full command list
+      /clear    Clear the terminal
+      /exit     Quit  (alias: /quit, Ctrl-D)
+
+    \b
+    Examples:
+      slash repl
+      slash repl --verbosity concise
+    """
+    from slash.repl import start_repl
+    root = Path(dir) if dir else _find_root()
+    start_repl(root, verbosity)
