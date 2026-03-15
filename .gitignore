@@ -1,0 +1,27 @@
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editors ───────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.env
+
+# ── Node ──────────────────────────────────────────────────────────────────────
+node_modules/
+
+# ── slash — control plane ─────────────────────────────────────────────────────
+# The .slash/ directory contains hooks, policy, and audit logs managed by slash.
+# Keep it out of version control.
+.slash/
