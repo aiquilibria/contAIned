@@ -34,11 +34,15 @@ def _find_root() -> Path:
     return Path.cwd().resolve()
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option("0.1.0", prog_name="slash")
-def main() -> None:
+@click.pass_context
+def main(ctx: click.Context) -> None:
     """slash — a slash coding agent CLI."""
-    pass
+    if ctx.invoked_subcommand is None:
+        # No subcommand given — drop straight into the REPL.
+        from slash.repl import start_repl
+        start_repl(_find_root(), verbosity=None)
 
 
 # ── init ──────────────────────────────────────────────────────────────────────

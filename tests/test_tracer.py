@@ -1207,3 +1207,352 @@ class TestReplNewAndReview:
         pending = tracer.get_pending_reviews()
         ids = {p["session_id"] for p in pending}
         assert {"S1", "S2"} <= ids
+
+
+# ---------------------------------------------------------------------------
+# Unit — _extract_trace_unit edge cases
+# ---------------------------------------------------------------------------
+
+class TestExtractTraceUnitEdgeCases:
+    """Additional coverage for _extract_trace_unit branches not hit above."""
+
+    def test_multiedit_empty_edits_list(self, tracer: SlashTracer) -> None:
+        """MultiEdit with an empty edits list should return an empty file_paths list."""
+        unit = tracer._extract_trace_unit("MultiEdit", {"edits": []}, None)
+        assert unit == {"file_paths": []}
+
+    def test_multiedit_missing_edits_key(self, tracer: SlashTracer) -> None:
+        """MultiEdit with no edits key should not raise."""
+        unit = tracer._extract_trace_unit("MultiEdit", {}, None)
+        assert unit == {"file_paths": []}
+
+    def test_bash_uses_output_key_fallback(self, tracer: SlashTracer) -> None:
+        """Bash handler should fall back to 'output' when 'stdout' is absent."""
+        unit = tracer._extract_trace_unit(
+            "Bash",
+            {"command": "pwd"},
+            {"exit_code": 0, "output": "/workspace"},
+        )
+        assert unit["stdout_head"] == "/workspace"
+
+    def test_bash_empty_response(self, tracer: SlashTracer) -> None:
+        """Bash with no tool_response should not raise."""
+        unit = tracer._extract_trace_unit("Bash", {"command": "date"}, None)
+        assert unit["command"] == "date"
+        assert unit["exit_code"] is None
+        assert unit["stdout_head"] == ""
+
+    def test_agent_uses_description_fallback(self, tracer: SlashTracer) -> None:
+        """Agent handler should fall back to 'description' when 'prompt' is absent."""
+        unit = tracer._extract_trace_unit(
+            "Agent",
+            {"subagent_type": "Explore", "description": "look around"},
+            None,
+        )
+        assert unit["prompt_head"] == "look around"
+
+    def test_agent_uses_agent_type_key(self, tracer: SlashTracer) -> None:
+        """Agent handler accepts 'agent_type' as well as 'subagent_type'."""
+        unit = tracer._extract_trace_unit(
+            "Agent",
+            {"agent_type": "Plan", "prompt": "plan it"},
+            None,
+        )
+        assert unit["agent_type"] == "Plan"
+
+    def test_unknown_tool_empty_input_returns_none(
+        self, tracer: SlashTracer
+    ) -> None:
+        """Fallback with an empty input dict should return None (no keys to store)."""
+        unit = tracer._extract_trace_unit("WeirdTool", {}, None)
+        assert unit is None
+
+    def test_unknown_tool_none_input_returns_none(
+        self, tracer: SlashTracer
+    ) -> None:
+        """Fallback with None input should return None without raising."""
+        unit = tracer._extract_trace_unit("WeirdTool", None, None)
+        assert unit is None
+
+    def test_unknown_tool_truncates_long_values(
+        self, tracer: SlashTracer
+    ) -> None:
+        """Fallback values must be truncated to 200 chars."""
+        unit = tracer._extract_trace_unit(
+            "SomeTool", {"key": "v" * 500}, None
+        )
+        assert unit is not None
+        assert len(unit["key"]) == 200
+
+    def test_write_tool_none_file_path(self, tracer: SlashTracer) -> None:
+        """Write with missing file_path key should return {'file_path': None}."""
+        unit = tracer._extract_trace_unit("Write", {}, None)
+        assert unit == {"file_path": None}
+
+
+# ---------------------------------------------------------------------------
+# Unit — task lifecycle edge cases
+# ---------------------------------------------------------------------------
+
+class TestTaskLifecycleEdgeCases:
+    def test_set_task_status_no_summary(self, tracer: SlashTracer) -> None:
+        """set_task_status without summary leaves summary as NULL."""
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "closed")
+        row = tracer.conn.execute(
+            "SELECT summary FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert row[0] is None
+
+    def test_set_task_status_sets_ended_at(self, tracer: SlashTracer) -> None:
+        """set_task_status must populate ended_at."""
+        tracer.open_task("S1", "task")
+        before_ms = int(time.time() * 1000)
+        tracer.set_task_status("S1", "closed")
+        ended_at = tracer.conn.execute(
+            "SELECT ended_at FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()[0]
+        assert ended_at is not None
+        assert ended_at >= before_ms
+
+    def test_get_child_sessions_no_children(self, tracer: SlashTracer) -> None:
+        """get_child_sessions returns an empty list when no children exist."""
+        tracer.open_task("LONE", "lone task")
+        assert tracer.get_child_sessions("LONE") == []
+
+    def test_get_child_sessions_unknown_parent(
+        self, tracer: SlashTracer
+    ) -> None:
+        """get_child_sessions on an unknown session_id returns empty list."""
+        assert tracer.get_child_sessions("GHOST") == []
+
+    def test_open_task_with_parent(self, tracer: SlashTracer) -> None:
+        """open_task correctly stores parent_session_id."""
+        tracer.open_task("ROOT", "root")
+        tracer.open_task("CHILD", "child", parent_session_id="ROOT")
+        row = tracer.conn.execute(
+            "SELECT parent_session_id FROM tasks WHERE session_id = 'CHILD'"
+        ).fetchone()
+        assert row[0] == "ROOT"
+
+    def test_get_pending_reviews_excludes_closed(
+        self, tracer: SlashTracer
+    ) -> None:
+        """Closed tasks must not appear in pending_reviews."""
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "closed")
+        assert tracer.get_pending_reviews() == []
+
+    def test_get_pending_reviews_excludes_abandoned(
+        self, tracer: SlashTracer
+    ) -> None:
+        """Abandoned tasks must not appear in pending_reviews."""
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "abandoned")
+        assert tracer.get_pending_reviews() == []
+
+    def test_get_pending_reviews_summary_none(self, tracer: SlashTracer) -> None:
+        """pending_reviews entry has summary=None when none was stored."""
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "pending_review")
+        pending = tracer.get_pending_reviews()
+        assert pending[0]["summary"] is None
+
+
+# ---------------------------------------------------------------------------
+# Unit — GC edge cases
+# ---------------------------------------------------------------------------
+
+class TestGCEdgeCases:
+    def _old_ms(self, days: int = 20) -> int:
+        return int((time.time() - days * 86400) * 1000)
+
+    def test_gc_removes_old_abandoned_snapshots(
+        self, tracer: SlashTracer
+    ) -> None:
+        """GC must prune snapshots for abandoned tasks, not just closed."""
+        tracer.open_task("ABA", "abandoned task")
+        tracer.set_task_status("ABA", "abandoned")
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "UPDATE tasks SET ended_at = ? WHERE session_id = 'ABA'",
+            (old_ms,),
+        )
+        tracer.conn.execute(
+            "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
+            "VALUES ('ABA', 'x.py', ?, ?)",
+            (tracer._store_blob(b"abandoned data"), old_ms),
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+        count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM snapshots"
+        ).fetchone()[0]
+        assert count == 0
+
+    def test_gc_removes_old_baselines(self, tracer: SlashTracer) -> None:
+        """GC must delete baselines for old closed tasks."""
+        tracer.open_task("OLD", "old task")
+        tracer.set_task_status("OLD", "closed")
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'",
+            (old_ms,),
+        )
+        tracer.conn.execute(
+            "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
+            "VALUES ('OLD', 'f.py', NULL, ?)",
+            (old_ms,),
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+        count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM baselines"
+        ).fetchone()[0]
+        assert count == 0
+
+    def test_gc_protects_open_baselines(self, tracer: SlashTracer) -> None:
+        """Baselines for open tasks must survive GC."""
+        tracer.open_task("OPEN", "open")
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
+            "VALUES ('OPEN', 'f.py', NULL, ?)",
+            (old_ms,),
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+        count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM baselines"
+        ).fetchone()[0]
+        assert count == 1
+
+    def test_gc_empty_db_is_safe(self, tracer: SlashTracer) -> None:
+        """gc on an empty database must not raise."""
+        tracer.gc(keep_days=14)  # must not raise
+
+    def test_gc_removes_old_audit_events_beyond_10k(
+        self, tracer: SlashTracer
+    ) -> None:
+        """Audit events beyond the 10,000 keep-floor must be pruned for old sessions."""
+        tracer.open_task("OLD", "old")
+        tracer.set_task_status("OLD", "closed")
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'",
+            (old_ms,),
+        )
+        tracer.conn.commit()
+
+        # Insert more than 10,000 audit events for the old session
+        # (we use a direct INSERT for speed rather than log_event)
+        ts = "2020-01-01T00:00:00+00:00"
+        tracer.conn.executemany(
+            "INSERT INTO audit_events (ts, session_id, tool, outcome) "
+            "VALUES (?, 'OLD', 'T', 'success')",
+            [(ts,)] * 10_005,
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+
+        count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM audit_events"
+        ).fetchone()[0]
+        # 10,000 most recent kept globally; 5 pruned
+        assert count == 10_000
+
+    def test_gc_protects_open_subtree(self, tracer: SlashTracer) -> None:
+        """Children of an open root task must be protected even if closed."""
+        tracer.open_task("ROOT", "open root")
+        tracer.open_task("CHILD", "child", parent_session_id="ROOT")
+        tracer.set_task_status("CHILD", "closed")
+
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "UPDATE tasks SET ended_at = ? WHERE session_id = 'CHILD'",
+            (old_ms,),
+        )
+        blob = tracer._store_blob(b"child data")
+        tracer.conn.execute(
+            "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
+            "VALUES ('CHILD', 'c.py', ?, ?)",
+            (blob, old_ms),
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+        count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM snapshots"
+        ).fetchone()[0]
+        assert count == 1  # child is in open root's subtree — protected
+
+
+# ---------------------------------------------------------------------------
+# Unit — diff_task edge cases
+# ---------------------------------------------------------------------------
+
+class TestDiffTaskEdgeCases:
+    def test_unknown_root_returns_empty_string(
+        self, tracer: SlashTracer
+    ) -> None:
+        """diff_task for a root that has no baseline should return ''."""
+        diff = tracer.diff_task("GHOST", "any.py")
+        assert diff == ""
+
+    def test_diff_includes_unified_diff_header(
+        self, tracer: SlashTracer
+    ) -> None:
+        """The diff output must include the a/ b/ file headers."""
+        tracer.open_task("S1", "task")
+        fp = "myfile.py"
+        pre_hash = tracer._store_blob(b"old\n")
+        now_ms = int(time.time() * 1000)
+        tracer.conn.execute(
+            "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
+            "VALUES ('S1', ?, ?, ?)",
+            (fp, pre_hash, now_ms),
+        )
+        tracer.conn.commit()
+        tracer.track_write("S1", fp, b"new\n")
+        diff = tracer.diff_task("S1", fp)
+        assert f"a/{fp}" in diff
+        assert f"b/{fp}" in diff
+
+
+# ---------------------------------------------------------------------------
+# Unit — recent_audit_events edge cases
+# ---------------------------------------------------------------------------
+
+class TestRecentAuditEventsEdgeCases:
+    def test_empty_db_returns_empty_list(self, tracer: SlashTracer) -> None:
+        assert tracer.recent_audit_events() == []
+
+    def test_session_scoped_empty_session(self, tracer: SlashTracer) -> None:
+        """Scoped query for an unknown session_id should return empty list."""
+        assert tracer.recent_audit_events(session_id="GHOST") == []
+
+    def test_default_limit_is_20(self, tracer: SlashTracer) -> None:
+        """Default limit should cap results at 20."""
+        tracer.open_task("S1", "task")
+        for i in range(30):
+            tracer.log_event("S1", f"T{i}", {}, "success")
+        evs = tracer.recent_audit_events()
+        assert len(evs) == 20
+
+    def test_event_reason_field_populated_on_denial(
+        self, tracer: SlashTracer
+    ) -> None:
+        tracer.open_task("S1", "task")
+        tracer.log_event("S1", "Bash", {}, "denied", reason="blocked by policy")
+        ev = tracer.recent_audit_events(limit=1)[0]
+        assert ev["reason"] == "blocked by policy"
+
+    def test_event_input_none_for_read_tools(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.log_event("S1", "Grep", {"pattern": "foo"}, "success")
+        ev = tracer.recent_audit_events(limit=1)[0]
+        assert ev["input"] is None

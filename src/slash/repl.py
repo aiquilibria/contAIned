@@ -352,8 +352,16 @@ async def _run_repl(root: Path, verbosity: str) -> None:
     session.  ``/exit``, ``/quit``, or Ctrl-D exit the loop cleanly.
     """
     click.echo(
-        click.style("slash repl", fg="cyan", bold=True)
-        + "  —  type /help for built-in commands, Ctrl-D to exit\n"
+        click.style("slash⚡", fg="green", bold=True)
+        + "\n"
+        + click.style(
+            "  AI coding agent — powered by Claude.  "
+            "All tool calls are policy-checked before execution.\n"
+            "  Type a task to get started, /help for commands, or Ctrl-D to exit.",
+            fg="white",
+            dim=True,
+        )
+        + "\n"
     )
 
     # ── Startup: surface pending reviews and stale open tasks ─────────────────
@@ -378,7 +386,7 @@ async def _run_repl(root: Path, verbosity: str) -> None:
                 try:
                     click.echo()
                     line = await anyio.to_thread.run_sync(
-                        lambda: prompt_session.prompt(HTML("<ansigreen><b>slash⚡ </b></ansigreen>"))
+                        lambda: prompt_session.prompt(HTML("<ansigreen><b>⚡ </b></ansigreen>"))
                     )
                 except (EOFError, KeyboardInterrupt):
                     click.echo()  # newline after ^D / ^C

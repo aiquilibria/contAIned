@@ -397,9 +397,6 @@ def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> No
 def _build_manifest(
     runtime_mode: str,
     docker_config: dict | None,
-    audit_enabled: bool,
-    git_mutations_action: str,
-    rate_limiting_enabled: bool,
     model: str,
 ) -> str:
     """Return a YAML string for the complete manifest based on wizard choices."""
@@ -423,17 +420,16 @@ def _build_manifest(
                 "destructive":          "block",
                 "privilege_escalation": "block",
                 "network_exfiltration": "block",
-                "git_mutations":        git_mutations_action,
+                "git_mutations":        "escalate",
                 "package_publish":      "block",
             },
-            "audit": {"enabled": audit_enabled},
+            "audit": {"enabled": True},
             "qa": {
                 "syntax_check": True,
                 "lint_check":   True,
                 "format_check": True,
                 "type_check":   True,
             },
-            "rate_limiting": {"enabled": rate_limiting_enabled},
         },
         "agent": {
             "model":     model,
@@ -517,24 +513,16 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
 
         # ── Phase 3: Manifest options ─────────────────────────────────────────
         console.print()
-        audit_enabled       = click.confirm("? Enable audit logging?", default=True)
-        prevent_git_push    = click.confirm("? Prevent git push / git push --force?", default=True)
-        _protect_slash      = click.confirm(
-            "? Protect .slash/ directory?",
-            default=True,
-        )  # always enforced by restrict_writes.py; prompt is informational
-        rate_limiting       = click.confirm(
-            "? Enable rate limiting on expensive tools?", default=False
-        )
+        console.print("  [dim]Audit logging:          always on[/dim]")
+        console.print("  [dim]git push / --force:     requires escalation[/dim]")
+        console.print("  [dim].slash/ protection:     always enforced[/dim]")
+        console.print()
         model               = click.prompt("? Default model", default="claude-sonnet-4-6")
         console.print()
 
         manifest_content = _build_manifest(
             runtime_mode=runtime_mode,
             docker_config=docker_config,
-            audit_enabled=audit_enabled,
-            git_mutations_action="block" if prevent_git_push else "allow",
-            rate_limiting_enabled=rate_limiting,
             model=model,
         )
 
@@ -584,8 +572,8 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
     else:
         console.print("\n[bold]Workspace initialised.[/bold]")
 
-    console.print("  slash run \"<your task here>\"")
-    console.print("  slash repl\n")
+    console.print("  slash run \"<your task here>\"  # For one-time tasks")
+    console.print("  slash  # For REPL\n")
 
 
 # ── update ────────────────────────────────────────────────────────────────────

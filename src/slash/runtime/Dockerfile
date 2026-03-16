@@ -1,8 +1,8 @@
-FROM debian:bookworm-slim
+FROM python:3.13-slim
 
 # Install runtimes and tools the agent may legitimately use
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 nodejs npm git curl bash ca-certificates \
+    nodejs npm git curl bash ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv for fast Python package management
@@ -10,7 +10,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Install slash from the distributed package
 COPY . /opt/slash
-RUN uv pip install --system --python python3 --no-cache --break-system-packages /opt/slash
+RUN uv pip install --system --python python3.13 --no-cache --break-system-packages /opt/slash
 
 # Create a non-root user whose UID/GID matches the host operator.
 # The GID may already exist in the base image (e.g., macOS staff group is 20,

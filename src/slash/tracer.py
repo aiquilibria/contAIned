@@ -110,7 +110,11 @@ class SlashTracer:
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
+        # timeout=30 sets the C-level busy-wait on connect(); the pragma then
+        # ensures the same limit applies to all subsequent statements on this
+        # connection, including WAL writes from concurrent threads/processes.
+        self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
+        self.conn.execute("PRAGMA busy_timeout=30000")
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self._init_schema()
@@ -121,8 +125,15 @@ class SlashTracer:
 
     def _init_schema(self) -> None:
         """Create all tables and indexes if they do not already exist."""
-        self.conn.executescript(_SCHEMA_SQL)
-        self.conn.commit()
+        # executescript() bypasses the connection's busy_timeout and issues its
+        # own implicit BEGIN, which can raise "database is locked" under
+        # concurrent initialisation before WAL mode is fully established.
+        # Splitting into individual statements inside a regular with-block lets
+        # the C-level timeout (set on connect) handle any brief write contention.
+        statements = [s.strip() for s in _SCHEMA_SQL.split(";") if s.strip()]
+        with self.conn:
+            for stmt in statements:
+                self.conn.execute(stmt)
 
     # ------------------------------------------------------------------
     # Blob store (internal)

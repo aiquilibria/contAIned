@@ -92,10 +92,6 @@ SETTINGS_JSON = """\
           {{
             "type": "command",
             "command": "python3 .slash/hooks/qa.py"
-          }},
-          {{
-            "type": "command",
-            "command": "python3 .slash/hooks/summarizer.py"
           }}
         ]
       }}
@@ -152,13 +148,14 @@ policy:
 
   # ── Bash command restrictions ────────────────────────────────────────────────
   bash:
-    destructive:          block  # rm / rm -rf
-    privilege_escalation: block  # sudo
-    network_exfiltration: block  # curl / wget / nc / ncat
-    git_mutations:        block  # git commit / reset / rebase / merge / push
-    package_publish:      block  # npm publish / pip upload / twine upload
+    destructive:          block     # rm / rm -rf
+    privilege_escalation: block     # sudo
+    network_exfiltration: block     # curl / wget / nc / ncat
+    git_mutations:        escalate  # git push / push --force → operator approval required
+    package_publish:      block     # npm publish / pip upload / twine upload
 
   # ── Audit logging ─────────────────────────────────────────────────────────────
+  # Always enabled — cannot be disabled.
   audit:
     enabled: true
     jsonl_export: false  # set true to also write .slash/audit/pipeline.jsonl
@@ -170,12 +167,8 @@ policy:
     format_check:       true   # ruff format --check
     type_check:         true   # pyright
     test_check:         true   # pytest tests/
-    coverage_check:     false  # pytest --cov --cov-fail-under (requires pytest-cov)
+    coverage_check:     true   # pytest --cov --cov-fail-under (requires pytest-cov)
     coverage_threshold: 80     # minimum % line coverage when coverage_check is true
-
-  # ── Rate limiting ─────────────────────────────────────────────────────────────
-  rate_limiting:
-    enabled: false       # limit expensive tool calls (reserved for future hooks)
 
 # ── Agent model settings ──────────────────────────────────────────────────────
 agent:
@@ -240,11 +233,8 @@ _DEFAULTS = {
         "format_check":       True,
         "type_check":         True,
         "test_check":         True,
-        "coverage_check":     False,
+        "coverage_check":     True,
         "coverage_threshold": 80,
-    },
-    "rate_limiting": {
-        "enabled": False,
     },
 }
 
@@ -1267,10 +1257,10 @@ Flow:
   3. Build action log from recent audit events (Bash, Agent, denied calls).
   4. Store JSON summary in tasks.summary; set status = pending_review.
   5. Render rich-formatted summary to stderr (terminal visible to operator).
-  6. Prompt operator: [a]pprove / [d]ismiss / [c]ontinue.
-     Approve  → set status = closed,    exit 0 (agent stops cleanly).
-     Dismiss  → set status = abandoned, exit 0.
-     Continue → print JSON decision:block to stdout, exit 0 (agent gets one more turn).
+  6. Prompt operator: press Enter to approve, or type a follow-up instruction.
+     Enter (empty) → set status = closed,    exit 0 (agent stops cleanly).
+     Any text      → set status = open, print JSON decision:block to stdout
+                     (agent gets one more turn with that text as instruction).
 """
 import json
 import sys
@@ -1327,6 +1317,29 @@ try:
 except Exception:
     touched_files = []
 
+# Build a lookup of write-tool audit events per file path (for reasons).
+try:
+    all_audit = tracer.recent_audit_events(session_id, limit=500)
+    _write_events_by_file: dict = {}
+    for _ev in reversed(all_audit):
+        if _ev["tool"] in ("Write", "Edit", "MultiEdit") and _ev.get("input"):
+            _fp = _ev["input"].get("file_path") or ""
+            if _fp:
+                _write_events_by_file.setdefault(_fp, []).append(_ev)
+            # MultiEdit may touch multiple files
+            for _mfp in (_ev["input"].get("file_paths") or []):
+                _write_events_by_file.setdefault(_mfp, []).append(_ev)
+except Exception:
+    _write_events_by_file = {}
+
+# Resolve session tree once for baseline lookups.
+try:
+    _tree_ids = tracer.tree_session_ids(session_id)
+    _tree_placeholders = ",".join("?" * len(_tree_ids)) if _tree_ids else "\'__none__\'"
+except Exception:
+    _tree_ids = []
+    _tree_placeholders = "\'__none__\'"
+
 file_diffs: list[dict] = []
 for file_path in touched_files:
     try:
@@ -1335,11 +1348,35 @@ for file_path in touched_files:
             continue
         lines_added   = sum(1 for ln in diff_text.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
         lines_removed = sum(1 for ln in diff_text.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+
+        # Determine change type from the earliest baseline pre_hash.
+        change_type = "modified"
+        try:
+            if _tree_ids:
+                _bl = tracer.conn.execute(
+                    f"SELECT pre_hash FROM baselines WHERE file_path = ? AND session_id IN ({_tree_placeholders}) ORDER BY captured_at ASC LIMIT 1",
+                    [file_path, *_tree_ids],
+                ).fetchone()
+                if _bl is not None:
+                    change_type = "new file" if _bl[0] is None else "modified"
+        except Exception:
+            pass
+
+        # Build a short human-readable reason from write-tool events for this file.
+        _file_write_evs = _write_events_by_file.get(file_path, [])
+        if _file_write_evs:
+            _tools_used = list(dict.fromkeys(e["tool"] for e in _file_write_evs))
+            reason = ", ".join(t.lower() for t in _tools_used)
+        else:
+            reason = change_type
+
         file_diffs.append({
             "file_path":     file_path,
             "diff":          diff_text,
             "lines_added":   lines_added,
             "lines_removed": lines_removed,
+            "change_type":   change_type,
+            "reason":        reason,
         })
     except Exception:
         pass
@@ -1368,7 +1405,13 @@ except Exception:
 # ── Assemble and store summary ─────────────────────────────────────────────────
 summary = {
     "file_changes": [
-        {"file_path": d["file_path"], "lines_added": d["lines_added"], "lines_removed": d["lines_removed"]}
+        {
+            "file_path":   d["file_path"],
+            "lines_added": d["lines_added"],
+            "lines_removed": d["lines_removed"],
+            "change_type": d["change_type"],
+            "reason":      d["reason"],
+        }
         for d in file_diffs
     ],
     "action_log": action_log,
@@ -1405,12 +1448,37 @@ try:
         header.append("\\n[!] " + str(len(open_children)) + " sub-agent(s) still open — diffs may be incomplete", style="yellow")
     con.print(Panel(header, border_style="blue", expand=False))
 
-    # File changes
+    # ── File Changes — git-status-like format ──────────────────────────────────
     if file_diffs:
-        con.print("\\n[bold] File Changes[/bold]  [dim](" + str(len(file_diffs)) + " file(s))[/dim]\\n")
+        con.print("\\n[bold] Changes[/bold]  [dim](" + str(len(file_diffs)) + " file(s))[/dim]\\n")
+
+        # Status letter mapping
+        _STATUS_LABEL = {"new file": "A", "modified": "M", "deleted": "D"}
+        _STATUS_STYLE = {"new file": "green", "modified": "yellow", "deleted": "red"}
+
         for fd in file_diffs:
-            stat_str = "[green]+" + str(fd["lines_added"]) + "[/green]  [red]-" + str(fd["lines_removed"]) + "[/red]"
-            con.print("  [bold cyan]" + fd["file_path"] + "[/bold cyan]  " + stat_str)
+            ct    = fd.get("change_type", "modified")
+            label = _STATUS_LABEL.get(ct, "M")
+            style = _STATUS_STYLE.get(ct, "yellow")
+            stat_str = (
+                "[green]+" + str(fd["lines_added"]) + "[/green]"
+                "  [red]-" + str(fd["lines_removed"]) + "[/red]"
+            )
+            reason_str = fd.get("reason", "")
+            # Print the status line: "  M  path/to/file  +N -N  (reason)"
+            status_line = (
+                "  [" + style + "][bold]" + label + "[/bold][/" + style + "]"
+                "  [bold cyan]" + fd["file_path"] + "[/bold cyan]"
+                "  " + stat_str
+            )
+            if reason_str and reason_str != ct:
+                status_line += "  [dim](" + reason_str + ")[/dim]"
+            con.print(status_line)
+
+        # Print the diffs below the status listing
+        con.print("")
+        for fd in file_diffs:
+            con.print("[dim]──[/dim] [bold cyan]" + fd["file_path"] + "[/bold cyan]")
             diff_text = Text()
             for line in fd["diff"].splitlines()[:200]:  # cap at 200 lines per file
                 if line.startswith("+++") or line.startswith("---"):
@@ -1428,6 +1496,41 @@ try:
             con.print(diff_text)
     else:
         con.print("\\n[dim] No file changes recorded.[/dim]\\n")
+
+    # ── Task Completion ────────────────────────────────────────────────────────
+    if file_diffs:
+        _new_files  = [fd for fd in file_diffs if fd.get("change_type") == "new file"]
+        _mod_files  = [fd for fd in file_diffs if fd.get("change_type") == "modified"]
+        _del_files  = [fd for fd in file_diffs if fd.get("change_type") == "deleted"]
+        _parts = []
+        if _new_files:
+            _parts.append(str(len(_new_files)) + " file(s) created")
+        if _mod_files:
+            _parts.append(str(len(_mod_files)) + " file(s) modified")
+        if _del_files:
+            _parts.append(str(len(_del_files)) + " file(s) deleted")
+        _total_added   = sum(fd["lines_added"]   for fd in file_diffs)
+        _total_removed = sum(fd["lines_removed"] for fd in file_diffs)
+        _change_summary = ", ".join(_parts) if _parts else str(len(file_diffs)) + " file(s) changed"
+        con.print("[bold] Task Completion[/bold]\\n")
+        con.print(
+            "  The task [dim]\\"" + task_prompt[:80] + "\\"[/dim] is complete.\\n"
+            "  [green]" + _change_summary + "[/green]  "
+            "([green]+" + str(_total_added) + "[/green] / [red]-" + str(_total_removed) + "[/red] lines total).\\n"
+        )
+        if _new_files:
+            con.print("  [bold]New files:[/bold]")
+            for fd in _new_files:
+                con.print("    [green]" + fd["file_path"] + "[/green]")
+        if _mod_files:
+            con.print("  [bold]Modified:[/bold]")
+            for fd in _mod_files:
+                con.print("    [yellow]" + fd["file_path"] + "[/yellow]  [dim](" + fd.get("reason", "") + ")[/dim]")
+        if _del_files:
+            con.print("  [bold]Deleted:[/bold]")
+            for fd in _del_files:
+                con.print("    [red]" + fd["file_path"] + "[/red]")
+        con.print("")
 
     # Action log
     if action_log:
@@ -1460,44 +1563,75 @@ try:
                 con.print("  [red]✗ " + tool_name + " denied: " + rsn + "[/red]")
         con.print("")
 
-    # Operator prompt
-    con.print("[bold]Review:[/bold]  \\[a] Approve   \\[d] Dismiss   \\[c] Continue", end="  ")
+    # Operator prompt — single input line.
+    # Enter alone → approve.  Any text → continue with that as instruction.
+    con.print("")
+    con.print("[bold yellow]⏸  Task complete — press Enter to approve, or type a follow-up instruction:[/bold yellow]")
+    con.print("[dim]> [/dim]", end="")
 
 except Exception:
     # Fall back to plain output if rich is unavailable.
     print("\\n=== Task Review: " + task_prompt[:80] + " ===", file=sys.stderr)
-    print(str(len(file_diffs)) + " file(s) changed.", file=sys.stderr)
-    print("Review: [a] Approve  [d] Dismiss  [c] Continue", end="  ", file=sys.stderr)
+    if file_diffs:
+        print("\\nChanges (" + str(len(file_diffs)) + " file(s)):", file=sys.stderr)
+        _ST = {"new file": "A", "modified": "M", "deleted": "D"}
+        for fd in file_diffs:
+            _lbl = _ST.get(fd.get("change_type", "modified"), "M")
+            _rsn = fd.get("reason", "")
+            _rsn_str = "  (" + _rsn + ")" if _rsn and _rsn != fd.get("change_type") else ""
+            print(
+                "  " + _lbl + "  " + fd["file_path"]
+                + "  +" + str(fd["lines_added"]) + " -" + str(fd["lines_removed"])
+                + _rsn_str,
+                file=sys.stderr,
+            )
+        # Task completion summary
+        _nc = sum(1 for fd in file_diffs if fd.get("change_type") == "new file")
+        _mc = sum(1 for fd in file_diffs if fd.get("change_type") == "modified")
+        _dc = sum(1 for fd in file_diffs if fd.get("change_type") == "deleted")
+        _parts = []
+        if _nc: _parts.append(str(_nc) + " created")
+        if _mc: _parts.append(str(_mc) + " modified")
+        if _dc: _parts.append(str(_dc) + " deleted")
+        print("\\nTask complete: " + ", ".join(_parts or [str(len(file_diffs)) + " changed"]) + ".", file=sys.stderr)
+    else:
+        print("No file changes recorded.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("⏸  Task complete — press Enter to approve, or type a follow-up instruction:", file=sys.stderr)
+    print("> ", end="", file=sys.stderr)
 
-# ── Interactive operator prompt ────────────────────────────────────────────────
-choice = ""
-try:
-    # Read from /dev/tty so we get the terminal even when stdin is the hook pipe.
+# ── Read operator response from terminal ──────────────────────────────────────
+# /dev/tty bypasses the hook\'s stdin pipe and reads directly from the terminal.
+def _tty_readline() -> str:
+    """Read one line from /dev/tty (bypasses the hook stdin pipe)."""
     with open("/dev/tty") as tty:
-        tty_line = tty.readline().strip().lower()
-        choice   = tty_line[:1] if tty_line else ""
+        return tty.readline().strip()
+
+response = ""
+non_interactive = False
+try:
+    # Flush stderr so the prompt is visible before we block on input.
+    sys.stderr.flush()
+    response = _tty_readline()
 except Exception:
-    # Non-interactive environment (CI, pipe) — default to approve.
-    choice = "a"
+    # /dev/tty unavailable — CI / non-interactive environment: auto-approve.
+    non_interactive = True
+    response = ""
 
 print("", file=sys.stderr)  # newline after the inline prompt
 
-if choice == "d":
+# ── Continue — operator typed a follow-up instruction ─────────────────────────
+if response and not non_interactive:
+    print("  Continuing with follow-up instruction.", file=sys.stderr)
     try:
-        tracer.set_task_status(session_id, "abandoned")
+        tracer.set_task_status(session_id, "open")
     except Exception:
         pass
+    print(json.dumps({"decision": "block", "reason": "Operator follow-up: " + response}))
     sys.exit(0)
 
-if choice == "c":
-    try:
-        tracer.set_task_status(session_id, "open")   # revert to open for the next turn
-    except Exception:
-        pass
-    print(json.dumps({"decision": "block", "reason": "Operator requested one more agent turn."}))
-    sys.exit(0)
-
-# Default: approve (also covers any unrecognised key).
+# ── Approve — Enter with no text (or non-interactive) ─────────────────────────
+print("  Approved — task closed.", file=sys.stderr)
 try:
     tracer.set_task_status(session_id, "closed")
 except Exception:
