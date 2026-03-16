@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING
 import anyio
 import anyio.to_thread
 import click
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
 
 if TYPE_CHECKING:
     from claude_agent_sdk import ClaudeSDKClient
@@ -21,8 +23,10 @@ from rich.text import Text
 
 from .runner import (
     _build_client,
+    _load_manifest,
     _load_verbosity_config,
     _print_result_summary,
+    _print_runtime_banner,
     _render_message,
 )
 
@@ -97,6 +101,9 @@ async def _run_repl(root: Path, verbosity: str) -> None:
         + "  —  type /help for built-in commands, Ctrl-D to exit\n"
     )
 
+    # prompt_toolkit session — persists history across /new resets
+    prompt_session: PromptSession[str] = PromptSession()
+
     # Outer loop: each iteration represents one "session" (reset by /new).
     while True:
         async with _build_client(root) as client:
@@ -106,8 +113,9 @@ async def _run_repl(root: Path, verbosity: str) -> None:
             while True:
                 # ── read input ───────────────────────────────────────────────
                 try:
+                    click.echo()
                     line = await anyio.to_thread.run_sync(
-                        lambda: input(click.style("slash⚡ ", fg="green", bold=True))
+                        lambda: prompt_session.prompt(HTML("<ansigreen><b>slash⚡ </b></ansigreen>"))
                     )
                 except (EOFError, KeyboardInterrupt):
                     click.echo()  # newline after ^D / ^C
@@ -169,6 +177,29 @@ async def _run_repl(root: Path, verbosity: str) -> None:
 
 
 def start_repl(root: Path, verbosity: str | None) -> None:
-    """Entry point called from the CLI."""
+    """Entry point called from the CLI.
+
+    Reads ``runtime.mode`` from the manifest.  When the mode is ``docker``,
+    delegates execution to :class:`~slash.docker_runner.DockerRunner`; the
+    REPL session runs inside an isolated container with a TTY.  In local mode
+    the REPL runs in-process as before.
+    """
+    manifest = _load_manifest(root)
+    runtime  = manifest.get("runtime", {})
+
+    # SLASH_FORCE_LOCAL is set by DockerRunner when it launches this process
+    # inside a container.  It prevents re-entering docker mode when the
+    # in-container slash reads the workspace manifest (which still says
+    # mode: docker on the host side).
+    force_local = os.environ.get("SLASH_FORCE_LOCAL") == "1"
+
+    if not force_local and runtime.get("mode") == "docker":
+        from slash.docker_runner import DockerRunner
+        _print_runtime_banner(root)
+        docker_config = runtime.get("docker", {})
+        runner = DockerRunner(docker_config, root)
+        runner.run_repl(verbosity=verbosity)
+        return
+
     resolved_verbosity = verbosity or _load_verbosity_config(root)
     anyio.run(_run_repl, root, resolved_verbosity)

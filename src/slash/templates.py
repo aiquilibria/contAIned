@@ -70,10 +70,10 @@ SETTINGS_JSON = """\
 POLICY_MANIFEST = """\
 # Slash policy manifest
 #
-# Two responsibilities:
-#   1. policy — configurable enforcement settings read by the hook scripts.
-#      All keys have defaults that reproduce the original hardcoded behaviour.
-#   2. agent config — verbosity and thinking settings for slash run/repl.
+# Three sections:
+#   1. runtime — controls whether slash runs locally or inside a Docker container.
+#   2. policy  — enforcement settings read by the hook scripts.
+#   3. agent   — model, verbosity, and thinking settings for slash run/repl.
 #
 # Action values accepted by policy settings:
 #   block    — deny the operation outright; agent receives a clear reason
@@ -82,6 +82,19 @@ POLICY_MANIFEST = """\
 #
 # Note: writes to .slash/ are always denied regardless of policy settings —
 # control-plane protection is hardcoded and not configurable.
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+# Set by `slash init`. Do not edit by hand once slash init has written this.
+#   mode: local   — hook-based policy only (default)
+#   mode: docker  — kernel-enforced filesystem isolation + hook policy
+runtime:
+  mode: local
+  docker:
+    image: slash:latest
+    memory: 2g
+    cpus: 2
+    network: slash-net
+    agent_config_volume: slash-agent-config
 
 policy:
 
@@ -93,6 +106,8 @@ policy:
     safe_variants: allow    # .env.example / .env.sample / .env.template exemption
 
   # ── Workspace boundary ───────────────────────────────────────────────────────
+  # In Docker mode these checks are redundant (Docker enforces the boundary at
+  # the kernel level), but they remain in the manifest for local-mode workspaces.
   workspace:
     reads:      escalate  # Read / Grep outside the project root → operator approval
     writes:     block     # Write / Edit / MultiEdit outside the project root
@@ -117,8 +132,14 @@ policy:
     format_check: true   # ruff format --check
     type_check:   true   # pyright
 
+  # ── Rate limiting ─────────────────────────────────────────────────────────────
+  rate_limiting:
+    enabled: false       # limit expensive tool calls (reserved for future hooks)
+
 # ── Agent model settings ──────────────────────────────────────────────────────
 agent:
+  # Model passed to the Claude Agent SDK. Leave blank to use the SDK default.
+  model: claude-sonnet-4-6
   # Output verbosity during `slash run`:
   #   verbose  — full streaming output: thinking, text, every tool call and result (default)
   #   concise  — single updating status line showing the current tool call
@@ -133,10 +154,14 @@ POLICY_LOADER_HOOK = '''\
 #!/usr/bin/env python3
 """Shared policy loader for slash hooks.
 
-Reads the policy: section from .slash/policy/manifest.yaml and merges it
-with built-in defaults so that every key is always present.  If the manifest
-cannot be read for any reason the defaults are returned unchanged — hooks
-degrade gracefully to the original hardcoded behaviour.
+Reads the policy: and runtime: sections from .slash/manifest.yaml and merges
+them with built-in defaults so that every key is always present.  If the
+manifest cannot be read for any reason the defaults are returned unchanged —
+hooks degrade gracefully to the original hardcoded behaviour.
+
+Manifest location:
+  Primary:   .slash/manifest.yaml          (new path, written by slash init)
+  Fallback:  .slash/policy/manifest.yaml   (legacy path — compatibility shim)
 
 Action values: "block" | "allow" | "escalate"
   block    — deny the operation; hook exits 2 with a reason on stderr
@@ -173,6 +198,9 @@ _DEFAULTS = {
         "format_check": True,
         "type_check":   True,
     },
+    "rate_limiting": {
+        "enabled": False,
+    },
 }
 
 
@@ -187,6 +215,18 @@ def _deep_merge(base, override):
     return result
 
 
+def _find_manifest(cwd="."):
+    """Return the manifest Path, preferring the new location with fallback."""
+    root = Path(cwd)
+    new_path = root / ".slash" / "manifest.yaml"
+    if new_path.exists():
+        return new_path
+    old_path = root / ".slash" / "policy" / "manifest.yaml"
+    if old_path.exists():
+        return old_path
+    return new_path  # return new path even if missing — caller handles FileNotFoundError
+
+
 def load_policy(cwd="."):
     """Return the fully-merged policy dict for the project rooted at *cwd*.
 
@@ -195,12 +235,27 @@ def load_policy(cwd="."):
     """
     try:
         import yaml
-        manifest_path = Path(cwd) / ".slash" / "policy" / "manifest.yaml"
+        manifest_path = _find_manifest(cwd)
         with manifest_path.open() as fh:
             manifest = yaml.safe_load(fh) or {}
         return _deep_merge(_DEFAULTS, manifest.get("policy", {}))
     except Exception:
         return dict(_DEFAULTS)
+
+
+def get_runtime_mode(cwd="."):
+    """Return the runtime mode: \'local\' or \'docker\'.
+
+    Returns \'local\' if the manifest is unreadable or the key is absent.
+    """
+    try:
+        import yaml
+        manifest_path = _find_manifest(cwd)
+        with manifest_path.open() as fh:
+            manifest = yaml.safe_load(fh) or {}
+        return manifest.get("runtime", {}).get("mode", "local")
+    except Exception:
+        return "local"
 '''
 
 RESTRICT_WRITES_HOOK = '''\
@@ -352,7 +407,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _policy import load_policy  # noqa: E402
+from _policy import get_runtime_mode, load_policy  # noqa: E402
 
 
 SECRET_FILE_PATTERNS = [
@@ -408,10 +463,11 @@ try:
 except json.JSONDecodeError:
     sys.exit(0)
 
-cwd        = event.get("cwd", ".")
-policy     = load_policy(cwd)
-tool       = event.get("tool_name", "")
-tool_input = event.get("tool_input", {})
+cwd          = event.get("cwd", ".")
+policy       = load_policy(cwd)
+runtime_mode = get_runtime_mode(cwd)
+tool         = event.get("tool_name", "")
+tool_input   = event.get("tool_input", {})
 
 if tool == "Read":
     target = tool_input.get("file_path", "")
@@ -442,7 +498,9 @@ if matches_secret_pattern(target):
     sys.exit(0)  # allow or escalate: pass through
 
 # ── Check 2: workspace boundary (Read and Grep only — Glob patterns are virtual) ──
-if tool in ("Read", "Grep"):
+# Skipped in Docker mode — the workspace boundary is enforced by the container
+# runtime at the kernel level; path-string analysis is redundant.
+if tool in ("Read", "Grep") and runtime_mode != "docker":
     workspace = Path(cwd).resolve()
     try:
         Path(target).resolve().relative_to(workspace)
@@ -487,7 +545,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _policy import load_policy  # noqa: E402
+from _policy import get_runtime_mode, load_policy  # noqa: E402
 
 
 SECRET_FILE_PATTERNS = [
@@ -583,8 +641,9 @@ command = event.get("tool_input", {}).get("command", "")
 if not command:
     sys.exit(0)
 
-cwd    = event.get("cwd", ".")
-policy = load_policy(cwd)
+cwd          = event.get("cwd", ".")
+policy       = load_policy(cwd)
+runtime_mode = get_runtime_mode(cwd)
 
 # ── Check 1: secret file reads ────────────────────────────────────────────────
 if READ_CMD_RE.match(command):
@@ -597,16 +656,19 @@ if READ_CMD_RE.match(command):
             )
 
 # ── Check 2: absolute paths outside workspace ─────────────────────────────────
-workspace = Path(cwd).resolve()
-for token in abs_path_tokens(command):
-    try:
-        Path(token).resolve().relative_to(workspace)
-    except ValueError:
-        enforce(
-            policy["workspace"]["bash_paths"], event, command,
-            f"Bash denied: \\'{token}\\' is outside the project workspace.\\n"
-            f"Bash commands may only reference paths within: {workspace}",
-        )
+# Skipped in Docker mode — the workspace boundary is enforced by the container
+# runtime at the kernel level; path-string analysis is redundant.
+if runtime_mode != "docker":
+    workspace = Path(cwd).resolve()
+    for token in abs_path_tokens(command):
+        try:
+            Path(token).resolve().relative_to(workspace)
+        except ValueError:
+            enforce(
+                policy["workspace"]["bash_paths"], event, command,
+                f"Bash denied: \\'{token}\\' is outside the project workspace.\\n"
+                f"Bash commands may only reference paths within: {workspace}",
+            )
 
 # ── Checks 3–7: bash command rules ────────────────────────────────────────────
 for rule_key, patterns, reason in _BASH_RULES:

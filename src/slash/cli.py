@@ -46,7 +46,19 @@ def main() -> None:
     default=".",
     type=click.Path(file_okay=False, writable=True, resolve_path=True),
 )
-def init(directory: str) -> None:
+@click.option(
+    "--force", "-f",
+    is_flag=True,
+    default=False,
+    help="Re-run the setup wizard even if already initialised.",
+)
+@click.option(
+    "--rebuild", "-r",
+    is_flag=True,
+    default=False,
+    help="Force a full Docker image rebuild even if the image is already up to date.",
+)
+def init(directory: str, force: bool, rebuild: bool) -> None:
     """
     Initialise a slash workspace.
 
@@ -55,14 +67,18 @@ def init(directory: str) -> None:
     Detects git and updates .gitignore automatically.
 
     To refresh hook files after upgrading slash, use: slash update
+    To re-run the setup wizard (e.g. to switch to Docker), use: slash init --force
+    To force a Docker image rebuild without re-running the wizard, use: slash init --rebuild
 
     \b
     Examples:
       slash init            # initialise in current directory
       slash init ./myrepo   # initialise in a specific directory
+      slash init --force    # re-run setup wizard (reconfigure runtime, docker, etc.)
+      slash init --rebuild  # force-rebuild the Docker image (docker mode only)
     """
     from slash.init import run_init
-    run_init(Path(directory))
+    run_init(Path(directory), force=force, rebuild=rebuild)
 
 
 # ── update ────────────────────────────────────────────────────────────────────
@@ -82,7 +98,7 @@ def update(dir: str | None) -> None:
     bundled in the currently installed slash package.
 
     Safe to run after upgrading slash. Never touches user-editable files:
-      .slash/policy/manifest.yaml
+      .slash/manifest.yaml
 
     \b
     Examples:
@@ -108,7 +124,8 @@ def run(task: str, dir: str | None) -> None:
     Run the agent on a TASK.
 
     All tool calls are governed by the hooks in .slash/hooks/ and the policy
-    in .slash/policy/manifest.yaml.
+    in .slash/manifest.yaml.  In Docker mode, filesystem isolation is also
+    enforced by the container runtime (kernel namespaces + bind mounts).
 
     \b
     Examples:

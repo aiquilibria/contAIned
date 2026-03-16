@@ -2,10 +2,15 @@
 slash run — invoke the agent on a single task.
 
 Validates that the workspace is initialised, then starts the Agent SDK.
-Agent config (verbosity, thinking) is read from ``.slash/policy/manifest.yaml``.
+Agent config (verbosity, thinking, model) is read from ``.slash/manifest.yaml``
+(falls back to ``.slash/policy/manifest.yaml`` for backwards compatibility).
 Policy is enforced entirely by the PreToolUse / PostToolUse / Stop hooks;
 the ``canUseTool`` callback handles ``AskUserQuestion`` interactively and
 prompts the operator for anything not already allowed by ``settings.json``.
+
+When ``runtime.mode`` is ``docker`` in the manifest, execution is delegated
+to :class:`slash.docker_runner.DockerRunner` instead of running the agent
+in-process.
 """
 from __future__ import annotations
 
@@ -31,7 +36,7 @@ console = Console()
 
 def _load_thinking_config(root: Path) -> ThinkingConfigEnabled | None:
     """
-    Read ``agent.thinking`` from ``.slash/policy/manifest.yaml`` and return a
+    Read ``agent.thinking`` from ``.slash/manifest.yaml`` and return a
     :class:`ThinkingConfigEnabled` instance when thinking is enabled, or ``None``.
     """
     from claude_agent_sdk import ThinkingConfigEnabled
@@ -45,7 +50,7 @@ def _load_thinking_config(root: Path) -> ThinkingConfigEnabled | None:
 
 def _load_verbosity_config(root: Path) -> str:
     """
-    Read ``agent.verbosity`` from ``.slash/policy/manifest.yaml``.
+    Read ``agent.verbosity`` from ``.slash/manifest.yaml``.
 
     Returns one of:
       - ``"verbose"``  — full streaming output (tool calls, results, thinking); **default**
@@ -58,16 +63,33 @@ def _load_verbosity_config(root: Path) -> str:
     return value
 
 
+def _load_model_config(root: Path) -> str | None:
+    """
+    Read ``agent.model`` from ``.slash/manifest.yaml``.
+
+    Returns the model string (e.g. ``"claude-sonnet-4-6"``), or ``None`` if not
+    set — in which case the Agent SDK uses its own default.
+    """
+    return _load_manifest(root).get("agent", {}).get("model") or None
+
+
 def _check_initialised(root: Path) -> list[str]:
     """Return a list of missing paths that indicate init has not been run."""
     required = [
         root / ".slash" / "hooks" / "restrict_writes.py",
         root / ".slash" / "hooks" / "audit.py",
         root / ".slash" / "hooks" / "qa.py",
-        root / ".slash" / "policy" / "manifest.yaml",
         root / ".claude" / "settings.json",
     ]
-    return [str(p.relative_to(root)) for p in required if not p.exists()]
+    missing = [str(p.relative_to(root)) for p in required if not p.exists()]
+
+    # Accept either new or legacy manifest path
+    manifest_new = root / ".slash" / "manifest.yaml"
+    manifest_old = root / ".slash" / "policy" / "manifest.yaml"
+    if not manifest_new.exists() and not manifest_old.exists():
+        missing.append(".slash/manifest.yaml")
+
+    return missing
 
 
 def _tool_input_summary(name: str, input: dict[str, Any]) -> str:
@@ -89,8 +111,16 @@ def _tool_input_summary(name: str, input: dict[str, Any]) -> str:
 
 
 def _load_manifest(root: Path) -> dict[str, Any]:
-    """Load and return the parsed manifest, or an empty dict if missing."""
-    manifest_path = root / ".slash" / "policy" / "manifest.yaml"
+    """
+    Load and return the parsed manifest, or an empty dict if missing.
+
+    Checks ``.slash/manifest.yaml`` first (new location), then falls back to
+    ``.slash/policy/manifest.yaml`` (legacy location) for backwards
+    compatibility with workspaces initialised before the path migration.
+    """
+    new_path = root / ".slash" / "manifest.yaml"
+    old_path = root / ".slash" / "policy" / "manifest.yaml"
+    manifest_path = new_path if new_path.exists() else old_path
     try:
         return yaml.safe_load(manifest_path.read_text()) or {}
     except FileNotFoundError:
@@ -209,6 +239,7 @@ def _build_client(root: Path) -> ClaudeSDKClient:
             interrupt=False,
         )
 
+    model = _load_model_config(root)
     options = ClaudeAgentOptions(
         setting_sources=["project"],
         allowed_tools=[
@@ -217,7 +248,10 @@ def _build_client(root: Path) -> ClaudeSDKClient:
         ],
         cwd=str(root),
 
-        # Extended thinking — config sourced from .slash/policy/manifest.yaml
+        # Model — sourced from agent.model in .slash/manifest.yaml
+        **({"model": model} if model else {}),
+
+        # Extended thinking — config sourced from .slash/manifest.yaml
         thinking=_load_thinking_config(root),
 
         # All policy enforcement lives in can_use_tool above.
@@ -376,6 +410,19 @@ def _print_result_summary(result_message: object, verbosity: str) -> None:
     console.print("\n")
 
 
+def _print_runtime_banner(root: Path) -> None:
+    """Print a short runtime info line when starting a session."""
+    manifest = _load_manifest(root)
+    runtime = manifest.get("runtime", {})
+    mode = runtime.get("mode", "local")
+    if mode == "docker":
+        image = runtime.get("docker", {}).get("image", "slash:latest")
+        console.print(f"[dim][slash] runtime: docker ({image})[/dim]")
+    else:
+        console.print("[dim][slash] runtime: local[/dim]")
+    console.print(f"[dim][slash] workspace: {root}[/dim]\n")
+
+
 async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose") -> None:
     """
     Stream agent output with verbosity controlled by the manifest's
@@ -429,6 +476,31 @@ async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose
 
 
 def run_task(prompt: str, root: Path) -> None:
-    """Entry point called from the CLI."""
+    """Entry point called from the CLI.
+
+    Reads ``runtime.mode`` from the manifest.  When the mode is ``docker``,
+    delegates execution to :class:`~slash.docker_runner.DockerRunner`; the
+    agent runs inside an isolated container and this process simply wraps the
+    ``docker run`` call.  In local mode the agent runs in-process as before.
+    """
+    manifest = _load_manifest(root)
+    runtime  = manifest.get("runtime", {})
+
+    # SLASH_FORCE_LOCAL is set by DockerRunner when it launches this process
+    # inside a container.  It prevents re-entering docker mode when the
+    # in-container slash reads the workspace manifest (which still says
+    # mode: docker on the host side).
+    import os
+    force_local = os.environ.get("SLASH_FORCE_LOCAL") == "1"
+
+    if not force_local and runtime.get("mode") == "docker":
+        from slash.docker_runner import DockerRunner
+        _print_runtime_banner(root)
+        docker_config = runtime.get("docker", {})
+        runner = DockerRunner(docker_config, root)
+        verbosity = _load_verbosity_config(root)
+        runner.run_run(prompt, verbosity=verbosity)
+        return
+
     verbosity = _load_verbosity_config(root)
     anyio.run(_run_task_streaming, prompt, root, verbosity)

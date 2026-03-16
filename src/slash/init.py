@@ -2,20 +2,26 @@
 slash init — scaffold a slash agent workspace in the current directory.
 
 What it does:
-  1. Initialises a git repo at the workspace root if one does not exist yet
-  2. Creates the .slash/ control-plane directory tree
-  3. Creates the .claude/ SDK config directory with settings.json
-  4. Writes CLAUDE.md with agent operating instructions
-  5. Creates or updates .gitignore with appropriate entries
-  6. Reports what was created and what was skipped (idempotent)
+  1. Runs an interactive wizard to choose a runtime (local or Docker)
+  2. Initialises a git repo at the workspace root if one does not exist yet
+  3. Creates the .slash/ control-plane directory tree
+  4. Creates the .claude/ SDK config directory with settings.json
+  5. Writes CLAUDE.md with agent operating instructions
+  6. Creates or updates .gitignore with appropriate entries
+  7. Reports what was created and what was skipped (idempotent)
 
 Use `slash update` to refresh hook files after upgrading.
 User-editable files (policy manifest only) are never overwritten.
+
+Manifest location: .slash/manifest.yaml  (new)
+  Legacy path     : .slash/policy/manifest.yaml  (supported via compat shim)
 """
+import os
 import stat
 import subprocess
 from pathlib import Path
 
+import click
 from rich.console import Console
 from rich.table import Table
 
@@ -25,7 +31,6 @@ from slash.templates import (
     GITIGNORE_BLOCK,
     GITIGNORE_TEMPLATE,
     POLICY_LOADER_HOOK,
-    POLICY_MANIFEST,
     QA_HOOK,
     RESTRICT_BASH_HOOK,
     RESTRICT_READS_HOOK,
@@ -34,6 +39,14 @@ from slash.templates import (
 )
 
 console = Console()
+
+_DEFAULT_DOCKER_CONFIG: dict = {
+    "image": "slash:latest",
+    "memory": "2g",
+    "cpus": 2,
+    "network": "slash-net",
+    "agent_config_volume": "slash-agent-config",
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -172,12 +185,6 @@ def _managed_files(target: Path) -> list[tuple[Path, str, bool]]:
         (target / "CLAUDE.md",                               CLAUDE_MD,            False),
     ]
 
-# Files owned by the user (values preserved; missing keys filled in on update)
-def _user_files(target: Path) -> list[tuple[Path, str, bool]]:
-    return [
-        (target / ".slash" / "policy" / "manifest.yaml", POLICY_MANIFEST, False),
-    ]
-
 
 def _sync_manifest(path: Path, template_content: str) -> str:
     """Ensure manifest.yaml contains every key defined in the template.
@@ -229,11 +236,13 @@ def _sync_manifest(path: Path, template_content: str) -> str:
     )
     return "updated"
 
+
 # Directory markers
 def _markers(target: Path) -> list[Path]:
     return [
         target / ".slash" / "audit" / ".gitkeep",
     ]
+
 
 def _print_table(results: list[tuple[str, str]]) -> None:
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
@@ -242,6 +251,7 @@ def _print_table(results: list[tuple[str, str]]) -> None:
 
     status_styles = {
         "created":            "[green]created[/green]",
+        "migrated":           "[green]migrated[/green]",
         "updated":            "[yellow]updated[/yellow]",
         "exists":             "[dim]exists — skipped[/dim]",
         "already configured": "[dim]already configured[/dim]",
@@ -254,16 +264,273 @@ def _print_table(results: list[tuple[str, str]]) -> None:
     console.print(table)
 
 
+# ── Docker setup ──────────────────────────────────────────────────────────────
+
+def _slash_version() -> str:
+    """Return the installed slash package version, or 'unknown' if undetectable."""
+    try:
+        import importlib.metadata
+        return importlib.metadata.version("slash")
+    except Exception:
+        return "unknown"
+
+
+def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> None:
+    """
+    Perform Docker infrastructure setup for a workspace:
+      1. Build (or rebuild) the ``slash:latest`` image from the bundled Dockerfile.
+         The image is stamped with a ``slash.version`` label.  If the image already
+         exists *and* its label matches the currently installed slash version, the
+         build is skipped.  A version mismatch (e.g. after ``pip install --upgrade
+         slash``) triggers an automatic rebuild so the container always runs the
+         same slash code as the host.
+         Pass ``rebuild=True`` to force a full rebuild regardless of the version label
+         (equivalent to ``docker build --no-cache`` in intent, though the layer cache
+         is still used to keep the build fast).
+      2. Create the ``slash-agent-config`` named volume.
+      3. Create the ``slash-net`` bridge network.
+
+    Raises ``RuntimeError`` on any failure (including Docker not found).
+    """
+    from slash.docker_runner import _find_docker
+
+    # Locate docker executable (raises FileNotFoundError with helpful message)
+    try:
+        docker_bin = _find_docker()
+    except FileNotFoundError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    import slash  # used to locate the bundled Dockerfile
+
+    slash_pkg = Path(slash.__file__).parent
+    dockerfile = slash_pkg / "runtime" / "Dockerfile"
+    # The build context must be the project root (where pyproject.toml lives)
+    project_root = slash_pkg.parent.parent
+
+    # 1. Build image — skip only when image exists AND its version label matches
+    image = config["image"]
+    current_version = _slash_version()
+
+    needs_build = True
+    if rebuild:
+        console.print(
+            f"  Image [bold]{image}[/bold] — forced rebuild requested."
+        )
+    else:
+        inspect = subprocess.run(
+            [docker_bin, "image", "inspect",
+             "--format", "{{index .Config.Labels \"slash.version\"}}",
+             image],
+            capture_output=True,
+            text=True,
+        )
+        if inspect.returncode == 0:
+            image_version = inspect.stdout.strip()
+            if image_version == current_version:
+                console.print(
+                    f"  Image [bold]{image}[/bold] is up to date "
+                    f"([dim]{current_version}[/dim]) — skipping build."
+                )
+                needs_build = False
+            else:
+                label_display = image_version if image_version else "unlabelled"
+                console.print(
+                    f"  Image [bold]{image}[/bold] is stale "
+                    f"([dim]{label_display}[/dim] → [dim]{current_version}[/dim]) — rebuilding."
+                )
+
+    if needs_build:
+        console.print(f"  Building image [bold]{image}[/bold] …", end="")
+        result = subprocess.run(
+            [
+                docker_bin, "build",
+                "--build-arg", f"HOST_UID={os.getuid()}",
+                "--build-arg", f"HOST_GID={os.getgid()}",
+                "--label", f"slash.version={current_version}",
+                "-t", image,
+                "-f", str(dockerfile),
+                str(project_root),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            console.print(" [red]failed[/red]")
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+        console.print(" [green]done[/green]")
+
+    # 2. Create named volume
+    vol = config["agent_config_volume"]
+    result = subprocess.run(
+        [docker_bin, "volume", "create", vol],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"docker volume create {vol}: {result.stderr.strip()}")
+    console.print(f"  Volume [bold]{vol}[/bold] ready.")
+
+    # 3. Create network (idempotent — "already exists" is not an error)
+    net = config["network"]
+    result = subprocess.run(
+        [docker_bin, "network", "create", "--driver", "bridge", net],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 and "already exists" not in result.stderr:
+        raise RuntimeError(f"docker network create {net}: {result.stderr.strip()}")
+    console.print(f"  Network [bold]{net}[/bold] ready.")
+
+
+# ── Manifest builder ──────────────────────────────────────────────────────────
+
+def _build_manifest(
+    runtime_mode: str,
+    docker_config: dict | None,
+    audit_enabled: bool,
+    git_mutations_action: str,
+    rate_limiting_enabled: bool,
+    model: str,
+) -> str:
+    """Return a YAML string for the complete manifest based on wizard choices."""
+    import yaml
+
+    manifest: dict = {
+        "runtime": {"mode": runtime_mode},
+        "policy": {
+            "secrets": {
+                "reads":         "block",
+                "writes":        "block",
+                "bash_reads":    "block",
+                "safe_variants": "allow",
+            },
+            "workspace": {
+                "reads":      "escalate",
+                "writes":     "block",
+                "bash_paths": "block",
+            },
+            "bash": {
+                "destructive":          "block",
+                "privilege_escalation": "block",
+                "network_exfiltration": "block",
+                "git_mutations":        git_mutations_action,
+                "package_publish":      "block",
+            },
+            "audit": {"enabled": audit_enabled},
+            "qa": {
+                "syntax_check": True,
+                "lint_check":   True,
+                "format_check": True,
+                "type_check":   True,
+            },
+            "rate_limiting": {"enabled": rate_limiting_enabled},
+        },
+        "agent": {
+            "model":     model,
+            "verbosity": "verbose",
+            "thinking": {"enabled": False, "budget_tokens": 1024},
+        },
+    }
+
+    if runtime_mode == "docker" and docker_config:
+        manifest["runtime"]["docker"] = {
+            "image":               docker_config["image"],
+            "memory":              docker_config["memory"],
+            "cpus":                docker_config["cpus"],
+            "network":             docker_config["network"],
+            "agent_config_volume": docker_config["agent_config_volume"],
+        }
+
+    return yaml.dump(manifest, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
 # ── init ──────────────────────────────────────────────────────────────────────
 
-def run_init(target: Path) -> None:
-    """Strictly additive — creates files that do not exist, skips everything else."""
+def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> None:
+    """
+    Interactive first-time workspace setup.
+
+    Runs the Phase 1 / 2 / 3 wizard on first initialisation.  If the manifest
+    already exists the wizard is skipped and managed files are refreshed —
+    unless ``force=True``, which re-runs the full wizard (useful for switching
+    from local to docker mode or vice versa).
+
+    Pass ``rebuild=True`` (``--rebuild`` on the CLI) to force a Docker image
+    rebuild even when the image's version label already matches the installed
+    slash version.  Has no effect in local mode.
+    """
     target = target.resolve()
     console.print(f"\n[bold]slash init[/bold] — [dim]{target}[/dim]\n")
 
+    manifest_new = target / ".slash" / "manifest.yaml"
+    manifest_old = target / ".slash" / "policy" / "manifest.yaml"
+    already_init = manifest_new.exists() or manifest_old.exists()
+
+    # ── Phase 1: Runtime selection ────────────────────────────────────────────
+    if already_init and not force:
+        console.print("[dim]Workspace already initialised — refreshing managed files.[/dim]\n")
+        runtime_mode    = "local"
+        docker_config   = None
+        # Wizard skipped; existing manifest is preserved.
+        manifest_content: str | None = None
+    else:
+        if already_init and force:
+            console.print("[yellow]Re-running setup wizard (--force). Your current configuration will be replaced.[/yellow]\n")
+        console.print("Welcome to slash. Let's configure this workspace.\n")
+        console.print("? How should slash run in this workspace?")
+        console.print("    [bold]local[/bold]   — no isolation, uses existing hook-based policy")
+        console.print("    [bold]docker[/bold]  — kernel-enforced filesystem isolation (recommended)\n")
+
+        runtime_mode = click.prompt(
+            "  Runtime",
+            type=click.Choice(["local", "docker"], case_sensitive=False),
+            default="local",
+        ).lower()
+
+        # ── Phase 2: Docker configuration (Docker mode only) ─────────────────
+        docker_config = None
+        if runtime_mode == "docker":
+            docker_config = dict(_DEFAULT_DOCKER_CONFIG)
+            console.print(
+                f"\n  Using fixed Docker configuration:\n"
+                f"    image:   [bold]{docker_config['image']}[/bold]"
+                f"  (built from slash runtime Dockerfile)\n"
+                f"    memory:  {docker_config['memory']}  |  "
+                f"cpus: {docker_config['cpus']}  |  "
+                f"network: {docker_config['network']}\n"
+            )
+            try:
+                _docker_setup(docker_config, target, rebuild=rebuild)
+            except RuntimeError as exc:
+                console.print(f"\n[red]✗[/red] Docker setup failed: {exc}")
+                raise SystemExit(1)
+
+        # ── Phase 3: Manifest options ─────────────────────────────────────────
+        console.print()
+        audit_enabled       = click.confirm("? Enable audit logging?", default=True)
+        prevent_git_push    = click.confirm("? Prevent git push / git push --force?", default=True)
+        _protect_slash      = click.confirm(
+            "? Protect .slash/ directory?",
+            default=True,
+        )  # always enforced by restrict_writes.py; prompt is informational
+        rate_limiting       = click.confirm(
+            "? Enable rate limiting on expensive tools?", default=False
+        )
+        model               = click.prompt("? Default model", default="claude-sonnet-4-6")
+        console.print()
+
+        manifest_content = _build_manifest(
+            runtime_mode=runtime_mode,
+            docker_config=docker_config,
+            audit_enabled=audit_enabled,
+            git_mutations_action="block" if prevent_git_push else "allow",
+            rate_limiting_enabled=rate_limiting,
+            model=model,
+        )
+
     results: list[tuple[str, str]] = []
 
-    # Step 1: Ensure the workspace has a git repo at its root.
+    # ── Git repo ──────────────────────────────────────────────────────────────
     try:
         git_status = _init_git_repo(target)
     except RuntimeError as exc:
@@ -273,24 +540,42 @@ def run_init(target: Path) -> None:
 
     git_root = _git_root(target)
 
-    # Step 2: Scaffold slash control-plane files.
-    for path, content, executable in _managed_files(target) + _user_files(target):
+    # ── Managed files (hooks, settings, CLAUDE.md) ────────────────────────────
+    for path, content, executable in _managed_files(target):
         rel = path.relative_to(target)
         status = _write_file(path, content, executable=executable, overwrite=False)
         results.append((str(rel), status))
 
+    # ── Manifest ──────────────────────────────────────────────────────────────
+    if manifest_content is not None:
+        # First-time init or --force: write wizard-generated manifest
+        status = _write_file(manifest_new, manifest_content, overwrite=force)
+        results.append((".slash/manifest.yaml", status))
+    elif manifest_old.exists() and not manifest_new.exists():
+        # Migrate old path → new path, preserving content
+        manifest_new.parent.mkdir(parents=True, exist_ok=True)
+        manifest_new.write_text(manifest_old.read_text())
+        results.append((".slash/manifest.yaml", "migrated"))
+    else:
+        results.append((".slash/manifest.yaml", "exists" if manifest_new.exists() else "exists"))
+
+    # ── Directory markers ─────────────────────────────────────────────────────
     for path in _markers(target):
         results.append((str(path.relative_to(target)), _touch(path)))
 
-    # Step 3: Configure .gitignore so .slash/ stays out of version control.
+    # ── .gitignore ────────────────────────────────────────────────────────────
     if git_root:
         results.append((".gitignore", _update_gitignore(git_root)))
 
     _print_table(results)
 
-    console.print("\n[bold]Next steps:[/bold]")
-    console.print("  1. Run a task:  [bold]slash run \"<your task description>\"[/bold]")
-    console.print("  2. Audit log:   [dim].slash/audit/pipeline.jsonl[/dim]\n")
+    if runtime_mode == "docker":
+        console.print(f"\n[bold]Workspace initialised.[/bold] [dim]runtime: docker ({docker_config['image']})[/dim]")  # type: ignore[index]
+    else:
+        console.print("\n[bold]Workspace initialised.[/bold]")
+
+    console.print("  slash run \"<your task here>\"")
+    console.print("  slash repl\n")
 
 
 # ── update ────────────────────────────────────────────────────────────────────
@@ -309,10 +594,38 @@ def run_update(target: Path) -> None:
         status = _write_file(path, content, executable=executable, overwrite=True)
         results.append((str(rel), status))
 
-    # User-editable files — sync structure, preserve values
-    for path, content, _executable in _user_files(target):
-        rel = path.relative_to(target)
-        results.append((str(rel), _sync_manifest(path, content)))
+    # Manifest: migrate old path → new path if needed, then sync
+    manifest_new = target / ".slash" / "manifest.yaml"
+    manifest_old = target / ".slash" / "policy" / "manifest.yaml"
+
+    if manifest_old.exists() and not manifest_new.exists():
+        manifest_new.parent.mkdir(parents=True, exist_ok=True)
+        manifest_new.write_text(manifest_old.read_text())
+        results.append((".slash/manifest.yaml", "migrated"))
+
+    # Sync the manifest (add any keys present in template that are absent in file)
+    from slash.templates import POLICY_MANIFEST
+    results.append((".slash/manifest.yaml", _sync_manifest(manifest_new, POLICY_MANIFEST)))
 
     _print_table(results)
     console.print("[dim]manifest.yaml: user values preserved; any missing keys were added.[/dim]\n")
+
+    # ── Docker image refresh ───────────────────────────────────────────────────
+    # When the workspace is in docker mode, check whether the image is still
+    # current.  _docker_setup() rebuilds automatically when the installed slash
+    # version differs from the label stamped into the image — a no-op when
+    # already up to date.
+    try:
+        import yaml as _yaml
+        _mp = manifest_new if manifest_new.exists() else (manifest_old if manifest_old.exists() else None)
+        _manifest = _yaml.safe_load(_mp.read_text()) or {} if _mp else {}
+    except Exception:
+        _manifest = {}
+
+    if _manifest.get("runtime", {}).get("mode") == "docker":
+        docker_config = _manifest["runtime"].get("docker") or dict(_DEFAULT_DOCKER_CONFIG)
+        console.print("[dim]Docker mode — checking image…[/dim]")
+        try:
+            _docker_setup(docker_config, target)
+        except RuntimeError as exc:
+            console.print(f"[red]✗[/red] Docker image update failed: {exc}\n")

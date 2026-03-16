@@ -2,7 +2,7 @@
 
 A coding agent CLI built on the [Claude Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview).
 
-The agent operates within a defined workspace. All tool calls are governed by policy hooks before execution. Writes are restricted to the task output directory. Everything is audited.
+The agent operates within a defined workspace. `slash init` lets you choose between **local mode** (hook-enforced policy) and **Docker mode** (kernel-enforced filesystem isolation + hook policy). All tool calls are audited.
 
 ## Install
 
@@ -37,15 +37,26 @@ slash status
 
 Scaffolds the slash workspace in the target directory (default: current directory).
 
+Runs an interactive wizard with three phases:
+
+1. **Runtime selection** — choose `local` (hook-based policy) or `docker`
+   (kernel-enforced filesystem isolation, recommended).
+2. **Docker configuration** — if Docker mode is selected, `slash init` builds
+   the `slash:latest` image, creates the `slash-agent-config` named volume, and
+   creates the `slash-net` bridge network automatically.
+3. **Manifest options** — audit logging, git-mutation policy, rate limiting, and
+   default model.
+
 Creates:
 ```
 .slash/
   hooks/
-    restrict_writes.py   ← PreToolUse: path enforcement
+    restrict_reads.py    ← PreToolUse: read path enforcement
+    restrict_writes.py   ← PreToolUse: write path enforcement
+    restrict_bash.py     ← PreToolUse: bash command restrictions
     audit.py             ← PostToolUse: append-only audit log
     qa.py                ← Stop: quality gate
-  policy/
-    manifest.yaml        ← allow/deny rules
+  manifest.yaml          ← runtime + policy + agent settings
   audit/                 ← audit log (gitignored)
 
 .claude/
@@ -54,7 +65,7 @@ Creates:
 CLAUDE.md                ← agent operating instructions
 ```
 
-Also updates `.gitignore` to exclude `.slash/audit/`.
+Also updates `.gitignore` to exclude `.slash/`.
 
 ### `slash run <task>`
 
@@ -62,6 +73,8 @@ Runs the agent on a task description. The agent:
 - Reads freely from the project
 - May write anywhere within the project root
 - Has every tool call checked against `manifest.yaml` before execution
+- In Docker mode, filesystem access is also bounded by the container runtime
+  (kernel namespaces + bind mounts) — path-bypass tricks cannot circumvent it
 - Runs QA checks automatically when it signals completion
 
 ```bash
@@ -135,10 +148,15 @@ the agent receives feedback and keeps working.
 
 ## Customising policy
 
-Edit `.slash/policy/manifest.yaml` to adjust what the agent can do.
+Edit `.slash/manifest.yaml` to adjust what the agent can do.
 Edit `.slash/hooks/qa.py` to add project-specific quality checks (linting, tests, etc.).
 Edit `.claude/settings.json` to add or remove allow/deny rules.
 
-The policy manifest is the source of truth for the `restrict_writes.py` hook.
+The `runtime:` section of `manifest.yaml` is written by `slash init` and controls
+whether the agent runs locally or inside a Docker container.  Do not edit it by hand
+after `slash init` has written it — use `slash init` to re-initialise if you need to
+change the runtime mode.
+
+The `policy:` section is the source of truth for all hook enforcement rules.
 The `settings.json` allow/deny rules are evaluated by the SDK directly, without
 invoking a hook subprocess — so they're fast and appropriate for high-volume patterns.
