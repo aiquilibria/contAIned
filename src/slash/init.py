@@ -36,6 +36,11 @@ from slash.templates import (
     RESTRICT_READS_HOOK,
     RESTRICT_WRITES_HOOK,
     SETTINGS_JSON,
+    SUBAGENT_START_HOOK,
+    SUBAGENT_STOP_HOOK,
+    SUMMARIZER_HOOK,
+    TRACER_POST_HOOK,
+    TRACER_PRE_HOOK,
 )
 
 console = Console()
@@ -175,14 +180,19 @@ def _update_gitignore(repo_root: Path) -> str:
 def _managed_files(target: Path) -> list[tuple[Path, str, bool]]:
     settings = SETTINGS_JSON.format(workspace=str(target.resolve()))
     return [
-        (target / ".slash" / "hooks" / "_policy.py",         POLICY_LOADER_HOOK,   False),
-        (target / ".slash" / "hooks" / "restrict_reads.py",  RESTRICT_READS_HOOK,  True),
-        (target / ".slash" / "hooks" / "restrict_writes.py", RESTRICT_WRITES_HOOK, True),
-        (target / ".slash" / "hooks" / "restrict_bash.py",   RESTRICT_BASH_HOOK,   True),
-        (target / ".slash" / "hooks" / "audit.py",           AUDIT_HOOK,           True),
-        (target / ".slash" / "hooks" / "qa.py",              QA_HOOK,              True),
-        (target / ".claude" / "settings.json",               settings,             False),
-        (target / "CLAUDE.md",                               CLAUDE_MD,            False),
+        (target / ".slash" / "hooks" / "_policy.py",          POLICY_LOADER_HOOK,   False),
+        (target / ".slash" / "hooks" / "restrict_reads.py",   RESTRICT_READS_HOOK,  True),
+        (target / ".slash" / "hooks" / "restrict_writes.py",  RESTRICT_WRITES_HOOK, True),
+        (target / ".slash" / "hooks" / "restrict_bash.py",    RESTRICT_BASH_HOOK,   True),
+        (target / ".slash" / "hooks" / "audit.py",            AUDIT_HOOK,           True),
+        (target / ".slash" / "hooks" / "tracer_pre.py",       TRACER_PRE_HOOK,      True),
+        (target / ".slash" / "hooks" / "tracer_post.py",      TRACER_POST_HOOK,     True),
+        (target / ".slash" / "hooks" / "subagent_start.py",   SUBAGENT_START_HOOK,  True),
+        (target / ".slash" / "hooks" / "subagent_stop.py",    SUBAGENT_STOP_HOOK,   True),
+        (target / ".slash" / "hooks" / "summarizer.py",       SUMMARIZER_HOOK,      True),
+        (target / ".slash" / "hooks" / "qa.py",               QA_HOOK,              True),
+        (target / ".claude" / "settings.json",                settings,             False),
+        (target / "CLAUDE.md",                                CLAUDE_MD,            False),
     ]
 
 
@@ -484,7 +494,7 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
         runtime_mode = click.prompt(
             "  Runtime",
             type=click.Choice(["local", "docker"], case_sensitive=False),
-            default="local",
+            default="docker",
         ).lower()
 
         # ── Phase 2: Docker configuration (Docker mode only) ─────────────────

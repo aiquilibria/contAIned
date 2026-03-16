@@ -22,7 +22,7 @@ import yaml
 from pathlib import Path
 
 if TYPE_CHECKING:
-    from claude_agent_sdk import ClaudeSDKClient, PermissionResult, ThinkingConfigEnabled
+    from claude_agent_sdk import ClaudeSDKClient, PermissionResult, ThinkingConfigDisabled, ThinkingConfigEnabled
     from claude_agent_sdk.types import ToolPermissionContext
 
 from rich.console import Console
@@ -34,18 +34,35 @@ from rich.text import Text
 console = Console()
 
 
-def _load_thinking_config(root: Path) -> ThinkingConfigEnabled | None:
+def _load_thinking_config(root: Path) -> ThinkingConfigEnabled | ThinkingConfigDisabled | None:
     """
-    Read ``agent.thinking`` from ``.slash/manifest.yaml`` and return a
-    :class:`ThinkingConfigEnabled` instance when thinking is enabled, or ``None``.
-    """
-    from claude_agent_sdk import ThinkingConfigEnabled
+    Read ``agent.thinking`` from ``.slash/manifest.yaml`` and return the
+    appropriate thinking config object:
 
+    - ``ThinkingConfigEnabled``  when ``thinking.enabled: true``
+    - ``ThinkingConfigDisabled`` when ``thinking.enabled: false`` and the SDK
+      exports that type (Claude Agent SDK ≥ 0.x)
+    - ``None``                   as a last-resort fallback when the disabled
+      type is not available in the installed SDK version; the caller omits the
+      ``thinking`` kwarg entirely in that case rather than passing ``None``,
+      which the SDK could interpret as "no preference / use model default".
+    """
     thinking_cfg = _load_manifest(root).get("agent", {}).get("thinking", {})
+
     if thinking_cfg.get("enabled", False):
+        from claude_agent_sdk import ThinkingConfigEnabled
         budget = int(thinking_cfg.get("budget_tokens", 1024))
         return ThinkingConfigEnabled(type="enabled", budget_tokens=budget)
-    return None
+
+    # Explicitly disabled — use the SDK's own disabled type so the intent is
+    # unambiguous.  Passing ``thinking=None`` risks the SDK interpreting it as
+    # "no preference" and enabling thinking for models that default to it.
+    try:
+        from claude_agent_sdk import ThinkingConfigDisabled
+        return ThinkingConfigDisabled(type="disabled")
+    except ImportError:
+        # Older SDK build without a disabled type — caller will omit the kwarg.
+        return None
 
 
 def _load_verbosity_config(root: Path) -> str:
@@ -239,7 +256,8 @@ def _build_client(root: Path) -> ClaudeSDKClient:
             interrupt=False,
         )
 
-    model = _load_model_config(root)
+    model          = _load_model_config(root)
+    thinking_cfg   = _load_thinking_config(root)
     options = ClaudeAgentOptions(
         setting_sources=["project"],
         allowed_tools=[
@@ -248,11 +266,17 @@ def _build_client(root: Path) -> ClaudeSDKClient:
         ],
         cwd=str(root),
 
-        # Model — sourced from agent.model in .slash/manifest.yaml
+        # Model — sourced from agent.model in .slash/manifest.yaml.
+        # Omitted entirely when not set so the SDK keeps its own default.
         **({"model": model} if model else {}),
 
-        # Extended thinking — config sourced from .slash/manifest.yaml
-        thinking=_load_thinking_config(root),
+        # Extended thinking — sourced from agent.thinking in manifest.yaml.
+        # Omitted entirely only when ThinkingConfigDisabled is unavailable in
+        # the installed SDK; in that case we cannot express an explicit disable
+        # and the SDK will apply its own default.  When the type IS available,
+        # we always pass an explicit enabled or disabled object so the manifest
+        # setting is honoured precisely.
+        **({"thinking": thinking_cfg} if thinking_cfg is not None else {}),
 
         # All policy enforcement lives in can_use_tool above.
         can_use_tool=can_use_tool,
@@ -407,7 +431,6 @@ def _print_result_summary(result_message: object, verbosity: str) -> None:
 
     if cost_parts:
         console.print("\n  " + "  ·  ".join(cost_parts))
-    console.print("\n")
 
 
 def _print_runtime_banner(root: Path) -> None:
@@ -421,6 +444,15 @@ def _print_runtime_banner(root: Path) -> None:
     else:
         console.print("[dim][slash] runtime: local[/dim]")
     console.print(f"[dim][slash] workspace: {root}[/dim]\n")
+
+
+def _get_tracer(root: Path):
+    """Return a :class:`~slash.tracer.SlashTracer` for *root*, or ``None`` if unavailable."""
+    try:
+        from slash.tracer import SlashTracer  # noqa: PLC0415
+        return SlashTracer(str(root / ".slash" / "tracer.db"))
+    except Exception:
+        return None
 
 
 async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose") -> None:
@@ -439,32 +471,57 @@ async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose
         console.print(f"\n[bold]Task:[/bold] {escape(prompt)}\n")
         console.rule(style="dim")
 
+    tracer = _get_tracer(root)
+    _task_session_id: str | None = None
     result_message = None
 
-    async with _build_client(root) as client:
-        await client.query(prompt)
+    try:
+        async with _build_client(root) as client:
+            # Register the task now that the SDK has assigned a session_id.
+            _task_session_id = getattr(client, "session_id", None)
+            if tracer and _task_session_id:
+                tracer.open_task(_task_session_id, prompt)
 
-        # ── verbose ───────────────────────────────────────────────────────────
-        if verbosity == "verbose":
-            async for message in client.receive_response():
-                _render_message(message, "verbose")
-                if isinstance(message, ResultMessage):
-                    result_message = message
+            await client.query(prompt)
 
-        # ── concise ───────────────────────────────────────────────────────────
-        elif verbosity == "concise":
-            initial = Text.from_markup("  [dim]Starting…[/dim]")
-            with Live(initial, console=console, refresh_per_second=10) as live:
+            # ── verbose ───────────────────────────────────────────────────────
+            if verbosity == "verbose":
                 async for message in client.receive_response():
-                    _render_message(message, "concise", live=live)
+                    _render_message(message, "verbose")
                     if isinstance(message, ResultMessage):
                         result_message = message
 
-        # ── none ──────────────────────────────────────────────────────────────
-        else:
-            async for message in client.receive_response():
-                if isinstance(message, ResultMessage):
-                    result_message = message
+            # ── concise ───────────────────────────────────────────────────────
+            elif verbosity == "concise":
+                initial = Text.from_markup("  [dim]Starting…[/dim]")
+                with Live(initial, console=console, refresh_per_second=10) as live:
+                    async for message in client.receive_response():
+                        _render_message(message, "concise", live=live)
+                        if isinstance(message, ResultMessage):
+                            result_message = message
+
+            # ── none ──────────────────────────────────────────────────────────
+            else:
+                async for message in client.receive_response():
+                    if isinstance(message, ResultMessage):
+                        result_message = message
+
+    except BaseException:
+        # If the session crashed before the Stop hook fired, the task row
+        # remains open.  Mark it abandoned so it surfaces as a recoverable
+        # stale task on the next `slash repl` startup — not as a phantom
+        # open session.
+        if tracer and _task_session_id:
+            try:
+                row = tracer.conn.execute(
+                    "SELECT status FROM tasks WHERE session_id = ?",
+                    (_task_session_id,),
+                ).fetchone()
+                if row and row[0] == "open":
+                    tracer.set_task_status(_task_session_id, "abandoned")
+            except Exception:
+                pass
+        raise
 
     # ── Footer ────────────────────────────────────────────────────────────────
     if verbosity == "verbose":
@@ -472,7 +529,7 @@ async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose
 
     _print_result_summary(result_message, verbosity)
 
-    console.print(f"\nAudit log: [dim].slash/audit/pipeline.jsonl[/dim]\n")
+    console.print(f"\nTrace: [dim].slash/tracer.db[/dim]\n")
 
 
 def run_task(prompt: str, root: Path) -> None:

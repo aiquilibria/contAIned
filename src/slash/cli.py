@@ -5,7 +5,10 @@ Commands:
   slash init          Initialise a workspace in the current directory
   slash update        Refresh managed hook files from latest templates
   slash run <task>    Run the agent on a task
-  slash status        Show a summary of the audit log
+  slash repl          Start an interactive REPL session
+  slash status        Show a summary of recent audit events
+  slash review        Review tasks awaiting operator sign-off
+  slash gc            Prune old task data from tracer.db
 """
 import json
 from pathlib import Path
@@ -141,64 +144,92 @@ def run(task: str, dir: str | None) -> None:
 
 def _print_status(root: Path, tail: int = 20) -> None:
     """
-    Print a summary of the audit log for *root*.
+    Print a summary of recent audit events for *root*.
+
+    Primary source: ``audit_events`` table in ``.slash/tracer.db``.
+    Fallback:       ``.slash/audit/pipeline.jsonl`` (legacy, or when
+                    ``policy.audit.jsonl_export`` is enabled).
 
     Extracted as a standalone callable so it can be reused by the REPL's
     ``/status`` built-in without going through Click.
     """
+    db_path  = root / ".slash" / "tracer.db"
     log_path = root / ".slash" / "audit" / "pipeline.jsonl"
 
-    if not log_path.exists():
-        console.print("\n[dim]No audit log found. Run a task first.[/dim]\n")
-        return
+    entries: list[dict] = []
+    source_label: str = ""
 
-    lines = log_path.read_text().strip().splitlines()
-    if not lines:
-        console.print("\n[dim]Audit log is empty.[/dim]\n")
-        return
-
-    entries = []
-    for line in lines:
+    # ── Primary: tracer.db ────────────────────────────────────────────────────
+    if db_path.exists():
         try:
-            entries.append(json.loads(line))
-        except json.JSONDecodeError:
+            from slash.tracer import SlashTracer  # noqa: PLC0415
+            tracer  = SlashTracer(str(db_path))
+            rows    = tracer.recent_audit_events(limit=tail)
+            entries = rows  # already newest-first, already dicts
+            source_label = str(db_path.relative_to(root))
+        except Exception:
             pass
 
-    recent = list(reversed(entries[-tail:]))
+    # ── Fallback: pipeline.jsonl ──────────────────────────────────────────────
+    if not entries and log_path.exists():
+        lines = log_path.read_text().strip().splitlines()
+        for line in lines:
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+        entries = list(reversed(entries[-tail:]))  # newest first
+        source_label = str(log_path.relative_to(root))
 
-    console.print(f"\n[bold]Audit log[/bold] — last {len(recent)} of {len(entries)} entries (newest first)\n")
+    if not entries:
+        console.print("\n[dim]No audit events found. Run a task first.[/dim]\n")
+        return
+
+    console.print(
+        f"\n[bold]Audit log[/bold] — last {len(entries)} entries (newest first)\n"
+    )
 
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
     table.add_column("Timestamp", style="dim", no_wrap=True)
+    table.add_column("Session", style="dim", no_wrap=True)
     table.add_column("Tool")
     table.add_column("Input summary", style="dim")
     table.add_column("Outcome")
 
-    for entry in recent:
-        ts = entry.get("ts", "")[:19].replace("T", " ")
-        tool = entry.get("tool", "")
-        outcome = entry.get("outcome", "")
+    for entry in entries:
+        ts      = (entry.get("ts") or "")[:19].replace("T", " ")
+        sid     = (entry.get("session_id") or "")[:8]
+        tool    = entry.get("tool") or ""
+        outcome = entry.get("outcome") or ""
 
         inp = entry.get("input") or {}
         if isinstance(inp, dict):
-            summary = (
+            input_summary = (
                 inp.get("command")
                 or inp.get("file_path")
+                or inp.get("file_paths") and ", ".join(inp["file_paths"])
                 or inp.get("pattern")
+                or inp.get("prompt_head")
                 or str(inp)[:60]
-            )
+            ) or ""
         else:
-            summary = str(inp)[:60]
+            input_summary = str(inp)[:60]
+
+        if len(input_summary) > 60:
+            input_summary = input_summary[:57] + "…"
 
         outcome_styled = (
             "[green]success[/green]" if outcome == "success"
             else f"[red]{outcome}[/red]"
         )
 
-        table.add_row(ts, tool, summary, outcome_styled)
+        table.add_row(ts, sid, tool, input_summary, outcome_styled)
 
     console.print(table)
-    console.print(f"\n[dim]Full log: {log_path}[/dim]\n")
+    if source_label:
+        console.print(f"\n[dim]Source: {source_label}[/dim]\n")
+    else:
+        console.print()
 
 
 @main.command()
@@ -220,6 +251,270 @@ def status(dir: str | None, tail: int) -> None:
     """
     root = Path(dir) if dir else _find_root()
     _print_status(root, tail)
+
+
+# ── review ────────────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option(
+    "--dir", "-d",
+    default=None,
+    type=click.Path(file_okay=False, exists=True, resolve_path=True),
+    help="Workspace root (default: auto-detected from cwd)",
+)
+def review(dir: str | None) -> None:
+    """
+    Review tasks awaiting operator sign-off.
+
+    Lists all pending_review tasks and lets you approve or dismiss each one.
+    Approve → marks the task closed.
+    Dismiss → marks the task abandoned.
+
+    \b
+    Examples:
+      slash review
+    """
+    root = Path(dir) if dir else _find_root()
+    db_path = root / ".slash" / "tracer.db"
+
+    if not db_path.exists():
+        console.print("\n[dim]No tracer database found. Run a task first.[/dim]\n")
+        return
+
+    try:
+        from slash.tracer import SlashTracer  # noqa: PLC0415
+        tracer = SlashTracer(str(db_path))
+    except Exception as exc:
+        console.print(f"\n[red]Could not open tracer database: {exc}[/red]\n")
+        return
+
+    reviews = tracer.get_pending_reviews()
+    if not reviews:
+        console.print("\n[dim]No tasks awaiting review.[/dim]\n")
+        return
+
+    console.print(f"\n[bold]Pending reviews ({len(reviews)}):[/bold]\n")
+    for i, r in enumerate(reviews, 1):
+        from datetime import datetime, timezone  # noqa: PLC0415
+        dt = datetime.fromtimestamp(r["started_at"] / 1000, tz=timezone.utc)
+        console.print(
+            f"  [bold]{i}.[/bold] [dim]{r['session_id'][:12]}…[/dim]"
+            f"  \"{r['prompt'][:60]}\"  [dim]({dt.strftime('%Y-%m-%d %H:%M')})[/dim]"
+        )
+    console.print()
+
+    # Let the operator pick one to review
+    try:
+        choice = input(f"Pick a task [1–{len(reviews)}/all/cancel] › ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+
+    targets: list[dict] = []
+    if choice == "all":
+        targets = reviews
+    elif choice.isdigit():
+        idx = int(choice) - 1
+        if 0 <= idx < len(reviews):
+            targets = [reviews[idx]]
+        else:
+            console.print("[red]Invalid selection.[/red]")
+            return
+    else:
+        console.print("[dim]Cancelled.[/dim]\n")
+        return
+
+    for r in targets:
+        _print_review(tracer, r["session_id"], r["prompt"])
+
+
+def _print_review(tracer: object, session_id: str, prompt: str) -> None:
+    """
+    Display one pending review and prompt the operator to approve or dismiss.
+    Intended for the standalone ``slash review`` CLI flow.
+    """
+    from rich.panel import Panel  # noqa: PLC0415
+    from rich.text  import Text   # noqa: PLC0415
+
+    # Load stored summary
+    try:
+        row = tracer.conn.execute(  # type: ignore[attr-defined]
+            "SELECT prompt, summary, started_at FROM tasks WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        task_prompt  = row[0] if row else prompt
+        stored_sum   = json.loads(row[1]) if row and row[1] else {}
+        task_started = row[2] if row else None
+    except Exception:
+        task_prompt  = prompt
+        stored_sum   = {}
+        task_started = None
+
+    file_changes = stored_sum.get("file_changes", [])
+    action_log   = stored_sum.get("action_log", [])
+
+    # Header
+    header = Text()
+    header.append("Task Review", style="bold white")
+    header.append(f"\n{task_prompt[:120]}", style="dim")
+    if task_started:
+        from datetime import datetime, timezone  # noqa: PLC0415
+        dt = datetime.fromtimestamp(task_started / 1000, tz=timezone.utc)
+        header.append(f"\n  started {dt.strftime('%Y-%m-%d %H:%M UTC')}", style="dim")
+    console.print(Panel(header, border_style="blue", expand=False))
+
+    # File changes
+    if file_changes:
+        console.print(f"\n[bold] File Changes[/bold]  [dim]({len(file_changes)} file(s))[/dim]\n")
+        for fc in file_changes:
+            fp  = fc.get("file_path", "?")
+            add = fc.get("lines_added", 0)
+            rem = fc.get("lines_removed", 0)
+            try:
+                diff_text  = tracer.diff_task(session_id, fp)  # type: ignore[attr-defined]
+                diff_lines = diff_text.splitlines() if diff_text else []
+            except Exception:
+                diff_lines = []
+            console.print(
+                f"  [bold cyan]{fp}[/bold cyan]"
+                f"  [green]+{add}[/green]  [red]-{rem}[/red]"
+            )
+            if diff_lines:
+                diff_out = Text()
+                for ln in diff_lines[:200]:
+                    if ln.startswith("+++") or ln.startswith("---"):
+                        diff_out.append(ln + "\n", style="dim")
+                    elif ln.startswith("@@"):
+                        diff_out.append(ln + "\n", style="cyan")
+                    elif ln.startswith("+"):
+                        diff_out.append(ln + "\n", style="green")
+                    elif ln.startswith("-"):
+                        diff_out.append(ln + "\n", style="red")
+                    else:
+                        diff_out.append(ln + "\n")
+                if len(diff_lines) > 200:
+                    diff_out.append("  … (diff truncated)\n", style="dim")
+                console.print(diff_out)
+    else:
+        console.print("\n[dim]  No file changes recorded.[/dim]\n")
+
+    # Action log (notable entries only)
+    notable = [
+        e for e in action_log
+        if e.get("tool") in ("Bash", "Agent") or e.get("outcome") == "denied"
+    ]
+    if notable:
+        console.print(f"[bold] Action Log[/bold]  [dim]({len(notable)} entries)[/dim]\n")
+        for e in notable[-20:]:
+            inp = e.get("input") or {}
+            if e.get("tool") == "Bash":
+                cmd  = (inp.get("command") or "")[:80]
+                ec   = inp.get("exit_code")
+                ec_s = f" (exit: {ec})" if ec is not None else ""
+                console.print(f"  ● bash: {cmd}{ec_s}")
+            elif e.get("tool") == "Agent":
+                atype = inp.get("agent_type") or "agent"
+                ph    = (inp.get("prompt_head") or "")[:60]
+                console.print(f"  ● agent [{atype}]: {ph}")
+            elif e.get("outcome") == "denied":
+                console.print(
+                    f"  [red]✗ {e.get('tool')} denied: {(e.get('reason') or '')[:80]}[/red]"
+                )
+        console.print()
+
+    # Decision
+    console.print("[bold]Decision:[/bold]  [a] Approve   [d] Dismiss\n", end="")
+    try:
+        choice = input("  › ").strip().lower()[:1]
+    except (EOFError, KeyboardInterrupt):
+        choice = ""
+
+    if choice == "d":
+        try:
+            tracer.set_task_status(session_id, "abandoned")  # type: ignore[attr-defined]
+            console.print("[yellow]Task dismissed.[/yellow]\n")
+        except Exception:
+            pass
+    else:
+        try:
+            tracer.set_task_status(session_id, "closed")  # type: ignore[attr-defined]
+            console.print("[green]Task approved.[/green]\n")
+        except Exception:
+            pass
+
+
+# ── gc ─────────────────────────────────────────────────────────────────────────
+
+@main.command()
+@click.option(
+    "--dir", "-d",
+    default=None,
+    type=click.Path(file_okay=False, exists=True, resolve_path=True),
+    help="Workspace root (default: auto-detected from cwd)",
+)
+@click.option(
+    "--keep-days",
+    default=14,
+    show_default=True,
+    help="Retain data for this many days; older closed/abandoned data is pruned.",
+)
+def gc(dir: str | None, keep_days: int) -> None:
+    """
+    Prune old task data from tracer.db.
+
+    Removes snapshots, baselines, orphaned blobs, and old audit events for
+    tasks that are closed or abandoned and older than --keep-days.
+
+    Tasks in open or pending_review state are never pruned.
+
+    \b
+    Examples:
+      slash gc                   # prune data older than 14 days (default)
+      slash gc --keep-days 30    # keep data for 30 days
+      slash gc --keep-days 0     # prune everything not currently active
+    """
+    root    = Path(dir) if dir else _find_root()
+    db_path = root / ".slash" / "tracer.db"
+
+    if not db_path.exists():
+        console.print("\n[dim]No tracer database found — nothing to prune.[/dim]\n")
+        return
+
+    try:
+        from slash.tracer import SlashTracer  # noqa: PLC0415
+        tracer = SlashTracer(str(db_path))
+    except Exception as exc:
+        console.print(f"\n[red]Could not open tracer database: {exc}[/red]\n")
+        return
+
+    # Snapshot row counts before GC for the report
+    def _count(table: str) -> int:
+        try:
+            return tracer.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        except Exception:
+            return -1
+
+    before = {t: _count(t) for t in ("blobs", "snapshots", "baselines", "audit_events", "tasks")}
+
+    tracer.gc(keep_days=keep_days)
+
+    after = {t: _count(t) for t in before}
+
+    console.print(f"\n[bold]slash gc[/bold] — pruned data older than {keep_days} day(s)\n")
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    table.add_column("Table")
+    table.add_column("Before", justify="right", style="dim")
+    table.add_column("After",  justify="right")
+    table.add_column("Removed", justify="right", style="dim")
+
+    for tname in ("tasks", "snapshots", "baselines", "blobs", "audit_events"):
+        b = before[tname]
+        a = after[tname]
+        removed = (b - a) if b >= 0 and a >= 0 else "?"
+        removed_str = f"[red]-{removed}[/red]" if removed else "[dim]0[/dim]"
+        table.add_row(tname, str(b), str(a), removed_str)
+
+    console.print(table)
+    console.print(f"\n[dim]Database: {db_path}[/dim]\n")
 
 
 # ── repl ──────────────────────────────────────────────────────────────────────

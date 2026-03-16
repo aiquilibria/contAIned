@@ -29,6 +29,10 @@ SETTINGS_JSON = """\
           {{
             "type": "command",
             "command": "python3 .slash/hooks/restrict_writes.py"
+          }},
+          {{
+            "type": "command",
+            "command": "python3 .slash/hooks/tracer_pre.py"
           }}
         ]
       }},
@@ -44,11 +48,40 @@ SETTINGS_JSON = """\
     ],
     "PostToolUse": [
       {{
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "python3 .slash/hooks/tracer_post.py"
+          }}
+        ]
+      }},
+      {{
         "matcher": "*",
         "hooks": [
           {{
             "type": "command",
             "command": "python3 .slash/hooks/audit.py"
+          }}
+        ]
+      }}
+    ],
+    "SubagentStart": [
+      {{
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "python3 .slash/hooks/subagent_start.py"
+          }}
+        ]
+      }}
+    ],
+    "SubagentStop": [
+      {{
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "python3 .slash/hooks/subagent_stop.py"
           }}
         ]
       }}
@@ -59,6 +92,10 @@ SETTINGS_JSON = """\
           {{
             "type": "command",
             "command": "python3 .slash/hooks/qa.py"
+          }},
+          {{
+            "type": "command",
+            "command": "python3 .slash/hooks/summarizer.py"
           }}
         ]
       }}
@@ -124,13 +161,17 @@ policy:
   # ── Audit logging ─────────────────────────────────────────────────────────────
   audit:
     enabled: true
+    jsonl_export: false  # set true to also write .slash/audit/pipeline.jsonl
 
   # ── QA gate (stop hook) ───────────────────────────────────────────────────────
   qa:
-    syntax_check: true   # py_compile
-    lint_check:   true   # ruff check
-    format_check: true   # ruff format --check
-    type_check:   true   # pyright
+    syntax_check:       true   # py_compile
+    lint_check:         true   # ruff check
+    format_check:       true   # ruff format --check
+    type_check:         true   # pyright
+    test_check:         true   # pytest tests/
+    coverage_check:     false  # pytest --cov --cov-fail-under (requires pytest-cov)
+    coverage_threshold: 80     # minimum % line coverage when coverage_check is true
 
   # ── Rate limiting ─────────────────────────────────────────────────────────────
   rate_limiting:
@@ -191,12 +232,16 @@ _DEFAULTS = {
     },
     "audit": {
         "enabled": True,
+        "jsonl_export": False,
     },
     "qa": {
-        "syntax_check": True,
-        "lint_check":   True,
-        "format_check": True,
-        "type_check":   True,
+        "syntax_check":       True,
+        "lint_check":         True,
+        "format_check":       True,
+        "type_check":         True,
+        "test_check":         True,
+        "coverage_check":     False,
+        "coverage_threshold": 80,
     },
     "rate_limiting": {
         "enabled": False,
@@ -684,14 +729,16 @@ sys.exit(0)
 AUDIT_HOOK = '''\
 #!/usr/bin/env python3
 """
-PostToolUse hook — appends a structured audit entry for every tool execution.
+PostToolUse hook — records a structured audit entry for every tool execution.
+
+Primary store : tracer.db via SlashTracer.log_event() (SQLite, concurrent-safe).
+Optional mirror: .slash/audit/pipeline.jsonl, controlled by policy.audit.jsonl_export.
 
 Logging is controlled by policy.audit.enabled in manifest.yaml.
 This hook must never block execution (always exits 0).
 """
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -700,7 +747,7 @@ from _policy import load_policy  # noqa: E402
 
 try:
     event = json.load(sys.stdin)
-except json.JSONDecodeError:
+except (json.JSONDecodeError, EOFError):
     sys.exit(0)
 
 cwd    = event.get("cwd", ".")
@@ -709,38 +756,61 @@ policy = load_policy(cwd)
 if not policy["audit"]["enabled"]:
     sys.exit(0)
 
+session_id    = event.get("session_id")
+agent_id      = event.get("agent_id")
+actor_id      = agent_id or session_id
+tool          = event.get("tool_name", "")
+tool_input    = event.get("tool_input") or {}
 tool_response = event.get("tool_response") or {}
+
 is_error = tool_response.get("is_error", False)
-outcome = "denied" if is_error else "success"
+outcome  = "denied" if is_error else "success"
 
-entry = {
-    "ts":         datetime.now(timezone.utc).isoformat(),
-    "session_id": event.get("session_id"),
-    "task_id":    cwd.split("/")[-1],  # last path segment as task hint
-    "tool":       event.get("tool_name"),
-    "input":      event.get("tool_input"),
-    "outcome":    outcome,
-}
-
+reason = None
 if is_error:
-    # Capture the error message for denied/failed tool calls
     content = tool_response.get("content")
     if isinstance(content, list):
-        # SDK returns content as a list of blocks; extract text
-        entry["reason"] = " ".join(
+        reason = " ".join(
             block.get("text", "") for block in content if isinstance(block, dict)
-        ).strip()
+        ).strip() or None
     elif isinstance(content, str):
-        entry["reason"] = content
+        reason = content or None
 
+# ── Primary store: tracer.db ──────────────────────────────────────────────────
 try:
-    project_root = Path(cwd)
-    audit_log = project_root / ".slash" / "audit" / "pipeline.jsonl"
-    audit_log.parent.mkdir(parents=True, exist_ok=True)
-    with audit_log.open("a") as f:
-        f.write(json.dumps(entry) + "\\n")
-except OSError:
+    from slash.tracer import SlashTracer  # noqa: PLC0415
+    db_path = str(Path(cwd) / ".slash" / "tracer.db")
+    tracer  = SlashTracer(db_path)
+    tracer.log_event(
+        session_id    = actor_id,
+        tool          = tool,
+        tool_input    = tool_input,
+        outcome       = outcome,
+        reason        = reason,
+        tool_response = tool_response,
+    )
+except Exception:
     pass  # never block execution due to logging failure
+
+# ── Optional JSONL mirror ─────────────────────────────────────────────────────
+if policy["audit"].get("jsonl_export", False):
+    from datetime import datetime, timezone  # noqa: PLC0415
+    entry = {
+        "ts":         datetime.now(timezone.utc).isoformat(),
+        "session_id": actor_id,
+        "tool":       tool,
+        "input":      tool_input,
+        "outcome":    outcome,
+    }
+    if reason:
+        entry["reason"] = reason
+    try:
+        audit_log = Path(cwd) / ".slash" / "audit" / "pipeline.jsonl"
+        audit_log.parent.mkdir(parents=True, exist_ok=True)
+        with audit_log.open("a") as f:
+            f.write(json.dumps(entry) + "\\n")
+    except OSError:
+        pass
 
 sys.exit(0)
 '''
@@ -751,10 +821,14 @@ QA_HOOK = '''\
 Stop hook — runs QA checks when the agent signals it is done.
 
 Which checks run is controlled by policy.qa.* flags in manifest.yaml:
-  syntax_check  — py_compile on all Python files
-  lint_check    — ruff check
-  format_check  — ruff format --check
-  type_check    — pyright
+  syntax_check      — py_compile on all Python files
+  lint_check        — ruff check
+  format_check      — ruff format --check
+  type_check        — pyright
+  test_check        — pytest tests/  (skipped silently if no tests/ directory exists)
+  coverage_check    — pytest tests/ --cov --cov-fail-under=<threshold>
+                      requires pytest-cov; skipped silently if not installed
+                      threshold is policy.qa.coverage_threshold (default 80)
 
 If all enabled checks pass  → exits 0, agent stops cleanly.
 If any enabled check fails  → prints JSON with decision:block, agent receives feedback.
@@ -843,6 +917,37 @@ if qa["type_check"] and py_files:
     except FileNotFoundError:
         print("pyright not installed — skipping type checks", file=sys.stderr)
 
+# ── pytest (unit tests) ───────────────────────────────────────────────────────
+if qa["test_check"]:
+    tests_dir = TASK_DIR / "tests"
+    if tests_dir.is_dir():
+        code, out = run([sys.executable, "-m", "pytest", str(tests_dir),
+                         "-x", "--tb=short", "-q"])
+        # Exit code 5 means pytest collected no tests — not a failure.
+        if code not in (0, 5):
+            failures.append({"check": "pytest", "file": "tests/", "output": out})
+
+# ── pytest coverage ───────────────────────────────────────────────────────────
+if qa["coverage_check"]:
+    tests_dir = TASK_DIR / "tests"
+    if tests_dir.is_dir():
+        # Check that pytest-cov is available before attempting the run.
+        probe_code, _ = run([sys.executable, "-c", "import pytest_cov"])
+        if probe_code != 0:
+            print("pytest-cov not installed — skipping coverage check", file=sys.stderr)
+        else:
+            threshold = int(qa.get("coverage_threshold", 80))
+            code, out = run([
+                sys.executable, "-m", "pytest", str(tests_dir),
+                "--cov", "--cov-report=term-missing",
+                f"--cov-fail-under={threshold}",
+                "-q",
+            ])
+            # Exit code 5 = no tests collected; treat as pass.
+            if code not in (0, 5):
+                failures.append({"check": f"coverage (threshold: {threshold}%)",
+                                  "file": "tests/", "output": out})
+
 if failures:
     feedback = "QA failed — fix the following issues before finishing:\\n\\n"
     for item in failures:
@@ -924,3 +1029,478 @@ node_modules/
 """
 
 WORKSPACE_GITKEEP = ""  # empty — just creates the directory marker
+
+# ── New Phase-2 hook templates ─────────────────────────────────────────────────
+
+TRACER_PRE_HOOK = '''\
+#!/usr/bin/env python3
+"""
+PreToolUse hook — captures file baselines before Write, Edit, or MultiEdit.
+
+Runs after restrict_writes.py in the PreToolUse chain.  When restrict_writes.py
+exits 2 (deny), the SDK aborts the chain and this hook never fires — no baseline
+is recorded for denied writes.  This is correct behaviour.
+
+Actor ID resolution:
+  actor_id = agent_id or session_id   (agent_id present only for sub-agent calls)
+
+This hook must never block writes (always exits 0).
+"""
+import json
+import sys
+from pathlib import Path
+
+try:
+    event = json.load(sys.stdin)
+except (json.JSONDecodeError, EOFError):
+    sys.exit(0)
+
+tool = event.get("tool_name", "")
+if tool not in ("Write", "Edit", "MultiEdit"):
+    sys.exit(0)
+
+tool_input = event.get("tool_input") or {}
+cwd        = event.get("cwd", ".")
+
+# ── Actor ID resolution ────────────────────────────────────────────────────────
+session_id = event.get("session_id")
+agent_id   = event.get("agent_id")
+actor_id   = agent_id or session_id
+
+if not actor_id:
+    sys.exit(0)
+
+# ── Collect file paths ─────────────────────────────────────────────────────────
+if tool == "MultiEdit":
+    edits      = tool_input.get("edits") or []
+    file_paths = list({e["file_path"] for e in edits if e.get("file_path")})
+else:
+    fp         = tool_input.get("file_path")
+    file_paths = [fp] if fp else []
+
+if not file_paths:
+    sys.exit(0)
+
+# ── Capture baselines ──────────────────────────────────────────────────────────
+db_path = str(Path(cwd) / ".slash" / "tracer.db")
+
+try:
+    from slash.tracer import SlashTracer  # noqa: PLC0415
+    tracer = SlashTracer(db_path)
+    for file_path in file_paths:
+        tracer.capture_baseline(actor_id, file_path)
+except Exception:
+    pass  # tracer must never block writes
+
+sys.exit(0)
+'''
+
+TRACER_POST_HOOK = '''\
+#!/usr/bin/env python3
+"""
+PostToolUse hook — records file snapshots after Write, Edit, or MultiEdit.
+
+Reads each affected file from disk (not from tool_input) so the stored blob
+always matches what is actually on disk.  Handles Write, Edit, and MultiEdit
+uniformly by resolving file paths from tool_input.
+
+Actor ID resolution:
+  actor_id = agent_id or session_id
+
+This hook must never block execution (always exits 0).
+"""
+import json
+import sys
+from pathlib import Path
+
+try:
+    event = json.load(sys.stdin)
+except (json.JSONDecodeError, EOFError):
+    sys.exit(0)
+
+tool = event.get("tool_name", "")
+if tool not in ("Write", "Edit", "MultiEdit"):
+    sys.exit(0)
+
+tool_input    = event.get("tool_input") or {}
+tool_response = event.get("tool_response") or {}
+cwd           = event.get("cwd", ".")
+
+# Skip if the write failed (is_error means the tool errored out)
+if tool_response.get("is_error"):
+    sys.exit(0)
+
+# ── Actor ID resolution ────────────────────────────────────────────────────────
+session_id = event.get("session_id")
+agent_id   = event.get("agent_id")
+actor_id   = agent_id or session_id
+
+if not actor_id:
+    sys.exit(0)
+
+# ── Collect file paths ─────────────────────────────────────────────────────────
+if tool == "MultiEdit":
+    edits      = tool_input.get("edits") or []
+    file_paths = list({e["file_path"] for e in edits if e.get("file_path")})
+else:
+    fp         = tool_input.get("file_path")
+    file_paths = [fp] if fp else []
+
+if not file_paths:
+    sys.exit(0)
+
+# ── Record snapshots ───────────────────────────────────────────────────────────
+db_path = str(Path(cwd) / ".slash" / "tracer.db")
+
+try:
+    from slash.tracer import SlashTracer  # noqa: PLC0415
+    tracer = SlashTracer(db_path)
+    for file_path in file_paths:
+        path = Path(file_path)
+        if path.exists():
+            content = path.read_bytes()
+            tracer.track_write(actor_id, file_path, content)
+except Exception:
+    pass  # tracer must never block execution
+
+sys.exit(0)
+'''
+
+SUBAGENT_START_HOOK = '''\
+#!/usr/bin/env python3
+"""
+SubagentStart hook — registers a new sub-agent task in tracer.db.
+
+Fires when a sub-agent is spawned via the Agent tool.  Records the sub-agent
+as an open task, linked to the root session via parent_session_id.
+
+Event fields used:
+  agent_id   — the sub-agent\'s unique identifier  (actor for this task)
+  session_id — always the root session\'s ID        (parent reference)
+
+This hook must never block execution (always exits 0).
+"""
+import json
+import sys
+from pathlib import Path
+
+try:
+    event = json.load(sys.stdin)
+except (json.JSONDecodeError, EOFError):
+    sys.exit(0)
+
+cwd        = event.get("cwd", ".")
+session_id = event.get("session_id")   # root session (parent)
+agent_id   = event.get("agent_id")     # sub-agent being spawned
+
+if not agent_id or not session_id:
+    sys.exit(0)
+
+# Derive a human-readable prompt from whatever context the event provides.
+agent_type  = event.get("agent_type") or event.get("subagent_type") or "sub-agent"
+description = event.get("description") or event.get("prompt") or ""
+prompt = ("[" + agent_type + "] " + description).strip() if description else ("[" + agent_type + "]")
+
+db_path = str(Path(cwd) / ".slash" / "tracer.db")
+
+try:
+    from slash.tracer import SlashTracer  # noqa: PLC0415
+    tracer = SlashTracer(db_path)
+    tracer.open_task(agent_id, prompt, parent_session_id=session_id)
+except Exception:
+    pass
+
+sys.exit(0)
+'''
+
+SUBAGENT_STOP_HOOK = '''\
+#!/usr/bin/env python3
+"""
+SubagentStop hook — marks a sub-agent task as closed in tracer.db.
+
+Fires when a sub-agent finishes (successfully or otherwise).  Transitions the
+sub-agent\'s task from open → closed so the root summarizer can proceed.
+
+Event fields used:
+  agent_id — the sub-agent that just finished
+
+This hook must never block execution (always exits 0).
+"""
+import json
+import sys
+from pathlib import Path
+
+try:
+    event = json.load(sys.stdin)
+except (json.JSONDecodeError, EOFError):
+    sys.exit(0)
+
+cwd      = event.get("cwd", ".")
+agent_id = event.get("agent_id")
+
+if not agent_id:
+    sys.exit(0)
+
+db_path = str(Path(cwd) / ".slash" / "tracer.db")
+
+try:
+    from slash.tracer import SlashTracer  # noqa: PLC0415
+    tracer = SlashTracer(db_path)
+    tracer.set_task_status(agent_id, "closed")
+except Exception:
+    pass
+
+sys.exit(0)
+'''
+
+SUMMARIZER_HOOK = '''\
+#!/usr/bin/env python3
+"""
+Stop hook — builds a diff summary and presents it to the operator for review.
+
+Fires only for root-agent Stop events (not SubagentStop — that is wired to
+subagent_stop.py).  Runs after qa.py in the Stop hook chain.
+
+Flow:
+  1. Defensive child check: poll up to 3 × 200 ms for open sub-agent sessions.
+  2. Compute per-file unified diffs across the whole agent tree.
+  3. Build action log from recent audit events (Bash, Agent, denied calls).
+  4. Store JSON summary in tasks.summary; set status = pending_review.
+  5. Render rich-formatted summary to stderr (terminal visible to operator).
+  6. Prompt operator: [a]pprove / [d]ismiss / [c]ontinue.
+     Approve  → set status = closed,    exit 0 (agent stops cleanly).
+     Dismiss  → set status = abandoned, exit 0.
+     Continue → print JSON decision:block to stdout, exit 0 (agent gets one more turn).
+"""
+import json
+import sys
+import time
+from pathlib import Path
+
+try:
+    event = json.load(sys.stdin)
+except (json.JSONDecodeError, EOFError):
+    event = {}
+
+cwd        = event.get("cwd", ".")
+session_id = event.get("session_id")
+
+# A Stop event for a sub-agent carries agent_id; the summarizer only runs for
+# the root session.  This guard is a safety net — the hook is registered for
+# Stop only, not SubagentStop, so agent_id should never be present here.
+if event.get("agent_id"):
+    sys.exit(0)
+
+if not session_id:
+    sys.exit(0)
+
+db_path = str(Path(cwd) / ".slash" / "tracer.db")
+
+# ── Import tracer ──────────────────────────────────────────────────────────────
+try:
+    from slash.tracer import SlashTracer  # noqa: PLC0415
+    tracer = SlashTracer(db_path)
+except Exception:
+    # If the tracer is unavailable the agent should still be allowed to stop.
+    sys.exit(0)
+
+# ── Defensive child check ──────────────────────────────────────────────────────
+# The SDK fires SubagentStop for all children before the root Stop, but under
+# parallel sub-agent execution there may be a brief race.  Poll up to 3 times.
+open_children = []
+for _attempt in range(3):
+    try:
+        rows = tracer.conn.execute(
+            "SELECT session_id FROM tasks WHERE parent_session_id = ? AND status = \'open\'",
+            (session_id,),
+        ).fetchall()
+        open_children = [r[0] for r in rows]
+    except Exception:
+        open_children = []
+    if not open_children:
+        break
+    time.sleep(0.2)
+
+# ── Collect file diffs ─────────────────────────────────────────────────────────
+try:
+    touched_files = tracer.list_touched_files(session_id)
+except Exception:
+    touched_files = []
+
+file_diffs: list[dict] = []
+for file_path in touched_files:
+    try:
+        diff_text = tracer.diff_task(session_id, file_path)
+        if not diff_text:
+            continue
+        lines_added   = sum(1 for ln in diff_text.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
+        lines_removed = sum(1 for ln in diff_text.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+        file_diffs.append({
+            "file_path":     file_path,
+            "diff":          diff_text,
+            "lines_added":   lines_added,
+            "lines_removed": lines_removed,
+        })
+    except Exception:
+        pass
+
+# ── Build action log ───────────────────────────────────────────────────────────
+try:
+    raw_events = tracer.recent_audit_events(session_id, limit=200)
+    action_log = [
+        e for e in reversed(raw_events)
+        if e["tool"] in ("Bash", "Agent") or e["outcome"] == "denied"
+    ]
+except Exception:
+    action_log = []
+
+# ── Look up task prompt ────────────────────────────────────────────────────────
+try:
+    row = tracer.conn.execute(
+        "SELECT prompt, started_at FROM tasks WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    task_prompt    = row[0] if row else "(unknown)"
+    task_started   = row[1] if row else None
+except Exception:
+    task_prompt  = "(unknown)"
+    task_started = None
+
+# ── Assemble and store summary ─────────────────────────────────────────────────
+summary = {
+    "file_changes": [
+        {"file_path": d["file_path"], "lines_added": d["lines_added"], "lines_removed": d["lines_removed"]}
+        for d in file_diffs
+    ],
+    "action_log": action_log,
+    "incomplete_children": open_children,
+}
+
+try:
+    tracer.set_task_status(session_id, "pending_review", summary=summary)
+except Exception:
+    pass
+
+# ── Render summary to terminal (stderr) ───────────────────────────────────────
+try:
+    from rich.console import Console  # noqa: PLC0415
+    from rich.panel   import Panel    # noqa: PLC0415
+    from rich.text    import Text     # noqa: PLC0415
+
+    con = Console(stderr=True, highlight=False)
+
+    # Header
+    started_str = ""
+    if task_started:
+        from datetime import datetime, timezone  # noqa: PLC0415
+        dt = datetime.fromtimestamp(task_started / 1000, tz=timezone.utc)
+        started_str = "  started " + dt.strftime("%Y-%m-%d %H:%M UTC")
+
+    header = Text()
+    header.append("Task Review", style="bold white")
+    header.append("\\n")
+    header.append(task_prompt[:120], style="dim")
+    if started_str:
+        header.append("\\n" + started_str, style="dim")
+    if open_children:
+        header.append("\\n[!] " + str(len(open_children)) + " sub-agent(s) still open — diffs may be incomplete", style="yellow")
+    con.print(Panel(header, border_style="blue", expand=False))
+
+    # File changes
+    if file_diffs:
+        con.print("\\n[bold] File Changes[/bold]  [dim](" + str(len(file_diffs)) + " file(s))[/dim]\\n")
+        for fd in file_diffs:
+            stat_str = "[green]+" + str(fd["lines_added"]) + "[/green]  [red]-" + str(fd["lines_removed"]) + "[/red]"
+            con.print("  [bold cyan]" + fd["file_path"] + "[/bold cyan]  " + stat_str)
+            diff_text = Text()
+            for line in fd["diff"].splitlines()[:200]:  # cap at 200 lines per file
+                if line.startswith("+++") or line.startswith("---"):
+                    diff_text.append(line + "\\n", style="dim")
+                elif line.startswith("@@"):
+                    diff_text.append(line + "\\n", style="cyan")
+                elif line.startswith("+"):
+                    diff_text.append(line + "\\n", style="green")
+                elif line.startswith("-"):
+                    diff_text.append(line + "\\n", style="red")
+                else:
+                    diff_text.append(line + "\\n", style="")
+            if len(fd["diff"].splitlines()) > 200:
+                diff_text.append("  … (diff truncated)\\n", style="dim")
+            con.print(diff_text)
+    else:
+        con.print("\\n[dim] No file changes recorded.[/dim]\\n")
+
+    # Action log
+    if action_log:
+        bash_count   = sum(1 for e in action_log if e["tool"] == "Bash")
+        agent_count  = sum(1 for e in action_log if e["tool"] == "Agent")
+        denied_count = sum(1 for e in action_log if e["outcome"] == "denied")
+        parts = []
+        if bash_count:
+            parts.append(str(bash_count) + " bash")
+        if agent_count:
+            parts.append(str(agent_count) + " sub-agent")
+        if denied_count:
+            parts.append(str(denied_count) + " denied")
+        con.print("[bold] Action Log[/bold]  [dim](" + ", ".join(parts) + ")[/dim]\\n")
+        for e in action_log[-30:]:   # show at most last 30 entries
+            inp = e.get("input") or {}
+            if e["tool"] == "Bash":
+                cmd = (inp.get("command") or "")[:80]
+                ec  = inp.get("exit_code")
+                ec_str = (" (exit: " + str(ec) + ")") if ec is not None else ""
+                style = "red" if e["outcome"] == "denied" else "default"
+                con.print("  [" + style + "]● bash: " + cmd + ec_str + "[/" + style + "]")
+            elif e["tool"] == "Agent":
+                atype  = inp.get("agent_type") or "agent"
+                prompt = (inp.get("prompt_head") or "")[:60]
+                con.print("  ● agent [" + atype + "]: " + prompt)
+            elif e["outcome"] == "denied":
+                tool_name = e["tool"]
+                rsn = (e.get("reason") or "")[:80]
+                con.print("  [red]✗ " + tool_name + " denied: " + rsn + "[/red]")
+        con.print("")
+
+    # Operator prompt
+    con.print("[bold]Review:[/bold]  \\[a] Approve   \\[d] Dismiss   \\[c] Continue", end="  ")
+
+except Exception:
+    # Fall back to plain output if rich is unavailable.
+    print("\\n=== Task Review: " + task_prompt[:80] + " ===", file=sys.stderr)
+    print(str(len(file_diffs)) + " file(s) changed.", file=sys.stderr)
+    print("Review: [a] Approve  [d] Dismiss  [c] Continue", end="  ", file=sys.stderr)
+
+# ── Interactive operator prompt ────────────────────────────────────────────────
+choice = ""
+try:
+    # Read from /dev/tty so we get the terminal even when stdin is the hook pipe.
+    with open("/dev/tty") as tty:
+        tty_line = tty.readline().strip().lower()
+        choice   = tty_line[:1] if tty_line else ""
+except Exception:
+    # Non-interactive environment (CI, pipe) — default to approve.
+    choice = "a"
+
+print("", file=sys.stderr)  # newline after the inline prompt
+
+if choice == "d":
+    try:
+        tracer.set_task_status(session_id, "abandoned")
+    except Exception:
+        pass
+    sys.exit(0)
+
+if choice == "c":
+    try:
+        tracer.set_task_status(session_id, "open")   # revert to open for the next turn
+    except Exception:
+        pass
+    print(json.dumps({"decision": "block", "reason": "Operator requested one more agent turn."}))
+    sys.exit(0)
+
+# Default: approve (also covers any unrecognised key).
+try:
+    tracer.set_task_status(session_id, "closed")
+except Exception:
+    pass
+sys.exit(0)
+'''

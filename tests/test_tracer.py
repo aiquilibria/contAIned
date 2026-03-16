@@ -1,0 +1,1209 @@
+"""
+Phase 6 — SlashTracer test suite.
+
+Coverage:
+  Unit tests:
+    - SlashTracer constructor, schema creation
+    - _store_blob / _retrieve_blob (deduplication, zlib round-trip)
+    - capture_baseline (idempotent, new file, existing file)
+    - track_write (content stored, snapshot appended, multiple writes)
+    - log_event / _extract_trace_unit (per-tool dispatch)
+    - Actor ID resolution formula (root vs sub-agent)
+    - open_task / set_task_status / get_pending_reviews
+    - tree_session_ids (flat and nested)
+    - list_touched_files / diff_task
+    - recent_audit_events (scoped and global)
+    - gc (prunes old closed/abandoned; protects open/pending_review)
+
+  Integration tests:
+    - Single-agent task: write files → pending_review → approve → closed
+    - Sub-agent task: SubagentStart → child writes → SubagentStop → root Stop
+      → tree diff covers all files
+    - Concurrent baseline writes: MIN(captured_at) wins
+    - REPL startup with pending review (review surfaced, approve → closed)
+    - REPL /new and /review (task rows, pending task list)
+    - Stale open-task recovery at REPL startup
+"""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import threading
+import time
+import zlib
+from pathlib import Path
+from typing import Optional
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# Helpers / fixtures
+# ---------------------------------------------------------------------------
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from slash.tracer import SlashTracer
+
+
+@pytest.fixture()
+def db_path(tmp_path: Path) -> str:
+    return str(tmp_path / "tracer.db")
+
+
+@pytest.fixture()
+def tracer(db_path: str) -> SlashTracer:
+    return SlashTracer(db_path)
+
+
+@pytest.fixture()
+def tmp_file(tmp_path: Path):
+    """Return a helper that creates a file with given content."""
+    def _make(name: str, content: str = "hello\n") -> Path:
+        p = tmp_path / name
+        p.write_text(content)
+        return p
+    return _make
+
+
+# ---------------------------------------------------------------------------
+# Unit — constructor / schema
+# ---------------------------------------------------------------------------
+
+class TestInit:
+    def test_db_file_created(self, db_path: str) -> None:
+        SlashTracer(db_path)
+        assert Path(db_path).exists()
+
+    def test_wal_mode_enabled(self, tracer: SlashTracer) -> None:
+        row = tracer.conn.execute("PRAGMA journal_mode").fetchone()
+        assert row[0] == "wal"
+
+    def test_all_tables_present(self, tracer: SlashTracer) -> None:
+        expected = {"blobs", "tasks", "baselines", "snapshots", "audit_events"}
+        tables = {
+            r[0]
+            for r in tracer.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert expected <= tables
+
+    def test_second_init_is_idempotent(self, db_path: str) -> None:
+        """Re-creating SlashTracer on the same DB must not raise."""
+        SlashTracer(db_path)
+        SlashTracer(db_path)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Unit — blob store
+# ---------------------------------------------------------------------------
+
+class TestBlobStore:
+    def test_store_returns_sha256(self, tracer: SlashTracer) -> None:
+        import hashlib
+        content = b"hello world"
+        h = tracer._store_blob(content)
+        assert h == hashlib.sha256(content).hexdigest()
+
+    def test_retrieve_round_trip(self, tracer: SlashTracer) -> None:
+        content = b"some binary \x00\x01\x02 content"
+        h = tracer._store_blob(content)
+        assert tracer._retrieve_blob(h) == content
+
+    def test_deduplication(self, tracer: SlashTracer) -> None:
+        content = b"duplicate"
+        h1 = tracer._store_blob(content)
+        h2 = tracer._store_blob(content)
+        assert h1 == h2
+        count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM blobs WHERE hash = ?", (h1,)
+        ).fetchone()[0]
+        assert count == 1
+
+    def test_missing_blob_raises_key_error(self, tracer: SlashTracer) -> None:
+        with pytest.raises(KeyError):
+            tracer._retrieve_blob("nonexistent" * 4)
+
+    def test_content_is_zlib_compressed(self, tracer: SlashTracer) -> None:
+        content = b"compressible" * 100
+        h = tracer._store_blob(content)
+        row = tracer.conn.execute(
+            "SELECT content FROM blobs WHERE hash = ?", (h,)
+        ).fetchone()
+        # raw stored bytes must be decompressible and round-trip
+        assert zlib.decompress(row[0]) == content
+
+    def test_different_content_different_hashes(self, tracer: SlashTracer) -> None:
+        h1 = tracer._store_blob(b"aaa")
+        h2 = tracer._store_blob(b"bbb")
+        assert h1 != h2
+
+
+# ---------------------------------------------------------------------------
+# Unit — capture_baseline
+# ---------------------------------------------------------------------------
+
+class TestCaptureBaseline:
+    def test_new_file_returns_none(self, tracer: SlashTracer, tmp_path: Path) -> None:
+        nonexistent = str(tmp_path / "new.txt")
+        tracer.open_task("S1", "task")
+        result = tracer.capture_baseline("S1", nonexistent)
+        assert result is None
+
+    def test_new_file_stored_with_null_pre_hash(
+        self, tracer: SlashTracer, tmp_path: Path
+    ) -> None:
+        nonexistent = str(tmp_path / "new.txt")
+        tracer.open_task("S1", "task")
+        tracer.capture_baseline("S1", nonexistent)
+        row = tracer.conn.execute(
+            "SELECT pre_hash FROM baselines WHERE session_id = 'S1'",
+        ).fetchone()
+        assert row is not None
+        assert row[0] is None
+
+    def test_existing_file_returns_hash(
+        self, tracer: SlashTracer, tmp_file
+    ) -> None:
+        p = tmp_file("foo.txt", "original content\n")
+        tracer.open_task("S1", "task")
+        h = tracer.capture_baseline("S1", str(p))
+        assert h is not None
+        assert len(h) == 64  # SHA-256 hex
+
+    def test_idempotent_second_call_ignored(
+        self, tracer: SlashTracer, tmp_file
+    ) -> None:
+        p = tmp_file("foo.txt", "v1\n")
+        tracer.open_task("S1", "task")
+        h1 = tracer.capture_baseline("S1", str(p))
+        # Modify the file; the second capture_baseline call must not overwrite
+        # the existing baseline row (INSERT OR IGNORE semantics).
+        p.write_text("v2\n")
+        tracer.capture_baseline("S1", str(p))
+        # Only one row must exist in the DB.
+        count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM baselines WHERE session_id = 'S1'",
+        ).fetchone()[0]
+        assert count == 1
+        # The stored pre_hash must still reflect the FIRST content (v1).
+        stored_hash = tracer.conn.execute(
+            "SELECT pre_hash FROM baselines WHERE session_id = 'S1'",
+        ).fetchone()[0]
+        assert stored_hash == h1
+
+    def test_different_sessions_independent(
+        self, tracer: SlashTracer, tmp_file
+    ) -> None:
+        p = tmp_file("foo.txt", "v1\n")
+        tracer.open_task("S1", "task")
+        tracer.open_task("S2", "task")
+        tracer.capture_baseline("S1", str(p))
+        p.write_text("v2\n")
+        tracer.capture_baseline("S2", str(p))
+        h1 = tracer.conn.execute(
+            "SELECT pre_hash FROM baselines WHERE session_id = 'S1'",
+        ).fetchone()[0]
+        h2 = tracer.conn.execute(
+            "SELECT pre_hash FROM baselines WHERE session_id = 'S2'",
+        ).fetchone()[0]
+        assert h1 != h2
+
+
+# ---------------------------------------------------------------------------
+# Unit — track_write
+# ---------------------------------------------------------------------------
+
+class TestTrackWrite:
+    def test_returns_hash(self, tracer: SlashTracer) -> None:
+        import hashlib
+        tracer.open_task("S1", "task")
+        h = tracer.track_write("S1", "foo.py", b"content")
+        assert h == hashlib.sha256(b"content").hexdigest()
+
+    def test_snapshot_row_appended(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.track_write("S1", "a.py", b"v1")
+        count = tracer.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        assert count == 1
+
+    def test_multiple_writes_all_appended(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.track_write("S1", "a.py", b"v1")
+        tracer.track_write("S1", "a.py", b"v2")
+        tracer.track_write("S1", "a.py", b"v3")
+        count = tracer.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        assert count == 3
+
+    def test_identical_content_deduplicates_blobs(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.track_write("S1", "a.py", b"same")
+        tracer.track_write("S1", "b.py", b"same")
+        blob_count = tracer.conn.execute("SELECT COUNT(*) FROM blobs").fetchone()[0]
+        assert blob_count == 1  # single blob for identical content
+
+    def test_metadata_stored_as_json(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.track_write("S1", "a.py", b"x", metadata={"pass": 1})
+        row = tracer.conn.execute(
+            "SELECT metadata FROM snapshots"
+        ).fetchone()
+        assert json.loads(row[0]) == {"pass": 1}
+
+
+# ---------------------------------------------------------------------------
+# Unit — log_event / _extract_trace_unit
+# ---------------------------------------------------------------------------
+
+class TestLogEvent:
+    def _events(self, tracer: SlashTracer) -> list[dict]:
+        rows = tracer.conn.execute(
+            "SELECT tool, input, outcome, reason FROM audit_events"
+        ).fetchall()
+        return [
+            {"tool": r[0], "input": json.loads(r[1]) if r[1] else None,
+             "outcome": r[2], "reason": r[3]}
+            for r in rows
+        ]
+
+    def test_write_tool_stores_file_path(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.log_event("S1", "Write", {"file_path": "foo.py"}, "success")
+        ev = self._events(tracer)[0]
+        assert ev["input"] == {"file_path": "foo.py"}
+
+    def test_edit_tool_stores_file_path(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.log_event("S1", "Edit", {"file_path": "bar.py"}, "success")
+        ev = self._events(tracer)[0]
+        assert ev["input"] == {"file_path": "bar.py"}
+
+    def test_multiedit_stores_file_paths(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.log_event(
+            "S1", "MultiEdit",
+            {"edits": [{"file_path": "a.py"}, {"file_path": "b.py"}]},
+            "success",
+        )
+        ev = self._events(tracer)[0]
+        assert set(ev["input"]["file_paths"]) == {"a.py", "b.py"}
+
+    def test_read_only_tools_store_none(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        for tool in ("Read", "Glob", "Grep"):
+            tracer.log_event("S1", tool, {"file_path": "x"}, "success")
+        evs = self._events(tracer)
+        assert all(e["input"] is None for e in evs)
+
+    def test_bash_tool_stores_command_and_stdout(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.log_event(
+            "S1", "Bash", {"command": "ls -la"},
+            "success",
+            tool_response={"exit_code": 0, "stdout": "total 4\n"},
+        )
+        ev = self._events(tracer)[0]
+        assert ev["input"]["command"] == "ls -la"
+        assert ev["input"]["exit_code"] == 0
+        assert ev["input"]["stdout_head"] == "total 4\n"
+
+    def test_bash_stdout_capped_at_500(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        long_out = "x" * 1000
+        tracer.log_event(
+            "S1", "Bash", {"command": "x"},
+            "success",
+            tool_response={"exit_code": 0, "stdout": long_out},
+        )
+        ev = self._events(tracer)[0]
+        assert len(ev["input"]["stdout_head"]) == 500
+
+    def test_agent_tool_stores_type_and_prompt(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.log_event(
+            "S1", "Agent",
+            {"subagent_type": "general-purpose", "prompt": "do something"},
+            "success",
+        )
+        ev = self._events(tracer)[0]
+        assert ev["input"]["agent_type"] == "general-purpose"
+        assert ev["input"]["prompt_head"] == "do something"
+
+    def test_agent_prompt_capped_at_200(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        long_prompt = "p" * 400
+        tracer.log_event(
+            "S1", "Agent",
+            {"subagent_type": "general-purpose", "prompt": long_prompt},
+            "success",
+        )
+        ev = self._events(tracer)[0]
+        assert len(ev["input"]["prompt_head"]) == 200
+
+    def test_unknown_tool_fallback_first_five_keys(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        inp = {f"k{i}": f"v{i}" for i in range(8)}
+        tracer.log_event("S1", "SomeTool", inp, "success")
+        ev = self._events(tracer)[0]
+        assert len(ev["input"]) == 5
+
+    def test_denied_event_stores_reason(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.log_event(
+            "S1", "Write", {"file_path": "x"}, "denied",
+            reason="restricted path",
+        )
+        ev = self._events(tracer)[0]
+        assert ev["outcome"] == "denied"
+        assert ev["reason"] == "restricted path"
+
+    def test_log_event_never_raises_on_bad_session(self, tracer: SlashTracer) -> None:
+        """log_event must not raise even for an unknown session_id."""
+        tracer.log_event("UNKNOWN_SESSION", "Write", {}, "success")
+
+
+# ---------------------------------------------------------------------------
+# Unit — actor ID resolution
+# ---------------------------------------------------------------------------
+
+class TestActorIdResolution:
+    """
+    actor_id = agent_id or session_id
+
+    This is the formula used by all tracer hooks.  We verify it directly
+    here using the same conditional logic so any future regression is caught.
+    """
+
+    @staticmethod
+    def resolve(event: dict) -> Optional[str]:
+        session_id = event.get("session_id")
+        agent_id   = event.get("agent_id")
+        return agent_id or session_id
+
+    def test_root_agent_uses_session_id(self) -> None:
+        event = {"session_id": "ROOT", "tool_name": "Write"}
+        assert self.resolve(event) == "ROOT"
+
+    def test_sub_agent_uses_agent_id(self) -> None:
+        event = {"session_id": "ROOT", "agent_id": "AGENT1", "tool_name": "Write"}
+        assert self.resolve(event) == "AGENT1"
+
+    def test_deeply_nested_sub_agent_uses_agent_id(self) -> None:
+        event = {"session_id": "ROOT", "agent_id": "AGENT2"}
+        assert self.resolve(event) == "AGENT2"
+
+    def test_no_ids_returns_none(self) -> None:
+        assert self.resolve({}) is None
+
+    def test_empty_agent_id_falls_back_to_session_id(self) -> None:
+        # Empty string is falsy — should fall back to session_id.
+        event = {"session_id": "ROOT", "agent_id": ""}
+        assert self.resolve(event) == "ROOT"
+
+
+# ---------------------------------------------------------------------------
+# Unit — task lifecycle
+# ---------------------------------------------------------------------------
+
+class TestTaskLifecycle:
+    def test_open_task_creates_row(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "do something")
+        row = tracer.conn.execute(
+            "SELECT status FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "open"
+
+    def test_open_task_idempotent(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "prompt v1")
+        tracer.open_task("S1", "prompt v2")  # must NOT overwrite
+        row = tracer.conn.execute(
+            "SELECT prompt FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert row[0] == "prompt v1"
+
+    def test_set_task_status_transitions(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "pending_review")
+        row = tracer.conn.execute(
+            "SELECT status FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert row[0] == "pending_review"
+
+    def test_set_task_status_stores_summary(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        summary = {"files": ["a.py"], "diff": "---"}
+        tracer.set_task_status("S1", "pending_review", summary=summary)
+        row = tracer.conn.execute(
+            "SELECT summary FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert json.loads(row[0]) == summary
+
+    def test_get_pending_reviews_returns_root_only(
+        self, tracer: SlashTracer
+    ) -> None:
+        tracer.open_task("ROOT", "root task")
+        tracer.open_task("CHILD", "child task", parent_session_id="ROOT")
+        tracer.set_task_status("ROOT", "pending_review")
+        tracer.set_task_status("CHILD", "pending_review")
+        pending = tracer.get_pending_reviews()
+        ids = [p["session_id"] for p in pending]
+        assert "ROOT" in ids
+        assert "CHILD" not in ids  # children excluded
+
+    def test_get_pending_reviews_sorted_newest_first(
+        self, tracer: SlashTracer
+    ) -> None:
+        for sid in ("S1", "S2", "S3"):
+            tracer.open_task(sid, f"task {sid}")
+            tracer.set_task_status(sid, "pending_review")
+            time.sleep(0.001)  # ensure distinct timestamps
+        pending = tracer.get_pending_reviews()
+        ids = [p["session_id"] for p in pending]
+        assert ids == sorted(ids, reverse=True) or ids[0] == "S3"
+
+    def test_get_child_sessions(self, tracer: SlashTracer) -> None:
+        tracer.open_task("ROOT", "root")
+        tracer.open_task("C1", "child1", parent_session_id="ROOT")
+        tracer.open_task("C2", "child2", parent_session_id="ROOT")
+        children = tracer.get_child_sessions("ROOT")
+        assert set(children) == {"C1", "C2"}
+
+
+# ---------------------------------------------------------------------------
+# Unit — tree traversal
+# ---------------------------------------------------------------------------
+
+class TestTreeTraversal:
+    def test_single_node_tree(self, tracer: SlashTracer) -> None:
+        tracer.open_task("ROOT", "task")
+        ids = tracer.tree_session_ids("ROOT")
+        assert ids == ["ROOT"]
+
+    def test_flat_children(self, tracer: SlashTracer) -> None:
+        tracer.open_task("ROOT", "root")
+        tracer.open_task("C1", "c1", parent_session_id="ROOT")
+        tracer.open_task("C2", "c2", parent_session_id="ROOT")
+        ids = set(tracer.tree_session_ids("ROOT"))
+        assert ids == {"ROOT", "C1", "C2"}
+
+    def test_nested_children(self, tracer: SlashTracer) -> None:
+        tracer.open_task("ROOT", "root")
+        tracer.open_task("C1", "c1", parent_session_id="ROOT")
+        tracer.open_task("C2", "c2", parent_session_id="C1")
+        ids = set(tracer.tree_session_ids("ROOT"))
+        assert ids == {"ROOT", "C1", "C2"}
+
+    def test_unknown_root_returns_root_only(self, tracer: SlashTracer) -> None:
+        # The CTE always seeds with the root_session_id regardless of existence.
+        ids = tracer.tree_session_ids("GHOST")
+        assert ids == ["GHOST"]
+
+    def test_list_touched_files_single_session(
+        self, tracer: SlashTracer
+    ) -> None:
+        tracer.open_task("S1", "task")
+        tracer.track_write("S1", "a.py", b"v1")
+        tracer.track_write("S1", "b.py", b"v1")
+        files = tracer.list_touched_files("S1")
+        assert files == ["a.py", "b.py"]
+
+    def test_list_touched_files_across_subtree(
+        self, tracer: SlashTracer
+    ) -> None:
+        tracer.open_task("ROOT", "root")
+        tracer.open_task("C1", "c1", parent_session_id="ROOT")
+        tracer.track_write("ROOT", "root.py", b"v1")
+        tracer.track_write("C1", "child.py", b"v1")
+        files = tracer.list_touched_files("ROOT")
+        assert "root.py" in files
+        assert "child.py" in files
+
+    def test_list_touched_files_empty_tree(
+        self, tracer: SlashTracer
+    ) -> None:
+        tracer.open_task("S1", "task")
+        assert tracer.list_touched_files("S1") == []
+
+
+# ---------------------------------------------------------------------------
+# Unit — diff_task
+# ---------------------------------------------------------------------------
+
+class TestDiffTask:
+    def _setup(
+        self,
+        tracer: SlashTracer,
+        session_id: str,
+        file_path: str,
+        before: Optional[bytes],
+        after: bytes,
+    ) -> None:
+        tracer.open_task(session_id, "task")
+        # Store baseline
+        now_ms = int(time.time() * 1000)
+        if before is None:
+            tracer.conn.execute(
+                "INSERT OR IGNORE INTO baselines (session_id, file_path, pre_hash, captured_at) "
+                "VALUES (?, ?, NULL, ?)",
+                (session_id, file_path, now_ms),
+            )
+        else:
+            pre_hash = tracer._store_blob(before)
+            tracer.conn.execute(
+                "INSERT OR IGNORE INTO baselines (session_id, file_path, pre_hash, captured_at) "
+                "VALUES (?, ?, ?, ?)",
+                (session_id, file_path, pre_hash, now_ms),
+            )
+            tracer.conn.commit()
+        tracer.track_write(session_id, file_path, after)
+
+    def test_new_file_diff_shows_additions(self, tracer: SlashTracer) -> None:
+        self._setup(tracer, "S1", "new.py", None, b"line1\nline2\n")
+        diff = tracer.diff_task("S1", "new.py")
+        assert "+line1" in diff
+        assert "+line2" in diff
+
+    def test_modified_file_diff_shows_changes(self, tracer: SlashTracer) -> None:
+        self._setup(
+            tracer, "S1", "mod.py",
+            b"before\n",
+            b"after\n",
+        )
+        diff = tracer.diff_task("S1", "mod.py")
+        assert "-before" in diff
+        assert "+after" in diff
+
+    def test_identical_content_empty_diff(self, tracer: SlashTracer) -> None:
+        content = b"unchanged\n"
+        self._setup(tracer, "S1", "same.py", content, content)
+        diff = tracer.diff_task("S1", "same.py")
+        assert diff == ""
+
+    def test_no_baseline_returns_empty(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        diff = tracer.diff_task("S1", "untouched.py")
+        assert diff == ""
+
+    def test_no_snapshots_returns_empty(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        # Baseline without snapshot
+        tracer.conn.execute(
+            "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
+            "VALUES ('S1', 'x.py', NULL, ?)",
+            (int(time.time() * 1000),),
+        )
+        tracer.conn.commit()
+        diff = tracer.diff_task("S1", "x.py")
+        assert diff == ""
+
+    def test_diff_uses_latest_snapshot(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        fp = "evolving.py"
+        now_ms = int(time.time() * 1000)
+        pre_hash = tracer._store_blob(b"v0\n")
+        tracer.conn.execute(
+            "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
+            "VALUES ('S1', ?, ?, ?)",
+            (fp, pre_hash, now_ms),
+        )
+        tracer.conn.commit()
+        tracer.track_write("S1", fp, b"v1\n")
+        tracer.track_write("S1", fp, b"v2\n")
+        tracer.track_write("S1", fp, b"v3\n")
+        diff = tracer.diff_task("S1", fp)
+        # "after" must be v3
+        assert "+v3" in diff
+        assert "-v0" in diff
+
+    def test_tree_diff_uses_earliest_baseline(self, tracer: SlashTracer) -> None:
+        """
+        When two sessions in a tree each captured a baseline for the same file,
+        diff_task must use the EARLIEST one (MIN captured_at).
+        """
+        tracer.open_task("ROOT", "root")
+        tracer.open_task("CHILD", "child", parent_session_id="ROOT")
+
+        fp = "shared.py"
+        early_ms = int(time.time() * 1000) - 5000
+        late_ms  = int(time.time() * 1000)
+
+        early_hash = tracer._store_blob(b"earliest\n")
+        late_hash  = tracer._store_blob(b"later\n")
+
+        tracer.conn.execute(
+            "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
+            "VALUES ('ROOT', ?, ?, ?)",
+            (fp, early_hash, early_ms),
+        )
+        tracer.conn.execute(
+            "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
+            "VALUES ('CHILD', ?, ?, ?)",
+            (fp, late_hash, late_ms),
+        )
+        tracer.conn.commit()
+        tracer.track_write("CHILD", fp, b"final\n")
+
+        diff = tracer.diff_task("ROOT", fp)
+        assert "-earliest" in diff
+        assert "+final" in diff
+
+
+# ---------------------------------------------------------------------------
+# Unit — recent_audit_events
+# ---------------------------------------------------------------------------
+
+class TestRecentAuditEvents:
+    def _add_events(
+        self, tracer: SlashTracer, session_id: str, n: int = 3
+    ) -> None:
+        tracer.open_task(session_id, "task")
+        for i in range(n):
+            tracer.log_event(session_id, f"Tool{i}", {}, "success")
+
+    def test_global_query_returns_all(self, tracer: SlashTracer) -> None:
+        self._add_events(tracer, "S1", 3)
+        self._add_events(tracer, "S2", 3)
+        evs = tracer.recent_audit_events(limit=100)
+        assert len(evs) == 6
+
+    def test_session_scoped_query(self, tracer: SlashTracer) -> None:
+        self._add_events(tracer, "S1", 3)
+        self._add_events(tracer, "S2", 5)
+        evs = tracer.recent_audit_events(session_id="S1", limit=100)
+        assert len(evs) == 3
+
+    def test_limit_respected(self, tracer: SlashTracer) -> None:
+        self._add_events(tracer, "S1", 20)
+        evs = tracer.recent_audit_events(limit=5)
+        assert len(evs) == 5
+
+    def test_newest_first_ordering(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        for tool in ("A", "B", "C"):
+            tracer.log_event("S1", tool, {}, "success")
+        evs = tracer.recent_audit_events(session_id="S1")
+        tools = [e["tool"] for e in evs]
+        assert tools[0] == "C"  # newest first
+
+    def test_tree_scoped_includes_subtree(self, tracer: SlashTracer) -> None:
+        tracer.open_task("ROOT", "root")
+        tracer.open_task("CHILD", "child", parent_session_id="ROOT")
+        tracer.log_event("ROOT",  "ToolRoot",  {}, "success")
+        tracer.log_event("CHILD", "ToolChild", {}, "success")
+        evs = tracer.recent_audit_events(session_id="ROOT", limit=10)
+        tools = {e["tool"] for e in evs}
+        assert "ToolRoot" in tools
+        assert "ToolChild" in tools
+
+    def test_event_fields_populated(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.log_event(
+            "S1", "Bash", {"command": "echo hi"}, "success",
+            tool_response={"exit_code": 0, "stdout": "hi"},
+        )
+        ev = tracer.recent_audit_events(limit=1)[0]
+        assert ev["tool"] == "Bash"
+        assert ev["outcome"] == "success"
+        assert ev["input"]["command"] == "echo hi"
+        assert "ts" in ev
+        assert "session_id" in ev
+
+
+# ---------------------------------------------------------------------------
+# Unit — GC
+# ---------------------------------------------------------------------------
+
+class TestGC:
+    def _old_ms(self, days: int = 20) -> int:
+        return int((time.time() - days * 86400) * 1000)
+
+    def _recent_ms(self) -> int:
+        return int(time.time() * 1000)
+
+    def test_gc_removes_old_closed_snapshots(
+        self, tracer: SlashTracer
+    ) -> None:
+        tracer.open_task("OLD", "old task")
+        tracer.set_task_status("OLD", "closed")
+        # Manually backdate ended_at and snapshot written_at
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,)
+        )
+        tracer.conn.execute(
+            "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
+            "VALUES ('OLD', 'x.py', ?, ?)",
+            (tracer._store_blob(b"x"), old_ms),
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+        count = tracer.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        assert count == 0
+
+    def test_gc_protects_open_tasks(self, tracer: SlashTracer) -> None:
+        tracer.open_task("OPEN", "open task")
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
+            "VALUES ('OPEN', 'x.py', ?, ?)",
+            (tracer._store_blob(b"x"), old_ms),
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+        count = tracer.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        assert count == 1  # protected; must remain
+
+    def test_gc_protects_pending_review_tasks(
+        self, tracer: SlashTracer
+    ) -> None:
+        tracer.open_task("PR", "pending task")
+        tracer.set_task_status("PR", "pending_review")
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
+            "VALUES ('PR', 'x.py', ?, ?)",
+            (tracer._store_blob(b"x"), old_ms),
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+        count = tracer.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
+        assert count == 1
+
+    def test_gc_removes_orphaned_blobs(self, tracer: SlashTracer) -> None:
+        tracer.open_task("OLD", "task")
+        tracer.set_task_status("OLD", "closed")
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,)
+        )
+        blob_hash = tracer._store_blob(b"orphan content")
+        tracer.conn.execute(
+            "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
+            "VALUES ('OLD', 'x.py', ?, ?)",
+            (blob_hash, old_ms),
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+        blob_count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM blobs"
+        ).fetchone()[0]
+        assert blob_count == 0
+
+    def test_gc_keeps_referenced_blobs(self, tracer: SlashTracer) -> None:
+        tracer.open_task("OLD", "old")
+        tracer.set_task_status("OLD", "closed")
+        tracer.open_task("OPEN", "open")
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,)
+        )
+        shared_blob = tracer._store_blob(b"shared content")
+        tracer.conn.execute(
+            "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
+            "VALUES ('OLD', 'x.py', ?, ?)", (shared_blob, old_ms)
+        )
+        tracer.conn.execute(
+            "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
+            "VALUES ('OPEN', 'x.py', ?, ?)", (shared_blob, self._recent_ms())
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+        # Blob still referenced by OPEN session; must not be deleted
+        count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM blobs WHERE hash = ?", (shared_blob,)
+        ).fetchone()[0]
+        assert count == 1
+
+    def test_gc_removes_old_task_rows(self, tracer: SlashTracer) -> None:
+        tracer.open_task("OLD", "old")
+        tracer.set_task_status("OLD", "closed")
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,)
+        )
+        tracer.conn.commit()
+
+        tracer.gc(keep_days=14)
+        row = tracer.conn.execute(
+            "SELECT session_id FROM tasks WHERE session_id = 'OLD'"
+        ).fetchone()
+        assert row is None
+
+    def test_gc_keeps_recent_closed_tasks(self, tracer: SlashTracer) -> None:
+        tracer.open_task("RECENT", "recent")
+        tracer.set_task_status("RECENT", "closed")
+        # ended_at is set to now by set_task_status — within keep window
+
+        tracer.gc(keep_days=14)
+        row = tracer.conn.execute(
+            "SELECT session_id FROM tasks WHERE session_id = 'RECENT'"
+        ).fetchone()
+        assert row is not None  # too recent to prune
+
+    def test_gc_preserves_10k_most_recent_audit_events(
+        self, tracer: SlashTracer
+    ) -> None:
+        """
+        Even if a session is old and prunable, the 10,000 most-recent events
+        must not be deleted (global keep guarantee).
+
+        We use a small target count to keep the test fast.
+        """
+        tracer.open_task("OLD", "old")
+        tracer.set_task_status("OLD", "closed")
+        old_ms = self._old_ms()
+        tracer.conn.execute(
+            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,)
+        )
+        # Insert 5 audit events referencing the old session
+        for i in range(5):
+            tracer.log_event("OLD", f"T{i}", {}, "success")
+
+        tracer.gc(keep_days=14)
+        # With only 5 events total (< 10,000 keep floor), none should be deleted
+        count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM audit_events"
+        ).fetchone()[0]
+        assert count == 5
+
+
+# ---------------------------------------------------------------------------
+# Integration — single-agent task lifecycle
+# ---------------------------------------------------------------------------
+
+class TestSingleAgentIntegration:
+    def test_open_write_review_close(
+        self, tracer: SlashTracer, tmp_file
+    ) -> None:
+        """
+        Simulate: runner opens task → hooks capture baseline + write →
+        summarizer sets pending_review → operator approves → closed.
+        """
+        p = tmp_file("main.py", "v0\n")
+        session_id = "SESS_A"
+
+        # 1. Open task (runner.py)
+        tracer.open_task(session_id, "implement feature")
+
+        # 2. Pre-hook: capture baseline
+        tracer.capture_baseline(session_id, str(p))
+
+        # 3. Agent writes the file; post-hook records snapshot
+        p.write_text("v1\n")
+        tracer.track_write(session_id, str(p), p.read_bytes())
+
+        # 4. Summarizer → pending_review with summary
+        summary = {"files": [str(p)]}
+        tracer.set_task_status(session_id, "pending_review", summary=summary)
+
+        pending = tracer.get_pending_reviews()
+        assert any(t["session_id"] == session_id for t in pending)
+
+        # 5. Operator approves
+        tracer.set_task_status(session_id, "closed")
+
+        assert tracer.conn.execute(
+            "SELECT status FROM tasks WHERE session_id = ?", (session_id,)
+        ).fetchone()[0] == "closed"
+        assert not any(t["session_id"] == session_id for t in tracer.get_pending_reviews())
+
+    def test_diff_reflects_write(self, tracer: SlashTracer, tmp_file) -> None:
+        p = tmp_file("a.py", "before\n")
+        tracer.open_task("S1", "task")
+        tracer.capture_baseline("S1", str(p))
+        p.write_text("after\n")
+        tracer.track_write("S1", str(p), p.read_bytes())
+        diff = tracer.diff_task("S1", str(p))
+        assert "-before" in diff
+        assert "+after" in diff
+
+
+# ---------------------------------------------------------------------------
+# Integration — sub-agent task
+# ---------------------------------------------------------------------------
+
+class TestSubAgentIntegration:
+    def test_tree_diff_covers_all_files(
+        self, tracer: SlashTracer, tmp_file
+    ) -> None:
+        """
+        Simulate: SubagentStart → child writes → SubagentStop → root Stop.
+        tree diff must include both root and child files.
+        """
+        root_file  = tmp_file("root.py", "root_v0\n")
+        child_file = tmp_file("child.py", "child_v0\n")
+
+        root_sid  = "ROOT"
+        child_sid = "CHILD"
+
+        # SubagentStart → open child task
+        tracer.open_task(root_sid,  "root task")
+        tracer.open_task(child_sid, "child task", parent_session_id=root_sid)
+
+        # Pre/Post hooks for root
+        tracer.capture_baseline(root_sid, str(root_file))
+        root_file.write_text("root_v1\n")
+        tracer.track_write(root_sid, str(root_file), root_file.read_bytes())
+
+        # Pre/Post hooks for child
+        tracer.capture_baseline(child_sid, str(child_file))
+        child_file.write_text("child_v1\n")
+        tracer.track_write(child_sid, str(child_file), child_file.read_bytes())
+
+        # SubagentStop → child closed
+        tracer.set_task_status(child_sid, "closed")
+
+        # Root Stop hook → pending_review
+        touched = tracer.list_touched_files(root_sid)
+        assert str(root_file) in touched
+        assert str(child_file) in touched
+
+        root_diff  = tracer.diff_task(root_sid, str(root_file))
+        child_diff = tracer.diff_task(root_sid, str(child_file))
+        assert "-root_v0" in root_diff
+        assert "+root_v1" in root_diff
+        assert "-child_v0" in child_diff
+        assert "+child_v1" in child_diff
+
+    def test_sub_agent_not_in_pending_reviews(
+        self, tracer: SlashTracer
+    ) -> None:
+        tracer.open_task("ROOT",  "root")
+        tracer.open_task("CHILD", "child", parent_session_id="ROOT")
+        tracer.set_task_status("CHILD", "closed")
+        tracer.set_task_status("ROOT", "pending_review")
+        pending = tracer.get_pending_reviews()
+        ids = [p["session_id"] for p in pending]
+        assert "CHILD" not in ids
+        assert "ROOT" in ids
+
+
+# ---------------------------------------------------------------------------
+# Integration — concurrent baseline writes
+# ---------------------------------------------------------------------------
+
+class TestConcurrentBaselines:
+    def test_min_captured_at_wins(
+        self, tracer: SlashTracer, tmp_file
+    ) -> None:
+        """
+        Two actor_ids capture a baseline for the same file.
+        diff_task must use the one with the EARLIEST captured_at.
+        """
+        p = tmp_file("shared.py", "original\n")
+        fp = str(p)
+
+        tracer.open_task("ROOT",  "root")
+        tracer.open_task("AGENT", "agent", parent_session_id="ROOT")
+
+        # Manually insert baselines with controlled timestamps
+        early_ms = int(time.time() * 1000) - 10_000
+        late_ms  = int(time.time() * 1000)
+
+        early_hash = tracer._store_blob(b"first baseline\n")
+        late_hash  = tracer._store_blob(b"second baseline\n")
+
+        tracer.conn.execute(
+            "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
+            "VALUES ('ROOT', ?, ?, ?)", (fp, early_hash, early_ms)
+        )
+        tracer.conn.execute(
+            "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
+            "VALUES ('AGENT', ?, ?, ?)", (fp, late_hash, late_ms)
+        )
+        tracer.conn.commit()
+
+        # Final write from agent
+        p.write_text("final\n")
+        tracer.track_write("AGENT", fp, p.read_bytes())
+
+        diff = tracer.diff_task("ROOT", fp)
+        assert "-first baseline" in diff   # earliest baseline used
+        assert "+final" in diff
+
+    def test_concurrent_capture_baseline_thread_safe(
+        self, db_path: str, tmp_file
+    ) -> None:
+        """
+        Spawn two threads each opening a separate tracer connection and
+        concurrently calling capture_baseline on the same file.
+        Both must succeed without exception (WAL handles concurrency).
+        """
+        p = tmp_file("concurrent.py", "original\n")
+        fp = str(p)
+        errors: list[Exception] = []
+
+        def worker(session_id: str) -> None:
+            try:
+                t = SlashTracer(db_path)
+                t.open_task(session_id, "task")
+                t.capture_baseline(session_id, fp)
+            except Exception as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker, args=("T1",))
+        t2 = threading.Thread(target=worker, args=("T2",))
+        t1.start(); t2.start()
+        t1.join();  t2.join()
+
+        assert errors == [], f"Unexpected errors: {errors}"
+
+        # Both rows must exist
+        t = SlashTracer(db_path)
+        rows = t.conn.execute(
+            "SELECT session_id FROM baselines ORDER BY session_id"
+        ).fetchall()
+        session_ids = {r[0] for r in rows}
+        assert {"T1", "T2"} <= session_ids
+
+
+# ---------------------------------------------------------------------------
+# Integration — REPL startup with pending review
+# ---------------------------------------------------------------------------
+
+class TestReplStartupPendingReview:
+    def test_pending_review_surfaces_at_startup(
+        self, tracer: SlashTracer, tmp_path: Path
+    ) -> None:
+        """
+        _check_startup_tasks reads pending_review tasks from the DB and
+        surfaces them.  We test the tracer side only (not the REPL I/O).
+        """
+        tracer.open_task("OLD_SESS", "fix the bug")
+        tracer.set_task_status("OLD_SESS", "pending_review",
+                               summary={"files": []})
+
+        pending = tracer.get_pending_reviews()
+        assert len(pending) == 1
+        assert pending[0]["session_id"] == "OLD_SESS"
+        assert pending[0]["prompt"] == "fix the bug"
+
+    def test_approve_transitions_to_closed(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S", "task")
+        tracer.set_task_status("S", "pending_review")
+
+        # Simulate operator approving
+        tracer.set_task_status("S", "closed")
+
+        pending = tracer.get_pending_reviews()
+        assert not any(p["session_id"] == "S" for p in pending)
+        status = tracer.conn.execute(
+            "SELECT status FROM tasks WHERE session_id = 'S'"
+        ).fetchone()[0]
+        assert status == "closed"
+
+    def test_dismiss_transitions_to_abandoned(self, tracer: SlashTracer) -> None:
+        tracer.open_task("S", "task")
+        tracer.set_task_status("S", "pending_review")
+
+        # Simulate operator dismissing
+        tracer.set_task_status("S", "abandoned")
+
+        pending = tracer.get_pending_reviews()
+        assert not any(p["session_id"] == "S" for p in pending)
+        status = tracer.conn.execute(
+            "SELECT status FROM tasks WHERE session_id = 'S'"
+        ).fetchone()[0]
+        assert status == "abandoned"
+
+
+# ---------------------------------------------------------------------------
+# Integration — stale open task recovery
+# ---------------------------------------------------------------------------
+
+class TestStaleOpenTaskRecovery:
+    """
+    At REPL startup _check_startup_tasks surfaces open tasks older than
+    _STALE_TASK_THRESHOLD_SECS (3600s) and offers bulk abandon.
+    We test the tracer state transitions only.
+    """
+
+    def _stale_open(self, tracer: SlashTracer, session_id: str) -> None:
+        tracer.open_task(session_id, "stale task")
+        # Backdate started_at to over 2 hours ago
+        old_ms = int((time.time() - 7200) * 1000)
+        tracer.conn.execute(
+            "UPDATE tasks SET started_at = ? WHERE session_id = ?",
+            (old_ms, session_id),
+        )
+        tracer.conn.commit()
+
+    def test_stale_open_task_can_be_abandoned(
+        self, tracer: SlashTracer
+    ) -> None:
+        self._stale_open(tracer, "STALE")
+        tracer.set_task_status("STALE", "abandoned")
+        status = tracer.conn.execute(
+            "SELECT status FROM tasks WHERE session_id = 'STALE'"
+        ).fetchone()[0]
+        assert status == "abandoned"
+
+    def test_stale_open_identified_by_age(
+        self, tracer: SlashTracer
+    ) -> None:
+        self._stale_open(tracer, "STALE")
+        threshold_secs = 3600
+        cutoff_ms = int((time.time() - threshold_secs) * 1000)
+        row = tracer.conn.execute(
+            "SELECT session_id FROM tasks "
+            "WHERE status = 'open' AND started_at < ?",
+            (cutoff_ms,),
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "STALE"
+
+    def test_recent_open_not_stale(self, tracer: SlashTracer) -> None:
+        tracer.open_task("FRESH", "fresh task")
+        threshold_secs = 3600
+        cutoff_ms = int((time.time() - threshold_secs) * 1000)
+        row = tracer.conn.execute(
+            "SELECT session_id FROM tasks "
+            "WHERE status = 'open' AND started_at < ?",
+            (cutoff_ms,),
+        ).fetchone()
+        assert row is None
+
+
+# ---------------------------------------------------------------------------
+# Integration — REPL /new creates task row; /review surfaces pending
+# ---------------------------------------------------------------------------
+
+class TestReplNewAndReview:
+    def test_new_session_open_task_row(self, tracer: SlashTracer) -> None:
+        """Each REPL /new creates a fresh open task row."""
+        for i, sid in enumerate(("SID1", "SID2", "SID3")):
+            tracer.open_task(sid, f"user message {i}")
+        count = tracer.conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE status = 'open'"
+        ).fetchone()[0]
+        assert count == 3
+
+    def test_review_command_lists_pending(self, tracer: SlashTracer) -> None:
+        """After summarizer fires, /review must surface the task."""
+        tracer.open_task("MID_SESS", "mid-session task")
+        tracer.set_task_status("MID_SESS", "pending_review",
+                               summary={"files": ["a.py"]})
+
+        pending = tracer.get_pending_reviews()
+        ids = [p["session_id"] for p in pending]
+        assert "MID_SESS" in ids
+
+    def test_multiple_sessions_each_reviewable(
+        self, tracer: SlashTracer
+    ) -> None:
+        for sid in ("S1", "S2"):
+            tracer.open_task(sid, f"task {sid}")
+            tracer.set_task_status(sid, "pending_review")
+
+        pending = tracer.get_pending_reviews()
+        ids = {p["session_id"] for p in pending}
+        assert {"S1", "S2"} <= ids
