@@ -5,9 +5,14 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import anyio
+import anyio.to_thread
 import click
+
+if TYPE_CHECKING:
+    from claude_agent_sdk import ClaudeSDKClient
 
 from rich.console import Console
 from rich.live import Live
@@ -29,16 +34,17 @@ BUILTIN_HELP = """\
 Built-in REPL commands (handled locally, not sent to the agent):
   /new      Start a fresh session (old history discarded)
   /status   Show recent audit-log entries
+  /update   Refresh managed hook files from latest templates (same as `slash update`)
   /help     Show this message
   /clear    Clear the terminal
   /sh <cmd> Run a shell command directly  (e.g. /sh git status)
   /exit     Quit the REPL  (alias: /quit, Ctrl-D)
 """
 
-BUILTIN_COMMANDS = {"/help", "/new", "/status", "/clear", "/exit", "/quit", "/sh"}
+BUILTIN_COMMANDS = {"/help", "/new", "/status", "/update", "/clear", "/exit", "/quit", "/sh"}
 
 
-async def _run_turn(client: object, line: str, verbosity: str) -> None:
+async def _run_turn(client: ClaudeSDKClient, line: str, verbosity: str) -> None:
     """
     Send *line* to the agent and stream the response to the console.
 
@@ -101,7 +107,7 @@ async def _run_repl(root: Path, verbosity: str) -> None:
                 # ── read input ───────────────────────────────────────────────
                 try:
                     line = await anyio.to_thread.run_sync(
-                        lambda: input(click.style("slash/ ", fg="green", bold=True))
+                        lambda: input(click.style("slash⚡ ", fg="green", bold=True))
                     )
                 except (EOFError, KeyboardInterrupt):
                     click.echo()  # newline after ^D / ^C
@@ -129,6 +135,10 @@ async def _run_repl(root: Path, verbosity: str) -> None:
                     elif cmd == "/status":
                         from .cli import _print_status
                         _print_status(root, tail=20)
+
+                    elif cmd == "/update":
+                        from .init import run_update
+                        run_update(root)
 
                     elif cmd == "/new":
                         session_turns = 0

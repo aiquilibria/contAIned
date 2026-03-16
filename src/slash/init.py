@@ -24,8 +24,11 @@ from slash.templates import (
     CLAUDE_MD,
     GITIGNORE_BLOCK,
     GITIGNORE_TEMPLATE,
+    POLICY_LOADER_HOOK,
     POLICY_MANIFEST,
     QA_HOOK,
+    RESTRICT_BASH_HOOK,
+    RESTRICT_READS_HOOK,
     RESTRICT_WRITES_HOOK,
     SETTINGS_JSON,
 )
@@ -157,19 +160,74 @@ def _update_gitignore(repo_root: Path) -> str:
 # Files managed by slash (safe to overwrite on update)
 # Each entry: (path_factory, content, executable)
 def _managed_files(target: Path) -> list[tuple[Path, str, bool]]:
+    settings = SETTINGS_JSON.format(workspace=str(target.resolve()))
     return [
+        (target / ".slash" / "hooks" / "_policy.py",         POLICY_LOADER_HOOK,   False),
+        (target / ".slash" / "hooks" / "restrict_reads.py",  RESTRICT_READS_HOOK,  True),
         (target / ".slash" / "hooks" / "restrict_writes.py", RESTRICT_WRITES_HOOK, True),
+        (target / ".slash" / "hooks" / "restrict_bash.py",   RESTRICT_BASH_HOOK,   True),
         (target / ".slash" / "hooks" / "audit.py",           AUDIT_HOOK,           True),
         (target / ".slash" / "hooks" / "qa.py",              QA_HOOK,              True),
-        (target / ".claude" / "settings.json",               SETTINGS_JSON,        False),
+        (target / ".claude" / "settings.json",               settings,             False),
         (target / "CLAUDE.md",                               CLAUDE_MD,            False),
     ]
 
-# Files owned by the user (never overwritten)
+# Files owned by the user (values preserved; missing keys filled in on update)
 def _user_files(target: Path) -> list[tuple[Path, str, bool]]:
     return [
         (target / ".slash" / "policy" / "manifest.yaml", POLICY_MANIFEST, False),
     ]
+
+
+def _sync_manifest(path: Path, template_content: str) -> str:
+    """Ensure manifest.yaml contains every key defined in the template.
+
+    Merges template defaults into the existing file: keys present in the
+    template but absent in the file are added; values the user has already
+    set are never overwritten.
+
+    Returns "created", "updated", or "exists".
+    """
+    import yaml  # pyyaml — project dependency
+
+    if not path.exists():
+        return _write_file(path, template_content, overwrite=False)
+
+    try:
+        template_data: dict = yaml.safe_load(template_content) or {}
+        existing_text: str = path.read_text()
+        existing_data: dict = yaml.safe_load(existing_text) or {}
+    except Exception:
+        return "exists"  # unparseable — leave untouched
+
+    def _shape_merge(template: dict, existing: dict) -> dict:
+        """Return a dict shaped exactly like *template*, with values from *existing*.
+
+        - Keys present in *template* but absent in *existing* → template default.
+        - Keys present in *existing* but absent in *template* → dropped (old format).
+        - Shared dict-valued keys → recurse.
+        """
+        result = {}
+        for key, tmpl_val in template.items():
+            if key in existing:
+                exist_val = existing[key]
+                if isinstance(tmpl_val, dict) and isinstance(exist_val, dict):
+                    result[key] = _shape_merge(tmpl_val, exist_val)
+                else:
+                    result[key] = exist_val
+            else:
+                result[key] = tmpl_val
+        return result
+
+    merged = _shape_merge(template_data, existing_data)
+
+    if merged == existing_data:
+        return "exists"
+
+    path.write_text(
+        yaml.dump(merged, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    )
+    return "updated"
 
 # Directory markers
 def _markers(target: Path) -> list[Path]:
@@ -251,10 +309,10 @@ def run_update(target: Path) -> None:
         status = _write_file(path, content, executable=executable, overwrite=True)
         results.append((str(rel), status))
 
-    # User-editable files — always skip
-    for path, content, executable in _user_files(target):
+    # User-editable files — sync structure, preserve values
+    for path, content, _executable in _user_files(target):
         rel = path.relative_to(target)
-        results.append((str(rel), "exists"))
+        results.append((str(rel), _sync_manifest(path, content)))
 
     _print_table(results)
-    console.print("[dim]User-editable files (manifest.yaml) were not modified.[/dim]\n")
+    console.print("[dim]manifest.yaml: user values preserved; any missing keys were added.[/dim]\n")

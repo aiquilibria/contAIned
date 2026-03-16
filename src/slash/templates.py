@@ -4,116 +4,120 @@ All generated content lives here so the init logic stays clean.
 """
 
 SETTINGS_JSON = """\
-{
-  "permissions": {
+{{
+  "permissions": {{
     "allow": [
-      "Read",
-      "Glob",
-      "Grep"
-    ],
-    "deny": [
-      "Bash(rm*)",
-      "Bash(sudo*)",
-      "Bash(curl*)",
-      "Bash(wget*)"
+      "Read({workspace}/**)",
+      "Glob({workspace}/**)",
+      "Grep({workspace}/**)"
     ]
-  },
-  "hooks": {
+  }},
+  "hooks": {{
     "PreToolUse": [
-      {
+      {{
+        "matcher": "Read|Glob|Grep",
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "python3 .slash/hooks/restrict_reads.py"
+          }}
+        ]
+      }},
+      {{
         "matcher": "Write|Edit|MultiEdit",
         "hooks": [
-          {
+          {{
             "type": "command",
             "command": "python3 .slash/hooks/restrict_writes.py"
-          }
+          }}
         ]
-      }
+      }},
+      {{
+        "matcher": "Bash",
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "python3 .slash/hooks/restrict_bash.py"
+          }}
+        ]
+      }}
     ],
     "PostToolUse": [
-      {
+      {{
         "matcher": "*",
         "hooks": [
-          {
+          {{
             "type": "command",
             "command": "python3 .slash/hooks/audit.py"
-          }
+          }}
         ]
-      }
+      }}
     ],
     "Stop": [
-      {
+      {{
         "hooks": [
-          {
+          {{
             "type": "command",
             "command": "python3 .slash/hooks/qa.py"
-          }
+          }}
         ]
-      }
+      }}
     ]
-  }
-}
+  }}
+}}
 """
 
 POLICY_MANIFEST = """\
 # Slash policy manifest
-# Controls what the agent can and cannot do.
 #
-# Evaluation order (first match wins):
-#   PreToolUse hook (this file) → deny rules → allow rules → canUseTool callback
+# Two responsibilities:
+#   1. policy — configurable enforcement settings read by the hook scripts.
+#      All keys have defaults that reproduce the original hardcoded behaviour.
+#   2. agent config — verbosity and thinking settings for slash run/repl.
 #
-# Tiers:
-#   allow  — hook exits 0, tool proceeds
-#   deny   — hook exits 2, tool blocked, reason fed back to agent
-#   (anything not listed here falls through to the canUseTool callback)
+# Action values accepted by policy settings:
+#   block    — deny the operation outright; agent receives a clear reason
+#   allow    — permit unconditionally
+#   escalate — pass through to the SDK's canUseTool callback for operator approval
+#
+# Note: writes to .slash/ are always denied regardless of policy settings —
+# control-plane protection is hardcoded and not configurable.
 
-allow:
-  # Read-only tools — always safe
-  - tool: Read
-  - tool: Glob
-  - tool: Grep
+policy:
 
-  # Safe bash patterns
-  - tool: Bash
-    pattern: "^git (status|diff|log|show).*"
-  - tool: Bash
-    pattern: "^(npm test|pytest|python -m pytest).*"
-  - tool: Bash
-    pattern: "^(eslint|prettier --check|ruff check|mypy).*"
-  - tool: Bash
-    pattern: "^(cat|ls|find|echo|pwd|which|head|tail|wc).*"
+  # ── Secret-file protection ──────────────────────────────────────────────────
+  secrets:
+    reads:         block    # Read / Glob / Grep on secret files
+    writes:        block    # Write / Edit / MultiEdit on secret files
+    bash_reads:    block    # cat / head / tail / etc. targeting secret files
+    safe_variants: allow    # .env.example / .env.sample / .env.template exemption
 
-deny:
-  # Destructive shell commands
-  - tool: Bash
-    pattern: '^rm\s'
-    reason: "Destructive file deletion is not permitted"
-  - tool: Bash
-    pattern: '.*rm\s+-rf.*'
-    reason: "Recursive deletion is not permitted"
-  - tool: Bash
-    pattern: '^sudo\s'
-    reason: "Privilege escalation is not permitted"
+  # ── Workspace boundary ───────────────────────────────────────────────────────
+  workspace:
+    reads:      escalate  # Read / Grep outside the project root → operator approval
+    writes:     block     # Write / Edit / MultiEdit outside the project root
+    bash_paths: block     # Bash absolute paths outside the project workspace
 
-  # Network exfiltration
-  - tool: Bash
-    pattern: '^(curl|wget|nc|ncat)\s'
-    reason: "Outbound network calls from Bash are not permitted"
+  # ── Bash command restrictions ────────────────────────────────────────────────
+  bash:
+    destructive:          block  # rm / rm -rf
+    privilege_escalation: block  # sudo
+    network_exfiltration: block  # curl / wget / nc / ncat
+    git_mutations:        block  # git commit / reset / rebase / merge / push
+    package_publish:      block  # npm publish / pip upload / twine upload
 
-  # Git mutations (escalate these via canUseTool instead)
-  - tool: Bash
-    pattern: "^git push.*"
-    reason: "Git push requires explicit operator approval — use the canUseTool prompt"
-  - tool: Bash
-    pattern: "^git (commit|reset|rebase|merge).*"
-    reason: "Git mutations require explicit operator approval"
+  # ── Audit logging ─────────────────────────────────────────────────────────────
+  audit:
+    enabled: true
 
-  # Package publishing
-  - tool: Bash
-    pattern: "^(npm publish|pip upload|twine upload).*"
-    reason: "Package publishing requires explicit operator approval"
+  # ── QA gate (stop hook) ───────────────────────────────────────────────────────
+  qa:
+    syntax_check: true   # py_compile
+    lint_check:   true   # ruff check
+    format_check: true   # ruff format --check
+    type_check:   true   # pyright
 
-# Agent model settings
+# ── Agent model settings ──────────────────────────────────────────────────────
 agent:
   # Output verbosity during `slash run`:
   #   verbose  — full streaming output: thinking, text, every tool call and result (default)
@@ -125,22 +129,121 @@ agent:
     budget_tokens: 1024
 """
 
+POLICY_LOADER_HOOK = '''\
+#!/usr/bin/env python3
+"""Shared policy loader for slash hooks.
+
+Reads the policy: section from .slash/policy/manifest.yaml and merges it
+with built-in defaults so that every key is always present.  If the manifest
+cannot be read for any reason the defaults are returned unchanged — hooks
+degrade gracefully to the original hardcoded behaviour.
+
+Action values: "block" | "allow" | "escalate"
+  block    — deny the operation; hook exits 2 with a reason on stderr
+  allow    — permit unconditionally
+  escalate — pass through (exit 0); the SDK\'s canUseTool callback decides
+"""
+from pathlib import Path
+
+_DEFAULTS = {
+    "secrets": {
+        "reads":         "block",
+        "writes":        "block",
+        "bash_reads":    "block",
+        "safe_variants": "allow",
+    },
+    "workspace": {
+        "reads":      "escalate",
+        "writes":     "block",
+        "bash_paths": "block",
+    },
+    "bash": {
+        "destructive":          "block",
+        "privilege_escalation": "block",
+        "network_exfiltration": "block",
+        "git_mutations":        "block",
+        "package_publish":      "block",
+    },
+    "audit": {
+        "enabled": True,
+    },
+    "qa": {
+        "syntax_check": True,
+        "lint_check":   True,
+        "format_check": True,
+        "type_check":   True,
+    },
+}
+
+
+def _deep_merge(base, override):
+    """Recursively merge *override* into *base*, returning a new dict."""
+    result = dict(base)
+    for key, val in override.items():
+        if isinstance(val, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], val)
+        else:
+            result[key] = val
+    return result
+
+
+def load_policy(cwd="."):
+    """Return the fully-merged policy dict for the project rooted at *cwd*.
+
+    Always succeeds: if the manifest is unreadable the built-in defaults
+    are returned so hooks continue to enforce the current behaviour.
+    """
+    try:
+        import yaml
+        manifest_path = Path(cwd) / ".slash" / "policy" / "manifest.yaml"
+        with manifest_path.open() as fh:
+            manifest = yaml.safe_load(fh) or {}
+        return _deep_merge(_DEFAULTS, manifest.get("policy", {}))
+    except Exception:
+        return dict(_DEFAULTS)
+'''
+
 RESTRICT_WRITES_HOOK = '''\
 #!/usr/bin/env python3
 """
 PreToolUse hook — restricts Write, Edit, MultiEdit to within the project root.
 
-Reads tool call JSON from stdin.
+Three checks in order:
+  1. Workspace boundary        — driven by policy.workspace.writes
+  2. Control-plane protection  — .slash/ writes are ALWAYS denied (not configurable)
+  3. Secret file               — driven by policy.secrets.writes
+
 Exits 0 to allow, 2 to deny (reason on stderr fed back to agent).
 Denials are written to the audit log before blocking.
 """
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _policy import load_policy  # noqa: E402
 
-def log_denial(event: dict, target: str, reason: str) -> None:
+
+SECRET_FILE_PATTERNS = [
+    re.compile(r\'(^|[/\\\\])\\.env(\\.[^/\\\\]+)?$\', re.IGNORECASE),
+    re.compile(r\'\\.(pem|key|p12|pfx|jks|keystore)$\', re.IGNORECASE),
+    re.compile(r\'(^|[/\\\\])id_(rsa|dsa|ecdsa|ed25519)$\', re.IGNORECASE),
+    re.compile(r\'(^|[/\\\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$\', re.IGNORECASE),
+    re.compile(r\'\\.(secret|secrets)$\', re.IGNORECASE),
+]
+SAFE_VARIANT_RE = re.compile(r\'\\.(example|sample|template)\', re.IGNORECASE)
+
+
+def is_secret_file(path):
+    """Return True if path refers to a secret file that should not be written."""
+    if SAFE_VARIANT_RE.search(Path(path).name):
+        return False
+    return any(pattern.search(path) for pattern in SECRET_FILE_PATTERNS)
+
+
+def log_denial(event, target, reason):
     """Append a denial entry to the audit log. Never raises — audit must not block."""
     try:
         project_root = Path(event.get("cwd", "."))
@@ -160,10 +263,18 @@ def log_denial(event: dict, target: str, reason: str) -> None:
         pass
 
 
+def enforce(action, event, target, msg):
+    """Act on *action*: block exits 2; allow/escalate pass through."""
+    if action == "block":
+        log_denial(event, target, msg)
+        print(msg, file=sys.stderr)
+        sys.exit(2)
+
+
 try:
     event = json.load(sys.stdin)
 except json.JSONDecodeError:
-    sys.exit(0)  # malformed input — pass through, don't block
+    sys.exit(0)  # malformed input — pass through, don\'t block
 
 tool       = event.get("tool_name", "")
 tool_input = event.get("tool_input", {})
@@ -175,21 +286,337 @@ target = tool_input.get("file_path", "")
 if not target:
     sys.exit(0)
 
-# Allow writes anywhere within the project root; block everything outside.
-project_root = Path(event.get("cwd", ".")).resolve()
+cwd          = event.get("cwd", ".")
+policy       = load_policy(cwd)
+project_root = Path(cwd).resolve()
+slash_dir    = project_root / ".slash"
+resolved     = Path(target).resolve()
 
+# ── Check 1: outside project root ─────────────────────────────────────────────
 try:
-    Path(target).resolve().relative_to(project_root)
-    sys.exit(0)
+    resolved.relative_to(project_root)
 except ValueError:
-    reason = f"write outside project root: {target}"
-    log_denial(event, target, reason)
-    print(
+    enforce(
+        policy["workspace"]["writes"], event, target,
         f"Write denied: \\'{target}\\' is outside the project root.\\n"
         f"You may only write within: {project_root}",
+    )
+    sys.exit(0)  # allow or escalate
+
+# ── Check 2: inside .slash/ control-plane (always enforced, not configurable) ─
+try:
+    resolved.relative_to(slash_dir)
+    log_denial(event, target, f"write into control-plane directory: {target}")
+    print(
+        f"Write denied: \\'{target}\\' is inside the .slash/ control-plane directory.\\n"
+        "Hook and policy files are managed by slash and must not be edited directly.",
         file=sys.stderr,
     )
     sys.exit(2)
+except ValueError:
+    pass  # not inside .slash/ — continue
+
+# ── Check 3: secret file ───────────────────────────────────────────────────────
+if is_secret_file(str(resolved)):
+    enforce(
+        policy["secrets"]["writes"], event, target,
+        f"Write denied: \\'{target}\\' looks like a secret file.\\n"
+        "Writing to credentials, keys, and .env files is not permitted.",
+    )
+
+sys.exit(0)
+'''
+
+RESTRICT_READS_HOOK = '''\
+#!/usr/bin/env python3
+"""
+PreToolUse hook — restricts Read, Glob, and Grep tool calls.
+
+Checks are driven by the policy: section of .slash/policy/manifest.yaml.
+  policy.secrets.reads         — action for secret-file read attempts
+  policy.secrets.safe_variants — action for .env.example / template variants
+  policy.workspace.reads       — action for reads outside the project root
+
+Action values: block | allow | escalate
+  block    — deny (exit 2, reason on stderr)
+  allow    — permit unconditionally; skip the check
+  escalate — pass through (exit 0); SDK\'s canUseTool callback decides
+
+Exits 0 to allow, 2 to deny (reason on stderr fed back to agent).
+Denials are written to the audit log before blocking.
+"""
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _policy import load_policy  # noqa: E402
+
+
+SECRET_FILE_PATTERNS = [
+    re.compile(r\'(^|[/\\\\])\\.env(\\.[^/\\\\]+)?$\', re.IGNORECASE),
+    re.compile(r\'\\.(pem|key|p12|pfx|jks|keystore)$\', re.IGNORECASE),
+    re.compile(r\'(^|[/\\\\])id_(rsa|dsa|ecdsa|ed25519)$\', re.IGNORECASE),
+    re.compile(r\'(^|[/\\\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$\', re.IGNORECASE),
+    re.compile(r\'\\.(secret|secrets)$\', re.IGNORECASE),
+]
+SAFE_VARIANT_RE = re.compile(r\'\\.(example|sample|template)\', re.IGNORECASE)
+
+
+def matches_secret_pattern(path):
+    """Return True if path matches a secret file pattern (ignoring safe-variant exception)."""
+    return any(pattern.search(path) for pattern in SECRET_FILE_PATTERNS)
+
+
+def is_safe_variant(path):
+    """Return True if path looks like a safe template/example variant."""
+    return bool(SAFE_VARIANT_RE.search(Path(path).name))
+
+
+def log_denial(event, target, reason):
+    """Append a denial entry to the audit log. Never raises."""
+    try:
+        project_root = Path(event.get("cwd", "."))
+        audit_log = project_root / ".slash" / "audit" / "pipeline.jsonl"
+        audit_log.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts":         datetime.now(timezone.utc).isoformat(),
+            "session_id": event.get("session_id"),
+            "tool":       event.get("tool_name"),
+            "input":      {"target": target},
+            "outcome":    "denied",
+            "reason":     reason,
+        }
+        with audit_log.open("a") as f:
+            f.write(json.dumps(entry) + "\\n")
+    except OSError:
+        pass
+
+
+def enforce(action, event, target, msg):
+    """Act on *action*: block exits 2; allow/escalate pass through."""
+    if action == "block":
+        log_denial(event, target, msg)
+        print(msg, file=sys.stderr)
+        sys.exit(2)
+
+
+try:
+    event = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(0)
+
+cwd        = event.get("cwd", ".")
+policy     = load_policy(cwd)
+tool       = event.get("tool_name", "")
+tool_input = event.get("tool_input", {})
+
+if tool == "Read":
+    target = tool_input.get("file_path", "")
+elif tool == "Grep":
+    target = tool_input.get("path", "")
+elif tool == "Glob":
+    target = tool_input.get("pattern", "")
+else:
+    sys.exit(0)
+
+if not target:
+    sys.exit(0)
+
+# ── Check 1: secret file (with safe-variant override) ────────────────────────
+if matches_secret_pattern(target):
+    if is_safe_variant(target):
+        enforce(
+            policy["secrets"]["safe_variants"], event, target,
+            f"Access denied: \\'{target}\\' is a secret file "
+            "(safe-variant exemption is disabled by policy).",
+        )
+    else:
+        enforce(
+            policy["secrets"]["reads"], event, target,
+            "Access denied: secret files (credentials, keys, .env) may not be read. "
+            "Only example/sample/template variants (e.g. .env.example) are permitted.",
+        )
+    sys.exit(0)  # allow or escalate: pass through
+
+# ── Check 2: workspace boundary (Read and Grep only — Glob patterns are virtual) ──
+if tool in ("Read", "Grep"):
+    workspace = Path(cwd).resolve()
+    try:
+        Path(target).resolve().relative_to(workspace)
+    except ValueError:
+        enforce(
+            policy["workspace"]["reads"], event, target,
+            f"Read outside workspace: \\'{target}\\' is not within {workspace}.",
+        )
+
+sys.exit(0)
+'''
+
+RESTRICT_BASH_HOOK = '''\
+#!/usr/bin/env python3
+"""
+PreToolUse hook — restricts Bash tool calls.
+
+All checks are driven by the policy: section of .slash/policy/manifest.yaml.
+
+Checks applied in order:
+  1. policy.secrets.bash_reads        — read cmds (cat, head, ...) on secret files
+  2. policy.workspace.bash_paths      — absolute paths outside the project workspace
+  3. policy.bash.destructive          — rm / rm -rf
+  4. policy.bash.privilege_escalation — sudo
+  5. policy.bash.network_exfiltration — curl / wget / nc / ncat
+  6. policy.bash.git_mutations        — git commit / reset / rebase / merge / push
+  7. policy.bash.package_publish      — npm publish / pip upload / twine upload
+
+Action values: block | allow | escalate
+  block    — deny (exit 2, reason on stderr)
+  allow    — permit unconditionally; skip the check
+  escalate — pass through (exit 0); SDK\'s canUseTool callback decides
+
+Exits 0 to allow, 2 to deny (reason on stderr fed back to agent).
+Denials are written to the audit log before blocking.
+"""
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _policy import load_policy  # noqa: E402
+
+
+SECRET_FILE_PATTERNS = [
+    re.compile(r\'(^|[/\\\\])\\.env(\\.[^/\\\\]+)?$\', re.IGNORECASE),
+    re.compile(r\'\\.(pem|key|p12|pfx|jks|keystore)$\', re.IGNORECASE),
+    re.compile(r\'(^|[/\\\\])id_(rsa|dsa|ecdsa|ed25519)$\', re.IGNORECASE),
+    re.compile(r\'(^|[/\\\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$\', re.IGNORECASE),
+    re.compile(r\'\\.(secret|secrets)$\', re.IGNORECASE),
+]
+SAFE_VARIANT_RE = re.compile(r\'\\.(example|sample|template)\', re.IGNORECASE)
+READ_CMD_RE     = re.compile(r\'^\\s*(cat|head|tail|less|more|bat|pg|view)\\s\', re.IGNORECASE)
+
+# (policy key, compiled patterns, denial reason)
+_BASH_RULES = [
+    (
+        "destructive",
+        [re.compile(r\'^rm\\s\'), re.compile(r\'.*\\brm\\s+-rf\\b.*\')],
+        "Destructive file deletion is not permitted.",
+    ),
+    (
+        "privilege_escalation",
+        [re.compile(r\'^sudo\\s\')],
+        "Privilege escalation is not permitted.",
+    ),
+    (
+        "network_exfiltration",
+        [re.compile(r\'^(curl|wget|nc|ncat)\\s\')],
+        "Outbound network calls from Bash are not permitted.",
+    ),
+    (
+        "git_mutations",
+        [re.compile(r\'^git\\s+(commit|reset|rebase|merge)\\b\'), re.compile(r\'^git\\s+push\\b\')],
+        "Git mutations require explicit operator approval.",
+    ),
+    (
+        "package_publish",
+        [re.compile(r\'^(npm\\s+publish|pip\\s+upload|twine\\s+upload)\\b\')],
+        "Package publishing requires explicit operator approval.",
+    ),
+]
+
+
+def is_secret_file(path):
+    """Return True if path refers to a secret file."""
+    if SAFE_VARIANT_RE.search(Path(path).name):
+        return False
+    return any(pattern.search(path) for pattern in SECRET_FILE_PATTERNS)
+
+
+def abs_path_tokens(command):
+    """Extract tokens that resolve to absolute paths, including ~/... home-relative paths."""
+    result = []
+    for t in command.split():
+        expanded = os.path.expanduser(t)
+        if expanded.startswith("/") and len(expanded) > 1:
+            result.append(expanded)
+    return result
+
+
+def log_denial(event, command, reason):
+    try:
+        project_root = Path(event.get("cwd", "."))
+        audit_log = project_root / ".slash" / "audit" / "pipeline.jsonl"
+        audit_log.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "ts":         datetime.now(timezone.utc).isoformat(),
+            "session_id": event.get("session_id"),
+            "tool":       event.get("tool_name"),
+            "input":      {"command": command},
+            "outcome":    "denied",
+            "reason":     reason,
+        }
+        with audit_log.open("a") as f:
+            f.write(json.dumps(entry) + "\\n")
+    except OSError:
+        pass
+
+
+def enforce(action, event, command, msg):
+    """Act on *action*: block exits 2; allow/escalate pass through."""
+    if action == "block":
+        log_denial(event, command, msg)
+        print(msg, file=sys.stderr)
+        sys.exit(2)
+
+
+try:
+    event = json.load(sys.stdin)
+except json.JSONDecodeError:
+    sys.exit(0)
+
+command = event.get("tool_input", {}).get("command", "")
+if not command:
+    sys.exit(0)
+
+cwd    = event.get("cwd", ".")
+policy = load_policy(cwd)
+
+# ── Check 1: secret file reads ────────────────────────────────────────────────
+if READ_CMD_RE.match(command):
+    for token in command.split():
+        if is_secret_file(token):
+            enforce(
+                policy["secrets"]["bash_reads"], event, command,
+                f"Bash denied: \\'{token}\\' looks like a secret file.\\n"
+                "Secret files (credentials, keys, .env) may not be read.",
+            )
+
+# ── Check 2: absolute paths outside workspace ─────────────────────────────────
+workspace = Path(cwd).resolve()
+for token in abs_path_tokens(command):
+    try:
+        Path(token).resolve().relative_to(workspace)
+    except ValueError:
+        enforce(
+            policy["workspace"]["bash_paths"], event, command,
+            f"Bash denied: \\'{token}\\' is outside the project workspace.\\n"
+            f"Bash commands may only reference paths within: {workspace}",
+        )
+
+# ── Checks 3–7: bash command rules ────────────────────────────────────────────
+for rule_key, patterns, reason in _BASH_RULES:
+    action = policy["bash"][rule_key]
+    if action == "allow":
+        continue
+    if any(pat.search(command) for pat in patterns):
+        enforce(action, event, command, reason)
+
+sys.exit(0)
 '''
 
 AUDIT_HOOK = '''\
@@ -197,6 +624,7 @@ AUDIT_HOOK = '''\
 """
 PostToolUse hook — appends a structured audit entry for every tool execution.
 
+Logging is controlled by policy.audit.enabled in manifest.yaml.
 This hook must never block execution (always exits 0).
 """
 import json
@@ -204,10 +632,19 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _policy import load_policy  # noqa: E402
+
 
 try:
     event = json.load(sys.stdin)
 except json.JSONDecodeError:
+    sys.exit(0)
+
+cwd    = event.get("cwd", ".")
+policy = load_policy(cwd)
+
+if not policy["audit"]["enabled"]:
     sys.exit(0)
 
 tool_response = event.get("tool_response") or {}
@@ -217,7 +654,7 @@ outcome = "denied" if is_error else "success"
 entry = {
     "ts":         datetime.now(timezone.utc).isoformat(),
     "session_id": event.get("session_id"),
-    "task_id":    event.get("cwd", "").split("/")[-1],  # last path segment as task hint
+    "task_id":    cwd.split("/")[-1],  # last path segment as task hint
     "tool":       event.get("tool_name"),
     "input":      event.get("tool_input"),
     "outcome":    outcome,
@@ -235,7 +672,7 @@ if is_error:
         entry["reason"] = content
 
 try:
-    project_root = Path(event.get("cwd", "."))
+    project_root = Path(cwd)
     audit_log = project_root / ".slash" / "audit" / "pipeline.jsonl"
     audit_log.parent.mkdir(parents=True, exist_ok=True)
     with audit_log.open("a") as f:
@@ -251,23 +688,35 @@ QA_HOOK = '''\
 """
 Stop hook — runs QA checks when the agent signals it is done.
 
-If checks pass  → exits 0, agent stops cleanly.
-If checks fail  → prints JSON with decision:block, agent receives feedback and continues.
+Which checks run is controlled by policy.qa.* flags in manifest.yaml:
+  syntax_check  — py_compile on all Python files
+  lint_check    — ruff check
+  format_check  — ruff format --check
+  type_check    — pyright
+
+If all enabled checks pass  → exits 0, agent stops cleanly.
+If any enabled check fails  → prints JSON with decision:block, agent receives feedback.
 """
 import json
 import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from _policy import load_policy  # noqa: E402
+
 try:
     event = json.load(sys.stdin)
 except (json.JSONDecodeError, EOFError):
     event = {}
 
-TASK_DIR = Path(event.get("cwd", ".")).resolve()
+cwd      = event.get("cwd", ".")
+TASK_DIR = Path(cwd).resolve()
+policy   = load_policy(cwd)
+qa       = policy["qa"]
 
 
-def run(cmd: list[str]) -> tuple[int, str]:
+def run(cmd):
     result = subprocess.run(
         cmd,
         cwd=TASK_DIR,
@@ -277,44 +726,60 @@ def run(cmd: list[str]) -> tuple[int, str]:
     return result.returncode, result.stdout + result.stderr
 
 
-def block(reason: str) -> None:
+def block(reason):
     """Tell the SDK to keep the agent running with this feedback."""
     print(json.dumps({"decision": "block", "reason": reason}))
     sys.exit(0)
 
 
-# ── Syntax check all Python files the agent produced ──────────────────────────
-py_files = list(TASK_DIR.glob("*.py"))
+# ── Collect Python files (skip generated/tool directories) ────────────────────
+_SKIP_DIRS = {".venv", "__pycache__", ".git", "node_modules", ".slash"}
+py_files = [
+    f
+    for f in TASK_DIR.rglob("**/*.py")
+    if not _SKIP_DIRS.intersection(f.parts)
+]
 
 failures = []
-for f in py_files:
-    code, out = run(["python", "-m", "py_compile", f.name])
-    if code != 0:
-        failures.append({"check": "syntax", "file": f.name, "output": out})
 
-if failures:
-    feedback = "QA failed — fix the following issues before finishing:\\n\\n"
-    for item in failures:
-        feedback += f"### {item[\'check\']} error in `{item[\'file\']}`\\n```\\n{item[\'output\']}\\n```\\n\\n"
-    block(feedback)
+# ── Syntax check ──────────────────────────────────────────────────────────────
+if qa["syntax_check"]:
+    for f in py_files:
+        code, out = run(["python", "-m", "py_compile", str(f)])
+        if code != 0:
+            failures.append({"check": "syntax", "file": str(f.relative_to(TASK_DIR)), "output": out})
+    if failures:
+        feedback = "QA failed — fix the following issues before finishing:\\n\\n"
+        for item in failures:
+            feedback += f"### {item[\'check\']} error in `{item[\'file\']}`\\n```\\n{item[\'output\']}\\n```\\n\\n"
+        block(feedback)
 
 # ── ruff check (linting) ──────────────────────────────────────────────────────
-if py_files:
+if qa["lint_check"] and py_files:
     try:
-        code, out = run(["ruff", "check"] + [f.name for f in py_files])
+        code, out = run(["ruff", "check"] + [str(f) for f in py_files])
         if code != 0:
             failures.append({"check": "ruff check", "file": "python files", "output": out})
     except FileNotFoundError:
         print("ruff not installed — skipping ruff check", file=sys.stderr)
 
 # ── ruff format --check ───────────────────────────────────────────────────────
-if py_files:
+if qa["format_check"] and py_files:
     try:
-        code, out = run(["ruff", "format", "--check"] + [f.name for f in py_files])
+        code, out = run(["ruff", "format", "--check"] + [str(f) for f in py_files])
         if code != 0:
             failures.append({"check": "ruff format", "file": "python files", "output": out})
     except FileNotFoundError:
         print("ruff not installed — skipping ruff format --check", file=sys.stderr)
+
+# ── pyright (type checking) ───────────────────────────────────────────────────
+if qa["type_check"] and py_files:
+    try:
+        code, out = run(["pyright"])
+        if code != 0:
+            failures.append({"check": "pyright", "file": "python files", "output": out})
+    except FileNotFoundError:
+        print("pyright not installed — skipping type checks", file=sys.stderr)
 
 if failures:
     feedback = "QA failed — fix the following issues before finishing:\\n\\n"
@@ -359,8 +824,7 @@ Each task you receive will specify:
 - QA feedback after stopping → fix the issues described, then stop again
 """
 
-GITIGNORE_BLOCK = """\
-
+GITIGNORE_BLOCK = """
 # slash — control plane
 # The .slash/ directory contains hooks, policy, and audit logs managed by slash.
 # Keep it out of version control.

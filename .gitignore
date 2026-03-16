@@ -26,3 +26,4 @@ node_modules/
 # Keep it out of version control.
 .slash/
 docs/*
+.claude/*

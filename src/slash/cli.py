@@ -147,9 +147,9 @@ def _print_status(root: Path, tail: int = 20) -> None:
         except json.JSONDecodeError:
             pass
 
-    recent = entries[-tail:]
+    recent = list(reversed(entries[-tail:]))
 
-    console.print(f"\n[bold]Audit log[/bold] — last {len(recent)} of {len(entries)} entries\n")
+    console.print(f"\n[bold]Audit log[/bold] — last {len(recent)} of {len(entries)} entries (newest first)\n")
 
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
     table.add_column("Timestamp", style="dim", no_wrap=True)
