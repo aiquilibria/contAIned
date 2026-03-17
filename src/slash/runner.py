@@ -144,7 +144,7 @@ def _load_manifest(root: Path) -> dict[str, Any]:
         return {}
 
 
-def _build_client(root: Path) -> ClaudeSDKClient:
+def _build_client(root: Path, *, resume: str | None = None) -> ClaudeSDKClient:
     """
     Validate the workspace and return a ``ClaudeSDKClient`` instance.
 
@@ -258,6 +258,9 @@ def _build_client(root: Path) -> ClaudeSDKClient:
 
     model          = _load_model_config(root)
     thinking_cfg   = _load_thinking_config(root)
+
+    # Build options incrementally so Pyright can track the concrete types of
+    # optional fields rather than seeing opaque conditional dict spreads.
     options = ClaudeAgentOptions(
         setting_sources=["project"],
         allowed_tools=[
@@ -265,22 +268,27 @@ def _build_client(root: Path) -> ClaudeSDKClient:
             "AskUserQuestion",
         ],
         cwd=str(root),
-
-        # Model — sourced from agent.model in .slash/manifest.yaml.
-        # Omitted entirely when not set so the SDK keeps its own default.
-        **({"model": model} if model else {}),
-
-        # Extended thinking — sourced from agent.thinking in manifest.yaml.
-        # Omitted entirely only when ThinkingConfigDisabled is unavailable in
-        # the installed SDK; in that case we cannot express an explicit disable
-        # and the SDK will apply its own default.  When the type IS available,
-        # we always pass an explicit enabled or disabled object so the manifest
-        # setting is honoured precisely.
-        **({"thinking": thinking_cfg} if thinking_cfg is not None else {}),
-
-        # All policy enforcement lives in can_use_tool above.
         can_use_tool=can_use_tool,
     )
+
+    # When resuming, continue the existing conversation rather than starting
+    # a new session; the agent keeps its full history.
+    if resume is not None:
+        options.resume = resume
+
+    # Model — sourced from agent.model in .slash/manifest.yaml.
+    # Omitted entirely when not set so the SDK keeps its own default.
+    if model is not None:
+        options.model = model
+
+    # Extended thinking — sourced from agent.thinking in manifest.yaml.
+    # Omitted entirely only when ThinkingConfigDisabled is unavailable in
+    # the installed SDK; in that case we cannot express an explicit disable
+    # and the SDK will apply its own default.  When the type IS available,
+    # we always pass an explicit enabled or disabled object so the manifest
+    # setting is honoured precisely.
+    if thinking_cfg is not None:
+        options.thinking = thinking_cfg
 
     return ClaudeSDKClient(options)
 
@@ -870,20 +878,19 @@ async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose
         # SDK context has exited; QA hook has already run.  Now run the
         # summarizer in-process so it never triggers the hook chain again.
         if tracer and _task_session_id:
-            current_prompt = prompt
+            # Narrow to str — the `if _task_session_id` guard above guarantees
+            # this is not None, but Pyright needs a local binding to see it.
+            task_session_id: str = _task_session_id
             while True:
                 try:
-                    _run_summarizer(_task_session_id, root, tracer)
+                    _run_summarizer(task_session_id, root, tracer)
                     break  # approved or dismissed — done
                 except _ContinueSignal as sig:
-                    # Operator asked for another turn — re-run the agent with
-                    # the follow-up instruction and loop back to summarize.
-                    current_prompt = sig.follow_up
-                    async with _build_client(root) as client:
-                        _task_session_id = getattr(client, "session_id", None) or _task_session_id
-                        if tracer and _task_session_id:
-                            tracer.open_task(_task_session_id, current_prompt)
-                        await client.query(current_prompt)
+                    # Operator asked for another turn.  Resume the *same*
+                    # session so the agent retains its full conversation
+                    # history; no new task row is opened.
+                    async with _build_client(root, resume=task_session_id) as client:
+                        await client.query(sig.follow_up)
                         async for message in client.receive_response():
                             _render_message(message, verbosity)
                             if isinstance(message, ResultMessage):
