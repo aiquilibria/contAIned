@@ -291,12 +291,12 @@ class TestLogEvent:
         ev = self._events(tracer)[0]
         assert set(ev["input"]["file_paths"]) == {"a.py", "b.py"}
 
-    def test_read_only_tools_store_none(self, tracer: SlashTracer) -> None:
+    def test_read_only_tools_store_file_path(self, tracer: SlashTracer) -> None:
         tracer.open_task("S1", "task")
         for tool in ("Read", "Glob", "Grep"):
             tracer.log_event("S1", tool, {"file_path": "x"}, "success")
         evs = self._events(tracer)
-        assert all(e["input"] is None for e in evs)
+        assert all(e["input"] == {"file_path": "x"} for e in evs)
 
     def test_bash_tool_stores_command_and_stdout(self, tracer: SlashTracer) -> None:
         tracer.open_task("S1", "task")
@@ -1192,6 +1192,178 @@ class TestStaleOpenTaskRecovery:
 
 
 # ---------------------------------------------------------------------------
+# Unit — SlashTracer.get_open_root_tasks
+# ---------------------------------------------------------------------------
+
+class TestGetOpenRootTasks:
+    """Unit tests for the ``get_open_root_tasks`` tracer method used by the
+    REPL's session-resume feature."""
+
+    def _backdate(self, tracer: SlashTracer, session_id: str, age_secs: int) -> None:
+        """Set started_at to *age_secs* seconds ago for *session_id*."""
+        old_ms = int((time.time() - age_secs) * 1000)
+        tracer.conn.execute(
+            "UPDATE tasks SET started_at = ? WHERE session_id = ?",
+            (old_ms, session_id),
+        )
+        tracer.conn.commit()
+
+    def test_returns_stale_open_root_task(self, tracer: SlashTracer) -> None:
+        """A root task in open state older than the threshold appears in the result."""
+        tracer.open_task("S1", "do something")
+        self._backdate(tracer, "S1", 7200)  # 2 hours old
+
+        result = tracer.get_open_root_tasks(older_than_secs=3600)
+        ids = [r["session_id"] for r in result]
+        assert "S1" in ids
+
+    def test_excludes_recent_open_task(self, tracer: SlashTracer) -> None:
+        """A task started just now is not stale."""
+        tracer.open_task("FRESH", "just started")
+
+        result = tracer.get_open_root_tasks(older_than_secs=3600)
+        ids = [r["session_id"] for r in result]
+        assert "FRESH" not in ids
+
+    def test_excludes_child_tasks(self, tracer: SlashTracer) -> None:
+        """Sub-agent sessions (parent_session_id IS NOT NULL) are excluded."""
+        tracer.open_task("ROOT", "root task")
+        tracer.open_task("CHILD", "child task", parent_session_id="ROOT")
+        self._backdate(tracer, "ROOT", 7200)
+        self._backdate(tracer, "CHILD", 7200)
+
+        result = tracer.get_open_root_tasks(older_than_secs=3600)
+        ids = [r["session_id"] for r in result]
+        assert "ROOT" in ids
+        assert "CHILD" not in ids
+
+    def test_excludes_non_open_statuses(self, tracer: SlashTracer) -> None:
+        """Tasks in pending_review or closed state are not returned."""
+        tracer.open_task("PR", "pending task")
+        tracer.open_task("CL", "closed task")
+        self._backdate(tracer, "PR", 7200)
+        self._backdate(tracer, "CL", 7200)
+        tracer.set_task_status("PR", "pending_review")
+        tracer.set_task_status("CL", "closed")
+
+        result = tracer.get_open_root_tasks(older_than_secs=3600)
+        ids = [r["session_id"] for r in result]
+        assert "PR" not in ids
+        assert "CL" not in ids
+
+    def test_returns_newest_first(self, tracer: SlashTracer) -> None:
+        """Results are ordered newest-first (largest started_at first)."""
+        for sid, age in [("OLD", 7200), ("OLDER", 10800), ("OLDEST", 14400)]:
+            tracer.open_task(sid, f"task {sid}")
+            self._backdate(tracer, sid, age)
+
+        result = tracer.get_open_root_tasks(older_than_secs=3600)
+        ids = [r["session_id"] for r in result]
+        # OLD was started most recently (lowest age), should come first
+        assert ids.index("OLD") < ids.index("OLDER") < ids.index("OLDEST")
+
+    def test_result_shape(self, tracer: SlashTracer) -> None:
+        """Each result dict contains session_id, prompt, and started_at."""
+        tracer.open_task("S1", "my prompt text")
+        self._backdate(tracer, "S1", 7200)
+
+        result = tracer.get_open_root_tasks(older_than_secs=3600)
+        assert len(result) == 1
+        r = result[0]
+        assert r["session_id"] == "S1"
+        assert r["prompt"] == "my prompt text"
+        assert isinstance(r["started_at"], int)
+
+    def test_custom_threshold(self, tracer: SlashTracer) -> None:
+        """The *older_than_secs* parameter is respected."""
+        tracer.open_task("S1", "task")
+        self._backdate(tracer, "S1", 1800)  # 30 min old
+
+        # Not stale at the default 1-hour threshold
+        assert tracer.get_open_root_tasks(older_than_secs=3600) == []
+        # Stale at a shorter 15-minute threshold
+        assert tracer.get_open_root_tasks(older_than_secs=900) != []
+
+    def test_empty_db_returns_empty_list(self, tracer: SlashTracer) -> None:
+        """No tasks at all returns an empty list without error."""
+        assert tracer.get_open_root_tasks() == []
+
+
+# ---------------------------------------------------------------------------
+# Integration — session resume: _check_startup_tasks returns session_id
+# ---------------------------------------------------------------------------
+
+class TestSessionResumeSignal:
+    """
+    Tests that the tracer state is correct for the session-resume feature.
+
+    _check_startup_tasks in repl.py reads from the tracer and returns a
+    session_id when the operator opts to resume.  These tests verify the
+    tracer API (get_open_root_tasks / get_pending_reviews / set_task_status)
+    produces the state that the REPL logic depends on.
+    """
+
+    def test_followup_on_pending_review_puts_task_back_to_open(
+        self, tracer: SlashTracer
+    ) -> None:
+        """
+        When the operator provides a follow-up for a pending_review task,
+        set_task_status('open') is called.  The session_id is then available
+        in get_open_root_tasks (once backdated past the stale threshold) or
+        directly from the tasks table, and can be passed to _build_client as
+        resume=session_id.
+        """
+        tracer.open_task("SESS", "implement feature X")
+        tracer.set_task_status("SESS", "pending_review")
+
+        # Operator provides follow-up — repl.py calls set_task_status("open")
+        tracer.set_task_status("SESS", "open")
+
+        row = tracer.conn.execute(
+            "SELECT status FROM tasks WHERE session_id = 'SESS'"
+        ).fetchone()
+        assert row[0] == "open"
+        # No longer in pending_review
+        assert not any(p["session_id"] == "SESS" for p in tracer.get_pending_reviews())
+
+    def test_stale_open_session_id_is_retrievable_for_resume(
+        self, tracer: SlashTracer
+    ) -> None:
+        """
+        A session left in open state after a REPL crash can be retrieved via
+        get_open_root_tasks and its session_id passed to _build_client(resume=).
+        """
+        tracer.open_task("INTERRUPTED", "big refactor")
+        old_ms = int((time.time() - 7200) * 1000)
+        tracer.conn.execute(
+            "UPDATE tasks SET started_at = ? WHERE session_id = 'INTERRUPTED'",
+            (old_ms,),
+        )
+        tracer.conn.commit()
+
+        stale = tracer.get_open_root_tasks(older_than_secs=3600)
+        assert len(stale) >= 1
+        session_ids = [r["session_id"] for r in stale]
+        assert "INTERRUPTED" in session_ids
+
+    def test_approve_closes_task_no_resume_needed(
+        self, tracer: SlashTracer
+    ) -> None:
+        """
+        When the operator approves (blank Enter), the task moves to closed and
+        get_pending_reviews returns nothing — no resume is needed.
+        """
+        tracer.open_task("DONE", "task to approve")
+        tracer.set_task_status("DONE", "pending_review")
+
+        # Operator approves — repl.py calls set_task_status("closed")
+        tracer.set_task_status("DONE", "closed")
+
+        assert tracer.get_pending_reviews() == []
+        assert tracer.get_open_root_tasks(older_than_secs=0) == []
+
+
+# ---------------------------------------------------------------------------
 # Integration — REPL /new creates task row; /review surfaces pending
 # ---------------------------------------------------------------------------
 
@@ -1755,8 +1927,8 @@ class TestRecentAuditEventsEdgeCases:
         ev = tracer.recent_audit_events(limit=1)[0]
         assert ev["reason"] == "blocked by policy"
 
-    def test_event_input_none_for_read_tools(self, tracer: SlashTracer) -> None:
+    def test_event_input_stores_path_for_read_tools(self, tracer: SlashTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.log_event("S1", "Grep", {"pattern": "foo"}, "success")
         ev = tracer.recent_audit_events(limit=1)[0]
-        assert ev["input"] is None
+        assert ev["input"] == {"file_path": "foo"}

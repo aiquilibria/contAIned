@@ -29,6 +29,7 @@ select = ["E", "F", "W", "I"]
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.408",
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
 ]

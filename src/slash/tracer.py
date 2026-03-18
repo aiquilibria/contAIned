@@ -412,8 +412,8 @@ class SlashTracer:
             return {"file_path": inp.get("file_path")}
 
         if tool in _READ_ONLY_TOOLS:
-            # No diff value from read-only operations.
-            return None
+            path = inp.get("file_path") or inp.get("pattern") or inp.get("path")
+            return {"file_path": path} if path else None
 
         if tool == "Bash":
             resp = tool_response or {}
@@ -533,6 +533,39 @@ class SlashTracer:
                 "started_at": r[2],
                 "summary": json.loads(r[3]) if r[3] else None,
                 "narrative": r[4],
+            }
+            for r in rows
+        ]
+
+    def get_open_root_tasks(self, older_than_secs: int = 3600) -> list[dict]:
+        """
+        Return root tasks in ``open`` state that started more than
+        *older_than_secs* seconds ago, newest first.
+
+        These represent sessions that were interrupted (e.g. REPL crash) before
+        the agent could finish and transition to ``pending_review``.  Callers
+        can use the returned ``session_id`` values with ``options.resume`` to
+        restore the agent's conversation context.
+
+        A root task has ``parent_session_id IS NULL``.
+        """
+        cutoff_ms = int((time.time() - older_than_secs) * 1000)
+        rows = self.conn.execute(
+            """
+            SELECT session_id, prompt, started_at
+            FROM tasks
+            WHERE status = 'open'
+              AND parent_session_id IS NULL
+              AND started_at < ?
+            ORDER BY started_at DESC
+            """,
+            (cutoff_ms,),
+        ).fetchall()
+        return [
+            {
+                "session_id": r[0],
+                "prompt": r[1],
+                "started_at": r[2],
             }
             for r in rows
         ]

@@ -567,7 +567,7 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
         ).lower()
 
         console.print()
-        thinking_enabled = click.confirm("? Enable extended thinking?", default=False)
+        thinking_enabled = click.confirm("? Enable extended thinking?", default=True)
         thinking_budget  = 1024
         if thinking_enabled:
             thinking_budget = click.prompt(

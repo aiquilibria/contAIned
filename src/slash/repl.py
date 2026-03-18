@@ -37,6 +37,13 @@ console = Console()
 
 BUILTIN_PREFIX = "/"
 
+# Open tasks older than this threshold (seconds) are considered stale — they
+# survived a REPL crash rather than completing normally.  The threshold is one
+# hour, which is long enough to avoid false positives from tasks that are
+# simply slow, but short enough that an operator restarting a few minutes after
+# a crash will still see the prompt.
+_STALE_TASK_THRESHOLD_SECS = 3600
+
 BUILTIN_HELP = """\
 Built-in REPL commands (handled locally, not sent to the agent):
   /new          Start a fresh session (old history discarded)
@@ -120,17 +127,28 @@ class _ReplCompleter(Completer):
 # ── Tracer helpers ─────────────────────────────────────────────────────────────
 
 
-def _render_review_summary(root: Path, session_id: str, prompt: str) -> None:
+def _render_review_summary(
+    root: Path, session_id: str, prompt: str
+) -> tuple[str | None, str | None]:
     """
     Re-render a stored task review summary to the terminal and prompt the
     operator for approve / dismiss.  Updates tracer.db accordingly.
 
     Used by both the startup pending-review check and the ``/review`` command.
+
+    Returns
+    -------
+    ``(session_id, follow_up_text)``
+        when the operator typed a follow-up instruction.  The caller should
+        resume the SDK session identified by *session_id* and send
+        *follow_up_text* as the next agent turn.
+    ``(None, None)``
+        when the operator approved (blank Enter) or skipped the review.
     """
     tracer = _get_tracer(root)
     if tracer is None:
         console.print("[red]Tracer unavailable.[/red]")
-        return
+        return (None, None)
 
     # Load stored summary from tasks table
     try:
@@ -227,26 +245,43 @@ def _render_review_summary(root: Path, session_id: str, prompt: str) -> None:
     if follow_up:
         try:
             tracer.set_task_status(session_id, "open")
-            console.print("[yellow]Follow-up sent — agent will continue.[/yellow]\n")
+            console.print("[yellow]Follow-up queued — resuming session.[/yellow]\n")
         except Exception:
             pass
+        return session_id, follow_up
     else:
         try:
             tracer.set_task_status(session_id, "closed")
             console.print("[green]Task approved.[/green]\n")
         except Exception:
             pass
+        return None, None
 
 
-def _check_startup_tasks(root: Path) -> None:
+def _check_startup_tasks(root: Path) -> tuple[str | None, str | None]:
     """
     Called once at REPL startup (and after each ``/new``).
 
     Surfaces ``pending_review`` root tasks and offers approve / dismiss.
+    Also surfaces stale ``open`` root tasks (those left behind by a previous
+    REPL crash) and offers to resume them.
+
+    Returns
+    -------
+    ``(session_id, follow_up_text)``
+        when the operator picked a pending-review task and typed a follow-up.
+        The caller should resume that SDK session and send *follow_up_text* as
+        the next turn.
+    ``(session_id, None)``
+        when the operator chose to resume a stale interrupted session without
+        sending a follow-up message.  The caller should resume that SDK session;
+        the operator will type the next instruction in the REPL prompt.
+    ``(None, None)``
+        in all other cases (approve, skip, or no tasks to surface).
     """
     tracer = _get_tracer(root)
     if tracer is None:
-        return
+        return None, None
 
     # ── Pending reviews ────────────────────────────────────────────────────────
     try:
@@ -290,8 +325,135 @@ def _check_startup_tasks(root: Path) -> None:
             idx = int(choice) - 1
             if 0 <= idx < len(reviews):
                 r = reviews[idx]
-                _render_review_summary(root, r["session_id"], r["prompt"])
+                result = _render_review_summary(root, r["session_id"], r["prompt"])
+                if result[0]:
+                    # Operator typed a follow-up — resume that session.
+                    return result
         console.print()
+
+    # ── Stale open tasks (interrupted sessions) ────────────────────────────────
+    try:
+        stale = tracer.get_open_root_tasks(older_than_secs=_STALE_TASK_THRESHOLD_SECS)
+    except Exception:
+        stale = []
+
+    if stale:
+        r = stale[0]  # most recent interrupted session
+        from datetime import datetime, timezone  # noqa: PLC0415
+        dt = datetime.fromtimestamp(r["started_at"] / 1000, tz=timezone.utc)
+        console.print(
+            f"\n[bold yellow]Interrupted session found[/bold yellow]"
+            f"  [dim]{r['session_id'][:12]}…[/dim]\n"
+            f"  \"{r['prompt'][:80]}\"\n"
+            f"  [dim]started {dt.strftime('%Y-%m-%d %H:%M UTC')}[/dim]"
+        )
+        if len(stale) > 1:
+            console.print(f"  [dim](and {len(stale) - 1} older interrupted session(s))[/dim]")
+        console.print()
+        try:
+            choice = input("  Resume this session? [Y/n] › ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            choice = ""
+        console.print()
+        if choice in ("y", "yes", ""):
+            console.print(
+                "[dim]Restoring conversation history — type your next instruction below.[/dim]\n"
+            )
+            return r["session_id"], None
+
+    return None, None
+
+
+def _close_repl_task(tracer: object, session_id: str, root: Path) -> None:
+    """
+    Build a diff summary + narrative for a completed REPL session and mark
+    it ``closed``.
+
+    Mirrors the summary-building logic in ``summarizer.py`` (the Stop hook),
+    which does not fire in REPL mode because the subprocess is killed directly
+    rather than exiting via the normal stop protocol.
+
+    Called on clean ``/quit`` or Ctrl-D so that every deliberately-ended
+    session is persisted properly rather than left ``open`` or discarded as
+    ``abandoned``.
+    """
+    from .runner import _extract_narrative  # noqa: PLC0415
+
+    # ── File changes ───────────────────────────────────────────────────────────
+    file_changes: list[dict] = []
+    try:
+        touched_files = tracer.list_touched_files(session_id)  # type: ignore[attr-defined]
+
+        # Resolve the session tree once so we can determine whether each file
+        # was newly created (pre_hash IS NULL) or just modified.
+        try:
+            tree_ids = tracer.tree_session_ids(session_id)  # type: ignore[attr-defined]
+            placeholders = ",".join("?" * len(tree_ids)) if tree_ids else "'__none__'"
+        except Exception:
+            tree_ids: list[str] = []
+            placeholders = "'__none__'"
+
+        for file_path in touched_files:
+            try:
+                diff_text = tracer.diff_task(session_id, file_path)  # type: ignore[attr-defined]
+                if not diff_text:
+                    continue
+                lines_added   = sum(1 for ln in diff_text.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
+                lines_removed = sum(1 for ln in diff_text.splitlines() if ln.startswith("-") and not ln.startswith("---"))
+
+                change_type = "modified"
+                if tree_ids:
+                    try:
+                        bl = tracer.conn.execute(  # type: ignore[attr-defined]
+                            f"SELECT pre_hash FROM baselines "
+                            f"WHERE file_path = ? AND session_id IN ({placeholders}) "
+                            f"ORDER BY captured_at ASC LIMIT 1",
+                            [file_path, *tree_ids],
+                        ).fetchone()
+                        if bl is not None:
+                            change_type = "new file" if bl[0] is None else "modified"
+                    except Exception:
+                        pass
+
+                file_changes.append({
+                    "file_path":     file_path,
+                    "lines_added":   lines_added,
+                    "lines_removed": lines_removed,
+                    "change_type":   change_type,
+                })
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ── Action log ─────────────────────────────────────────────────────────────
+    action_log: list[dict] = []
+    try:
+        raw_events = tracer.recent_audit_events(session_id, limit=200)  # type: ignore[attr-defined]
+        action_log = [
+            e for e in reversed(raw_events)
+            if e["tool"] in ("Bash", "Agent") or e["outcome"] == "denied"
+        ]
+    except Exception:
+        pass
+
+    # ── Narrative ──────────────────────────────────────────────────────────────
+    narrative = _extract_narrative(session_id, root)
+
+    summary = {
+        "file_changes":        file_changes,
+        "action_log":          action_log,
+        "incomplete_children": [],
+    }
+
+    try:
+        tracer.set_task_status(  # type: ignore[attr-defined]
+            session_id, "closed",
+            summary=summary,
+            narrative=narrative or None,
+        )
+    except Exception:
+        pass
 
 
 class _AbortTurn(Exception):
@@ -489,7 +651,9 @@ async def _run_repl(root: Path, verbosity: str) -> None:
     )
 
     # ── Startup: surface pending reviews and stale open tasks ─────────────────
-    await anyio.to_thread.run_sync(lambda: _check_startup_tasks(root))
+    _resume_session_id, _pending_follow_up = await anyio.to_thread.run_sync(
+        lambda: _check_startup_tasks(root)
+    )
 
     # prompt_toolkit session — persists history across /new resets
     prompt_session: PromptSession[str] = PromptSession(completer=_ReplCompleter(), complete_while_typing=False)
@@ -503,8 +667,44 @@ async def _run_repl(root: Path, verbosity: str) -> None:
     while True:
         tracer = _get_tracer(root)
         _task_opened = False
+        _clean_exit  = False  # set True only on deliberate /quit or Ctrl-D
 
-        async with _build_client(root) as client:
+        _client = _build_client(root, resume=_resume_session_id)
+        try:
+            await _client.__aenter__()
+        except Exception as _exc:
+            if _resume_session_id is not None:
+                # __aenter__ (connect/initialize) failed before the body could
+                # clear _resume_session_id — this was a resume attempt that the
+                # Claude Code CLI rejected (e.g. session file missing or corrupt).
+                # Fall back to a fresh session rather than crashing the REPL.
+                _sid_preview = _resume_session_id[:12]
+                _failed_sid = _resume_session_id
+                _resume_session_id = None
+                try:
+                    await _client.__aexit__(type(_exc), _exc, _exc.__traceback__)
+                except Exception:
+                    pass
+                # Mark the session as abandoned so it no longer surfaces as an
+                # interrupted session on the next REPL startup.  Without this,
+                # the same stale session would be offered for resumption every
+                # time the REPL is started, only to fail again.
+                if tracer:
+                    try:
+                        tracer.set_task_status(_failed_sid, "abandoned")
+                    except Exception:
+                        pass
+                console.print(
+                    f"\n[yellow]⚠  Could not resume session '{_sid_preview}…' "
+                    f"({type(_exc).__name__}: {_exc})[/yellow]"
+                )
+                console.print("[dim]Starting a fresh session instead.[/dim]\n")
+                continue
+            raise
+
+        client = _client
+        try:
+            _resume_session_id = None  # consumed — reset before next outer iteration
             session_turns = 0
 
             # Inner loop: each iteration is one user turn within the session.
@@ -528,15 +728,24 @@ async def _run_repl(root: Path, verbosity: str) -> None:
                             + click.style(cost_label, fg="bright_black")
                         )
                         click.echo(status_line)
-                    line = await anyio.to_thread.run_sync(
-                        lambda: prompt_session.prompt(HTML("<ansigreen><b>⚡ </b></ansigreen>"))
-                    )
+                    # ── auto-send queued follow-up (set by startup review) ────
+                    if _pending_follow_up:
+                        line = _pending_follow_up
+                        _pending_follow_up = None
+                        console.print(
+                            f"[dim]↩ Continuing: {escape(line[:80])}{'…' if len(line) > 80 else ''}[/dim]"
+                        )
+                    else:
+                        line = await anyio.to_thread.run_sync(
+                            lambda: prompt_session.prompt(HTML("<ansigreen><b>⚡ </b></ansigreen>"))
+                        )
                 except KeyboardInterrupt:
                     click.echo()  # newline after ^C
                     continue  # abort this input line, loop back to prompt
                 except EOFError:
                     click.echo()  # newline after ^D
                     click.echo(click.style("Bye!", fg="cyan"))
+                    _clean_exit = True
                     return
 
                 line = line.strip()
@@ -549,6 +758,7 @@ async def _run_repl(root: Path, verbosity: str) -> None:
 
                     if cmd in ("/exit", "/quit"):
                         click.echo(click.style("Bye!", fg="cyan"))
+                        _clean_exit = True
                         return
 
                     elif cmd == "/clear":
@@ -577,8 +787,13 @@ async def _run_repl(root: Path, verbosity: str) -> None:
                         session_turns = 0
                         _latest_cost = None
                         click.echo(click.style("↺ New session started.", fg="yellow"))
-                        # Surface any new pending reviews after the session ends.
-                        await anyio.to_thread.run_sync(lambda: _check_startup_tasks(root))
+                        # Surface any new pending reviews / stale open tasks.
+                        # Capture the resume signal so the next outer-loop
+                        # iteration can restore context if the operator chose to
+                        # resume an interrupted session.
+                        _resume_session_id, _pending_follow_up = (
+                            await anyio.to_thread.run_sync(lambda: _check_startup_tasks(root))
+                        )
                         break  # exit inner loop → re-enter outer loop (new client)
 
                     elif cmd == "/sh":
@@ -630,15 +845,43 @@ async def _run_repl(root: Path, verbosity: str) -> None:
                     if _sid:
                         _session_id = _sid
                 except _AbortTurn:
-                    # Ctrl+C pressed mid-turn — the SDK context will exit and
-                    # the Stop hook (summarizer.py) fires automatically, handling
-                    # the approve/dismiss/continue flow just like a normal turn.
                     if not _task_opened:
                         click.echo(click.style("↺ Starting fresh session.", fg="yellow"))
                     break  # exit inner loop → outer loop opens a new client
 
             # Inner loop exited via /new or abort — fall through to outer loop
             # for a fresh client.  Any other exit path returns from the function.
+        finally:
+            # In REPL mode the Claude Code subprocess is kept alive across turns
+            # and is killed via SIGTERM when the session ends.  SIGTERM does not
+            # trigger the Stop hook (summarizer.py), so tasks opened by _on_sid
+            # always stay in 'open' state after any REPL exit.
+            #
+            # On a clean /quit or Ctrl-D (_clean_exit=True) we build a full
+            # diff summary + narrative and mark the task 'closed', exactly as
+            # the Stop hook would have done.
+            #
+            # On any other exit (/new, Ctrl-C mid-turn, crash) we mark it
+            # 'abandoned' so it doesn't resurface as a phantom interrupted
+            # session on the next startup.
+            #
+            # The status check guards against overwriting a 'pending_review'
+            # or 'closed' status that was set by the summarizer in the rare
+            # case the stop protocol fired normally.
+            if tracer and _task_opened and _session_id:
+                try:
+                    _row = tracer.conn.execute(
+                        "SELECT status FROM tasks WHERE session_id = ?",
+                        (_session_id,),
+                    ).fetchone()
+                    if _row and _row[0] == "open":
+                        if _clean_exit:
+                            _close_repl_task(tracer, _session_id, root)
+                        else:
+                            tracer.set_task_status(_session_id, "abandoned")
+                except Exception:
+                    pass
+            await _client.__aexit__(None, None, None)
 
 
 def start_repl(root: Path, verbosity: str | None) -> None:
