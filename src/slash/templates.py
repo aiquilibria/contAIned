@@ -91,7 +91,7 @@ SETTINGS_JSON = """\
         "hooks": [
           {{
             "type": "command",
-            "command": "python3 .slash/hooks/qa.py"
+            "command": "python3 .slash/hooks/summarizer.py"
           }}
         ]
       }}
@@ -162,13 +162,13 @@ policy:
 
   # ── QA gate (stop hook) ───────────────────────────────────────────────────────
   qa:
-    syntax_check:       true   # py_compile
-    lint_check:         true   # ruff check
-    format_check:       true   # ruff format --check
-    type_check:         true   # pyright
-    test_check:         true   # pytest tests/
-    coverage_check:     true   # pytest --cov --cov-fail-under (requires pytest-cov)
-    coverage_threshold: 80     # minimum % line coverage when coverage_check is true
+    syntax:             true   # py_compile
+    lint:               true   # ruff check
+    format:             true   # ruff format --check
+    type:               true   # pyright
+    test:               true   # pytest tests/
+    coverage:           true   # pytest --cov --cov-fail-under (requires pytest-cov)
+    coverage_threshold: 80     # minimum % line coverage when coverage is true
 
 # ── Agent model settings ──────────────────────────────────────────────────────
 agent:
@@ -228,12 +228,12 @@ _DEFAULTS = {
         "jsonl_export": False,
     },
     "qa": {
-        "syntax_check":       True,
-        "lint_check":         True,
-        "format_check":       True,
-        "type_check":         True,
-        "test_check":         True,
-        "coverage_check":     True,
+        "syntax":             True,
+        "lint":               True,
+        "format":             True,
+        "type":               True,
+        "test":               True,
+        "coverage":           True,
         "coverage_threshold": 80,
     },
 }
@@ -811,14 +811,14 @@ QA_HOOK = '''\
 Stop hook — runs QA checks when the agent signals it is done.
 
 Which checks run is controlled by policy.qa.* flags in manifest.yaml:
-  syntax_check      — py_compile on all Python files
-  lint_check        — ruff check
-  format_check      — ruff format --check
-  type_check        — pyright
-  test_check        — pytest tests/  (skipped silently if no tests/ directory exists)
-  coverage_check    — pytest tests/ --cov --cov-fail-under=<threshold>
-                      requires pytest-cov; skipped silently if not installed
-                      threshold is policy.qa.coverage_threshold (default 80)
+  syntax      — py_compile on all Python files
+  lint        — ruff check
+  format      — ruff format --check
+  type        — pyright
+  test        — pytest tests/  (skipped silently if no tests/ directory exists)
+  coverage    — pytest tests/ --cov --cov-fail-under=<threshold>
+                requires pytest-cov; skipped silently if not installed
+                threshold is policy.qa.coverage_threshold (default 80)
 
 If all enabled checks pass  → exits 0, agent stops cleanly.
 If any enabled check fails  → prints JSON with decision:block, agent receives feedback.
@@ -852,6 +852,18 @@ def run(cmd):
     return result.returncode, result.stdout + result.stderr
 
 
+# ── Ensure dev dependencies are installed (pytest, pytest-cov, etc.) ──────────
+# Run uv sync --dev silently so that subsequent uv run calls can find pytest
+# even if the venv is missing or stale.  Failures are non-fatal — if uv is not
+# present the individual check steps will handle missing tools gracefully.
+if (TASK_DIR / "pyproject.toml").exists() or (TASK_DIR / "uv.lock").exists():
+    subprocess.run(
+        ["uv", "sync", "--dev", "--quiet"],
+        cwd=TASK_DIR,
+        capture_output=True,
+    )
+
+
 def block(reason):
     """Tell the SDK to keep the agent running with this feedback."""
     print(json.dumps({"decision": "block", "reason": reason}))
@@ -869,9 +881,9 @@ py_files = [
 failures = []
 
 # ── Syntax check ──────────────────────────────────────────────────────────────
-if qa["syntax_check"]:
+if qa["syntax"]:
     for f in py_files:
-        code, out = run(["python", "-m", "py_compile", str(f)])
+        code, out = run(["uv", "run", "python", "-m", "py_compile", str(f)])
         if code != 0:
             failures.append({"check": "syntax", "file": str(f.relative_to(TASK_DIR)), "output": out})
     if failures:
@@ -881,7 +893,7 @@ if qa["syntax_check"]:
         block(feedback)
 
 # ── ruff check (linting) ──────────────────────────────────────────────────────
-if qa["lint_check"] and py_files:
+if qa["lint"] and py_files:
     try:
         code, out = run(["ruff", "check"] + [str(f) for f in py_files])
         if code != 0:
@@ -890,7 +902,7 @@ if qa["lint_check"] and py_files:
         print("ruff not installed — skipping ruff check", file=sys.stderr)
 
 # ── ruff format --check ───────────────────────────────────────────────────────
-if qa["format_check"] and py_files:
+if qa["format"] and py_files:
     try:
         code, out = run(["ruff", "format", "--check"] + [str(f) for f in py_files])
         if code != 0:
@@ -899,7 +911,7 @@ if qa["format_check"] and py_files:
         print("ruff not installed — skipping ruff format --check", file=sys.stderr)
 
 # ── pyright (type checking) ───────────────────────────────────────────────────
-if qa["type_check"] and py_files:
+if qa["type"] and py_files:
     try:
         code, out = run(["pyright"])
         if code != 0:
@@ -908,27 +920,27 @@ if qa["type_check"] and py_files:
         print("pyright not installed — skipping type checks", file=sys.stderr)
 
 # ── pytest (unit tests) ───────────────────────────────────────────────────────
-if qa["test_check"]:
+if qa["test"]:
     tests_dir = TASK_DIR / "tests"
     if tests_dir.is_dir():
-        code, out = run([sys.executable, "-m", "pytest", str(tests_dir),
+        code, out = run(["uv", "run", "pytest", str(tests_dir),
                          "-x", "--tb=short", "-q"])
         # Exit code 5 means pytest collected no tests — not a failure.
         if code not in (0, 5):
             failures.append({"check": "pytest", "file": "tests/", "output": out})
 
 # ── pytest coverage ───────────────────────────────────────────────────────────
-if qa["coverage_check"]:
+if qa["coverage"]:
     tests_dir = TASK_DIR / "tests"
     if tests_dir.is_dir():
         # Check that pytest-cov is available before attempting the run.
-        probe_code, _ = run([sys.executable, "-c", "import pytest_cov"])
+        probe_code, _ = run(["uv", "run", "python", "-c", "import pytest_cov"])
         if probe_code != 0:
             print("pytest-cov not installed — skipping coverage check", file=sys.stderr)
         else:
             threshold = int(qa.get("coverage_threshold", 80))
             code, out = run([
-                sys.executable, "-m", "pytest", str(tests_dir),
+                "uv", "run", "pytest", str(tests_dir),
                 "--cov", "--cov-report=term-missing",
                 f"--cov-fail-under={threshold}",
                 "-q",
@@ -1246,23 +1258,25 @@ sys.exit(0)
 SUMMARIZER_HOOK = '''\
 #!/usr/bin/env python3
 """
-Stop hook — builds a diff summary and presents it to the operator for review.
+Stop hook — runs QA checks, builds a diff summary, and presents it to the operator.
 
 Fires only for root-agent Stop events (not SubagentStop — that is wired to
-subagent_stop.py).  Runs after qa.py in the Stop hook chain.
+subagent_stop.py).  This is the sole Stop hook; it owns both QA and approval.
 
 Flow:
-  1. Defensive child check: poll up to 3 × 200 ms for open sub-agent sessions.
-  2. Compute per-file unified diffs across the whole agent tree.
-  3. Build action log from recent audit events (Bash, Agent, denied calls).
-  4. Store JSON summary in tasks.summary; set status = pending_review.
-  5. Render rich-formatted summary to stderr (terminal visible to operator).
-  6. Prompt operator: press Enter to approve, or type a follow-up instruction.
-     Enter (empty) → set status = closed,    exit 0 (agent stops cleanly).
-     Any text      → set status = open, print JSON decision:block to stdout
-                     (agent gets one more turn with that text as instruction).
+  1. Run qa.py inline — if any check fails, block and return to agent immediately.
+  2. Defensive child check: poll up to 3 × 200 ms for open sub-agent sessions.
+  3. Compute per-file unified diffs across the whole agent tree.
+  4. Build action log from recent audit events (Bash, Agent, denied calls).
+  5. Store JSON summary in tasks.summary; set status = pending_review.
+  6. Render rich-formatted summary to /dev/tty (bypasses the SDK\'s stderr pipe).
+  7. Prompt operator via /dev/tty: Press Enter to approve; non-blank = follow-up.
+     Blank line  → set status = closed,  exit 0 (agent stops cleanly).
+     Non-empty   → set status = open, emit JSON decision:block, exit 0
+                   (agent gets another turn with the follow-up as its input).
 """
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -1283,6 +1297,32 @@ if event.get("agent_id"):
 
 if not session_id:
     sys.exit(0)
+
+# ── Phase 1: QA checks ────────────────────────────────────────────────────────
+# Run qa.py inline before building the summary or showing the approval UI.
+# This guarantees QA always completes first regardless of whether the SDK
+# executes Stop hooks sequentially or in parallel.
+_qa_script = Path(cwd) / ".slash" / "hooks" / "qa.py"
+if _qa_script.exists():
+    try:
+        _qa_proc = subprocess.run(
+            [sys.executable, str(_qa_script)],
+            input=json.dumps(event),
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+        )
+        if _qa_proc.stdout.strip():
+            try:
+                _qa_out = json.loads(_qa_proc.stdout.strip())
+                if _qa_out.get("decision") == "block":
+                    # QA failed — relay the block decision to the SDK; no UI shown.
+                    print(_qa_proc.stdout, end="")
+                    sys.exit(0)
+            except json.JSONDecodeError:
+                pass  # qa emitted non-JSON to stdout — fall through
+    except Exception:
+        pass  # qa unavailable — proceed to approval UI
 
 db_path = str(Path(cwd) / ".slash" / "tracer.db")
 
@@ -1418,18 +1458,50 @@ summary = {
     "incomplete_children": open_children,
 }
 
+narrative = ""
 try:
-    tracer.set_task_status(session_id, "pending_review", summary=summary)
+    from claude_agent_sdk import get_session_messages  # noqa: PLC0415
+    _messages = get_session_messages(session_id, directory=cwd)
+    for _msg in reversed(_messages):
+        if getattr(_msg, "type", None) != "assistant":
+            continue
+        _message = getattr(_msg, "message", None) or {}
+        _content = (_message.get("content") if isinstance(_message, dict) else getattr(_message, "content", [])) or []
+        _texts = []
+        for _block in _content:
+            if isinstance(_block, dict) and _block.get("type") == "text":
+                _text = (_block.get("text") or "").strip()
+                if _text:
+                    _texts.append(_text)
+            elif hasattr(_block, "type") and _block.type == "text":
+                _text = (getattr(_block, "text", "") or "").strip()
+                if _text:
+                    _texts.append(_text)
+        _candidate = "\\n\\n".join(_texts).strip()
+        if _candidate:
+            narrative = _candidate
+            break
 except Exception:
     pass
 
-# ── Render summary to terminal (stderr) ───────────────────────────────────────
+try:
+    tracer.set_task_status(session_id, "pending_review", summary=summary, narrative=narrative or None)
+except Exception:
+    pass
+
+# ── Render summary to terminal ─────────────────────────────────────────────────
+# Write directly to /dev/tty so the approval UI is always visible even when the
+# SDK captures the hook\'s stderr (which it typically does for hook-result parsing).
+try:
+    _tty_w = open("/dev/tty", "w")
+except OSError:
+    _tty_w = sys.stderr  # fallback for CI / non-interactive environments
+
 try:
     from rich.console import Console  # noqa: PLC0415
     from rich.panel   import Panel    # noqa: PLC0415
-    from rich.text    import Text     # noqa: PLC0415
 
-    con = Console(stderr=True, highlight=False)
+    con = Console(file=_tty_w, highlight=False)
 
     # Header
     started_str = ""
@@ -1475,25 +1547,7 @@ try:
                 status_line += "  [dim](" + reason_str + ")[/dim]"
             con.print(status_line)
 
-        # Print the diffs below the status listing
-        con.print("")
-        for fd in file_diffs:
-            con.print("[dim]──[/dim] [bold cyan]" + fd["file_path"] + "[/bold cyan]")
-            diff_text = Text()
-            for line in fd["diff"].splitlines()[:200]:  # cap at 200 lines per file
-                if line.startswith("+++") or line.startswith("---"):
-                    diff_text.append(line + "\\n", style="dim")
-                elif line.startswith("@@"):
-                    diff_text.append(line + "\\n", style="cyan")
-                elif line.startswith("+"):
-                    diff_text.append(line + "\\n", style="green")
-                elif line.startswith("-"):
-                    diff_text.append(line + "\\n", style="red")
-                else:
-                    diff_text.append(line + "\\n", style="")
-            if len(fd["diff"].splitlines()) > 200:
-                diff_text.append("  … (diff truncated)\\n", style="dim")
-            con.print(diff_text)
+        con.print("[dim]  (full diffs persisted in tracer.db — use /review to inspect)[/dim]")
     else:
         con.print("\\n[dim] No file changes recorded.[/dim]\\n")
 
@@ -1544,94 +1598,63 @@ try:
             parts.append(str(agent_count) + " sub-agent")
         if denied_count:
             parts.append(str(denied_count) + " denied")
-        con.print("[bold] Action Log[/bold]  [dim](" + ", ".join(parts) + ")[/dim]\\n")
-        for e in action_log[-30:]:   # show at most last 30 entries
-            inp = e.get("input") or {}
-            if e["tool"] == "Bash":
-                cmd = (inp.get("command") or "")[:80]
-                ec  = inp.get("exit_code")
-                ec_str = (" (exit: " + str(ec) + ")") if ec is not None else ""
-                style = "red" if e["outcome"] == "denied" else "default"
-                con.print("  [" + style + "]● bash: " + cmd + ec_str + "[/" + style + "]")
-            elif e["tool"] == "Agent":
-                atype  = inp.get("agent_type") or "agent"
-                prompt = (inp.get("prompt_head") or "")[:60]
-                con.print("  ● agent [" + atype + "]: " + prompt)
-            elif e["outcome"] == "denied":
-                tool_name = e["tool"]
-                rsn = (e.get("reason") or "")[:80]
-                con.print("  [red]✗ " + tool_name + " denied: " + rsn + "[/red]")
-        con.print("")
+        con.print("[bold] Action Log[/bold]  [dim](" + ", ".join(parts) + ")[/dim]")
+        con.print("[dim]  (full log persisted in tracer.db — use /review to inspect)[/dim]\\n")
 
-    # Operator prompt — single input line.
-    # Enter alone → approve.  Any text → continue with that as instruction.
+    # Operator prompt — clearly signal that a response is required before the
+    # task is finalised.  A blank line + highlighted banner makes it impossible
+    # to miss.  Press Enter to approve; typing a follow-up instruction sends
+    # the agent back for another pass.
     con.print("")
-    con.print("[bold yellow]⏸  Task complete — press Enter to approve, or type a follow-up instruction:[/bold yellow]")
-    con.print("[dim]> [/dim]", end="")
+    con.print("[bold yellow]⏸  Awaiting your sign-off — task is NOT closed yet.[/bold yellow]")
+    con.print("[bold]Press Enter to approve[/bold] — or type a follow-up instruction and press Enter")
+    con.print("[dim]⚡ [/dim]", end="")
+    con.file.flush()  # flush Rich\'s internal buffer so the prompt appears before blocking on tty input
 
 except Exception:
     # Fall back to plain output if rich is unavailable.
-    print("\\n=== Task Review: " + task_prompt[:80] + " ===", file=sys.stderr)
-    if file_diffs:
-        print("\\nChanges (" + str(len(file_diffs)) + " file(s)):", file=sys.stderr)
-        _ST = {"new file": "A", "modified": "M", "deleted": "D"}
-        for fd in file_diffs:
-            _lbl = _ST.get(fd.get("change_type", "modified"), "M")
-            _rsn = fd.get("reason", "")
-            _rsn_str = "  (" + _rsn + ")" if _rsn and _rsn != fd.get("change_type") else ""
-            print(
-                "  " + _lbl + "  " + fd["file_path"]
-                + "  +" + str(fd["lines_added"]) + " -" + str(fd["lines_removed"])
-                + _rsn_str,
-                file=sys.stderr,
-            )
-        # Task completion summary
-        _nc = sum(1 for fd in file_diffs if fd.get("change_type") == "new file")
-        _mc = sum(1 for fd in file_diffs if fd.get("change_type") == "modified")
-        _dc = sum(1 for fd in file_diffs if fd.get("change_type") == "deleted")
-        _parts = []
-        if _nc: _parts.append(str(_nc) + " created")
-        if _mc: _parts.append(str(_mc) + " modified")
-        if _dc: _parts.append(str(_dc) + " deleted")
-        print("\\nTask complete: " + ", ".join(_parts or [str(len(file_diffs)) + " changed"]) + ".", file=sys.stderr)
-    else:
-        print("No file changes recorded.", file=sys.stderr)
-    print("", file=sys.stderr)
-    print("⏸  Task complete — press Enter to approve, or type a follow-up instruction:", file=sys.stderr)
-    print("> ", end="", file=sys.stderr)
+    print("\\n=== Task Review: " + task_prompt[:80] + " ===", file=_tty_w, flush=True)
+    print(str(len(file_diffs)) + " file(s) changed.", file=_tty_w)
+    print("", file=_tty_w)
+    print("⏸  Awaiting your sign-off — task is NOT closed yet.", file=_tty_w)
+    print("Press Enter to approve — or type a follow-up instruction and press Enter", file=_tty_w)
+    print("⚡ ", end="", file=_tty_w, flush=True)
 
-# ── Read operator response from terminal ──────────────────────────────────────
+# ── Read input from terminal ───────────────────────────────────────────────────
 # /dev/tty bypasses the hook\'s stdin pipe and reads directly from the terminal.
-def _tty_readline() -> str:
-    """Read one line from /dev/tty (bypasses the hook stdin pipe)."""
+def _tty_readline(prompt_text: str = "") -> str:
+    """Print *prompt_text* to stderr and read one line from /dev/tty."""
+    if prompt_text:
+        print(prompt_text, end="", flush=True, file=sys.stderr)
     with open("/dev/tty") as tty:
         return tty.readline().strip()
 
-response = ""
+raw_input = ""
 non_interactive = False
 try:
-    # Flush stderr so the prompt is visible before we block on input.
-    sys.stderr.flush()
-    response = _tty_readline()
+    raw_input = _tty_readline()
 except Exception:
-    # /dev/tty unavailable — CI / non-interactive environment: auto-approve.
+    # /dev/tty unavailable — CI / non-interactive environment: default approve.
     non_interactive = True
-    response = ""
 
-print("", file=sys.stderr)  # newline after the inline prompt
+print("", file=_tty_w, flush=True)  # newline after the inline prompt
 
-# ── Continue — operator typed a follow-up instruction ─────────────────────────
-if response and not non_interactive:
-    print("  Continuing with follow-up instruction.", file=sys.stderr)
+# ── Follow-up instruction — agent gets another turn ───────────────────────────
+if not non_interactive and raw_input:
+    print("  Continuing with follow-up instruction.", file=_tty_w, flush=True)
+    if _tty_w is not sys.stderr:
+        _tty_w.close()
     try:
-        tracer.set_task_status(session_id, "open")
+        tracer.set_task_status(session_id, "open")   # revert to open for the next turn
     except Exception:
         pass
-    print(json.dumps({"decision": "block", "reason": "Operator follow-up: " + response}))
+    print(json.dumps({"decision": "block", "reason": "Operator: " + raw_input}))
     sys.exit(0)
 
-# ── Approve — Enter with no text (or non-interactive) ─────────────────────────
-print("  Approved — task closed.", file=sys.stderr)
+# ── Approve (blank line or CI default) ────────────────────────────────────────
+print("  Approved — task closed.", file=_tty_w, flush=True)
+if _tty_w is not sys.stderr:
+    _tty_w.close()
 try:
     tracer.set_task_status(session_id, "closed")
 except Exception:

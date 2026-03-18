@@ -270,9 +270,10 @@ def review(dir: str | None) -> None:
     """
     Review tasks awaiting operator sign-off.
 
-    Lists all pending_review tasks and lets you approve or dismiss each one.
-    Approve → marks the task closed.
-    Dismiss → marks the task abandoned.
+    Lists all pending_review tasks and lets you approve or provide a follow-up
+    instruction for each one.
+    Approve (blank line) → marks the task closed.
+    Follow-up instruction → keeps the task open for another agent pass.
 
     \b
     Examples:
@@ -425,17 +426,17 @@ def _print_review(tracer: object, session_id: str, prompt: str) -> None:
                 )
         console.print()
 
-    # Decision
-    console.print("[bold]Decision:[/bold]  [a] Approve   [d] Dismiss\n", end="")
+    # Decision — blank line = approve; any non-empty text = follow-up instruction
+    console.print("[bold]Press Enter to approve[/bold] — or type a follow-up instruction and press Enter")
     try:
-        choice = input("  › ").strip().lower()[:1]
+        follow_up = input("  ⚡ ").strip()
     except (EOFError, KeyboardInterrupt):
-        choice = ""
+        follow_up = ""
 
-    if choice == "d":
+    if follow_up:
         try:
-            tracer.set_task_status(session_id, "abandoned")  # type: ignore[attr-defined]
-            console.print("[yellow]Task dismissed.[/yellow]\n")
+            tracer.set_task_status(session_id, "open")  # type: ignore[attr-defined]
+            console.print("[yellow]Follow-up sent — task kept open for next agent pass.[/yellow]\n")
         except Exception:
             pass
     else:
@@ -559,3 +560,77 @@ def repl(dir: str | None, verbosity: str | None) -> None:
     from slash.repl import start_repl
     root = Path(dir) if dir else _find_root()
     start_repl(root, verbosity)
+
+
+# ── db ────────────────────────────────────────────────────────────────────────
+
+@main.command(name="db")
+@click.argument("query", default="")
+@click.option(
+    "--dir", "-d",
+    default=None,
+    type=click.Path(file_okay=False, exists=True, resolve_path=True),
+    help="Workspace root (default: auto-detected from cwd)",
+)
+@click.option(
+    "--json", "as_json",
+    is_flag=True,
+    default=False,
+    help="Output rows as JSON (one object per line).",
+)
+def db(query: str, dir: str | None, as_json: bool) -> None:
+    """
+    Run a SQL query against the tracer DB and print results.
+
+    If QUERY is omitted, prints the 10 most recent root tasks.
+
+    \b
+    Examples:
+      slash db
+      slash db "SELECT session_id, status, prompt FROM tasks ORDER BY started_at DESC LIMIT 5"
+      slash db "SELECT * FROM tasks WHERE session_id = '<id>'" --json
+    """
+    import json as _json
+    import sqlite3 as _sqlite3
+
+    root = Path(dir) if dir else _find_root()
+    db_path = root / ".slash" / "tracer.db"
+
+    if not db_path.exists():
+        console.print("[red]No tracer.db found.[/red] Run [bold]slash init[/bold] first.")
+        raise SystemExit(1)
+
+    if not query:
+        query = (
+            "SELECT session_id, status, "
+            "datetime(started_at/1000,'unixepoch') AS started, "
+            "substr(prompt,1,60) AS prompt "
+            "FROM tasks WHERE parent_session_id IS NULL "
+            "ORDER BY started_at DESC LIMIT 10"
+        )
+
+    conn = _sqlite3.connect(str(db_path))
+    conn.row_factory = _sqlite3.Row
+    try:
+        cursor = conn.execute(query)
+    except _sqlite3.Error as exc:
+        console.print(f"[red]SQL error:[/red] {exc}")
+        raise SystemExit(1)
+
+    rows = cursor.fetchall()
+    if not rows:
+        console.print("[dim]No rows.[/dim]")
+        return
+
+    if as_json:
+        for row in rows:
+            print(_json.dumps(dict(row)))
+        return
+
+    # Rich table output
+    table = Table(show_header=True, header_style="bold cyan", box=None)
+    for col in rows[0].keys():
+        table.add_column(col)
+    for row in rows:
+        table.add_row(*[str(v) if v is not None else "" for v in row])
+    console.print(table)

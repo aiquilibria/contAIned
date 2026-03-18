@@ -36,14 +36,18 @@ CREATE TABLE IF NOT EXISTS blobs (
 
 -- Task / session registry.
 -- One row per slash run invocation, REPL session, or sub-agent session.
+-- NOTE: 'abandoned' status is deprecated — no new rows are written with that
+-- status.  Existing 'abandoned' rows are retained for historical record only.
+-- The normal review flow now uses only: open|pending_review|closed.
 CREATE TABLE IF NOT EXISTS tasks (
     session_id          TEXT    PRIMARY KEY,
     parent_session_id   TEXT    REFERENCES tasks(session_id),
     prompt              TEXT    NOT NULL,
-    status              TEXT    NOT NULL DEFAULT 'open',  -- open|pending_review|closed|abandoned
+    status              TEXT    NOT NULL DEFAULT 'open',  -- open|pending_review|closed|abandoned(deprecated)
     started_at          INTEGER NOT NULL,
     ended_at            INTEGER,
-    summary             TEXT    -- JSON: per-file diff summary, populated at pending_review
+    summary             TEXT,   -- JSON: per-file diff summary, populated at pending_review
+    narrative           TEXT    -- agent's final human-readable summary, set on close
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_session_id);
@@ -98,6 +102,67 @@ _WRITE_TOOLS = {"Write", "Edit", "MultiEdit"}
 _READ_ONLY_TOOLS = {"Read", "Glob", "Grep"}
 
 
+def extract_narrative_from_transcript(transcript_path: str) -> str:
+    """
+    Return the agent's final human-readable narrative from *transcript_path*.
+
+    Reads the JSONL transcript file produced by the Claude Agent SDK, walks
+    entries in reverse, and extracts the concatenated text from the last
+    visible assistant message that contains at least one TextBlock.
+
+    Returns an empty string if the transcript is missing, unreadable, or
+    contains no qualifying assistant message.
+    """
+    try:
+        lines = Path(transcript_path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if entry.get("type") != "assistant":
+            continue
+        # Skip meta / sidechain entries (tool-result sidechains, compaction notices).
+        if entry.get("isMeta") or entry.get("isSidechain"):
+            continue
+        message = entry.get("message") or {}
+        content = message.get("content") or []
+        texts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = (block.get("text") or "").strip()
+                if text:
+                    texts.append(text)
+        narrative = "\n\n".join(texts).strip()
+        if narrative:
+            return narrative
+
+    return ""
+
+
+import threading as _threading
+
+# Per-db-path lock that serialises schema initialisation within a process.
+# Concurrent hook subprocesses each have their own Python interpreter so this
+# only helps the in-process (same-process, multi-thread) case; cross-process
+# contention is handled by the C-level busy_timeout on sqlite3.connect().
+_INIT_LOCKS: dict[str, _threading.Lock] = {}
+_INIT_LOCKS_LOCK = _threading.Lock()
+
+
+def _get_init_lock(db_path: str) -> _threading.Lock:
+    with _INIT_LOCKS_LOCK:
+        if db_path not in _INIT_LOCKS:
+            _INIT_LOCKS[db_path] = _threading.Lock()
+        return _INIT_LOCKS[db_path]
+
+
 class SlashTracer:
     """
     Core write-tracking and task-review engine.
@@ -110,30 +175,56 @@ class SlashTracer:
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        # timeout=30 sets the C-level busy-wait on connect(); the pragma then
-        # ensures the same limit applies to all subsequent statements on this
-        # connection, including WAL writes from concurrent threads/processes.
-        self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
-        self.conn.execute("PRAGMA busy_timeout=30000")
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self._init_schema()
+        # Serialise schema init within the same process so that two threads
+        # racing to open the same DB don't collide on CREATE TABLE / ALTER TABLE.
+        # Cross-process contention is handled by the C-level timeout=30 below.
+        with _get_init_lock(db_path):
+            self.conn = sqlite3.connect(db_path, check_same_thread=False, timeout=30)
+            self.conn.execute("PRAGMA busy_timeout=30000")
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+            self._init_schema()
 
     # ------------------------------------------------------------------
     # Schema
     # ------------------------------------------------------------------
 
     def _init_schema(self) -> None:
-        """Create all tables and indexes if they do not already exist."""
-        # executescript() bypasses the connection's busy_timeout and issues its
-        # own implicit BEGIN, which can raise "database is locked" under
-        # concurrent initialisation before WAL mode is fully established.
-        # Splitting into individual statements inside a regular with-block lets
-        # the C-level timeout (set on connect) handle any brief write contention.
+        """Create all tables and indexes if they do not already exist.
+
+        Each DDL statement is executed outside a Python-managed transaction
+        (i.e. in autocommit mode) so that SQLite's C-level busy-wait retries
+        on lock contention.  ``with self.conn:`` issues BEGIN IMMEDIATE, which
+        bypasses the busy_timeout retry loop and raises immediately if another
+        connection holds the write lock — the opposite of what we want during
+        concurrent hook-subprocess initialisation.
+        """
         statements = [s.strip() for s in _SCHEMA_SQL.split(";") if s.strip()]
-        with self.conn:
-            for stmt in statements:
-                self.conn.execute(stmt)
+        for stmt in statements:
+            self.conn.execute(stmt)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Apply incremental schema migrations to existing databases.
+
+        Each ALTER TABLE is executed outside a Python-managed transaction so
+        that SQLite's C-level busy-wait (set via PRAGMA busy_timeout) retries
+        on lock contention rather than immediately raising OperationalError.
+        ``with self.conn:`` issues BEGIN IMMEDIATE which bypasses the busy-wait
+        for DDL statements; executing directly in autocommit mode avoids that.
+
+        Duplicate-column errors ("duplicate column name") are silently ignored
+        so the method is idempotent against databases that already have the
+        column.
+        """
+        migrations = [
+            "ALTER TABLE tasks ADD COLUMN narrative TEXT",
+        ]
+        for sql in migrations:
+            try:
+                self.conn.execute(sql)
+            except sqlite3.OperationalError:
+                pass  # column already exists — idempotent
 
     # ------------------------------------------------------------------
     # Blob store (internal)
@@ -379,25 +470,35 @@ class SlashTracer:
         session_id: str,
         status: str,
         summary: Optional[dict] = None,
+        narrative: Optional[str] = None,
     ) -> None:
         """
         Transition *session_id*'s task to *status*.
 
         Optionally attaches a diff summary (JSON-serialisable dict) to
-        ``tasks.summary``.  Sets ``ended_at`` to now.
+        ``tasks.summary`` and a human-readable narrative to ``tasks.narrative``.
+        Sets ``ended_at`` to now.
+
+        ``COALESCE(?, col)`` semantics: passing ``None`` for *summary* or
+        *narrative* preserves whatever value is already stored in the DB.
+        Pass an explicit value to overwrite.
         """
         now_ms = int(time.time() * 1000)
         with self.conn:
             self.conn.execute(
                 """
                 UPDATE tasks
-                SET status = ?, ended_at = ?, summary = ?
+                SET status    = ?,
+                    ended_at  = ?,
+                    summary   = COALESCE(?, summary),
+                    narrative = COALESCE(?, narrative)
                 WHERE session_id = ?
                 """,
                 (
                     status,
                     now_ms,
                     json.dumps(summary) if summary is not None else None,
+                    narrative,
                     session_id,
                 ),
             )
@@ -418,7 +519,7 @@ class SlashTracer:
         """
         rows = self.conn.execute(
             """
-            SELECT session_id, prompt, started_at, summary
+            SELECT session_id, prompt, started_at, summary, narrative
             FROM tasks
             WHERE status = 'pending_review'
               AND parent_session_id IS NULL
@@ -431,6 +532,7 @@ class SlashTracer:
                 "prompt": r[1],
                 "started_at": r[2],
                 "summary": json.loads(r[3]) if r[3] else None,
+                "narrative": r[4],
             }
             for r in rows
         ]

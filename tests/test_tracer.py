@@ -1101,19 +1101,34 @@ class TestReplStartupPendingReview:
         ).fetchone()[0]
         assert status == "closed"
 
-    def test_dismiss_transitions_to_abandoned(self, tracer: SlashTracer) -> None:
+    def test_followup_transitions_back_to_open(self, tracer: SlashTracer) -> None:
+        """Providing a follow-up instruction reverts the task to open."""
         tracer.open_task("S", "task")
         tracer.set_task_status("S", "pending_review")
 
-        # Simulate operator dismissing
-        tracer.set_task_status("S", "abandoned")
+        # Simulate operator providing a follow-up instruction
+        tracer.set_task_status("S", "open")
 
         pending = tracer.get_pending_reviews()
         assert not any(p["session_id"] == "S" for p in pending)
         status = tracer.conn.execute(
             "SELECT status FROM tasks WHERE session_id = 'S'"
         ).fetchone()[0]
-        assert status == "abandoned"
+        assert status == "open"
+
+    def test_blank_line_approve_transitions_to_closed(self, tracer: SlashTracer) -> None:
+        """Blank-line (Enter) approval closes the task — CI default path."""
+        tracer.open_task("S2", "task")
+        tracer.set_task_status("S2", "pending_review")
+
+        # Simulate CI / blank-line approve
+        tracer.set_task_status("S2", "closed")
+
+        status = tracer.conn.execute(
+            "SELECT status FROM tasks WHERE session_id = 'S2'"
+        ).fetchone()[0]
+        assert status == "closed"
+        assert not tracer.get_pending_reviews()
 
 
 # ---------------------------------------------------------------------------
@@ -1123,7 +1138,8 @@ class TestReplStartupPendingReview:
 class TestStaleOpenTaskRecovery:
     """
     At REPL startup _check_startup_tasks surfaces open tasks older than
-    _STALE_TASK_THRESHOLD_SECS (3600s) and offers bulk abandon.
+    _STALE_TASK_THRESHOLD_SECS (3600s) for operator information.
+    No automatic status change occurs; the operator decides what to do next.
     We test the tracer state transitions only.
     """
 
@@ -1137,15 +1153,17 @@ class TestStaleOpenTaskRecovery:
         )
         tracer.conn.commit()
 
-    def test_stale_open_task_can_be_abandoned(
+    def test_stale_open_task_remains_open_without_action(
         self, tracer: SlashTracer
     ) -> None:
+        """Stale open tasks are surfaced for information only; no status change
+        occurs automatically — the operator takes action via a new task or /review.
+        """
         self._stale_open(tracer, "STALE")
-        tracer.set_task_status("STALE", "abandoned")
         status = tracer.conn.execute(
             "SELECT status FROM tasks WHERE session_id = 'STALE'"
         ).fetchone()[0]
-        assert status == "abandoned"
+        assert status == "open"
 
     def test_stale_open_identified_by_age(
         self, tracer: SlashTracer
@@ -1357,6 +1375,192 @@ class TestTaskLifecycleEdgeCases:
         tracer.set_task_status("S1", "pending_review")
         pending = tracer.get_pending_reviews()
         assert pending[0]["summary"] is None
+
+
+# ---------------------------------------------------------------------------
+# Unit — narrative persistence
+# ---------------------------------------------------------------------------
+
+class TestNarrative:
+    def test_set_task_status_stores_narrative(self, tracer: SlashTracer) -> None:
+        """narrative is persisted when passed to set_task_status."""
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "pending_review", narrative="I fixed the bug.")
+        row = tracer.conn.execute(
+            "SELECT narrative FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert row[0] == "I fixed the bug."
+
+    def test_set_task_status_narrative_none_preserves_existing(
+        self, tracer: SlashTracer
+    ) -> None:
+        """Passing narrative=None to set_task_status must NOT overwrite an existing value."""
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "pending_review", narrative="First narrative.")
+        # Approve without passing narrative — existing value must survive.
+        tracer.set_task_status("S1", "closed")
+        row = tracer.conn.execute(
+            "SELECT narrative FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert row[0] == "First narrative."
+
+    def test_set_task_status_narrative_can_be_overwritten(
+        self, tracer: SlashTracer
+    ) -> None:
+        """Passing an explicit narrative overwrites the previous value."""
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "pending_review", narrative="Draft.")
+        tracer.set_task_status("S1", "closed", narrative="Final.")
+        row = tracer.conn.execute(
+            "SELECT narrative FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert row[0] == "Final."
+
+    def test_summary_also_preserved_on_approve(self, tracer: SlashTracer) -> None:
+        """Approving (no summary arg) must not clear an existing summary."""
+        tracer.open_task("S1", "task")
+        summary = {"file_changes": [], "action_log": []}
+        tracer.set_task_status("S1", "pending_review", summary=summary)
+        # Simulate approve — no summary passed.
+        tracer.set_task_status("S1", "closed")
+        row = tracer.conn.execute(
+            "SELECT summary FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert json.loads(row[0]) == summary
+
+    def test_get_pending_reviews_returns_narrative(self, tracer: SlashTracer) -> None:
+        """get_pending_reviews must include the narrative field."""
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "pending_review", narrative="Done everything.")
+        pending = tracer.get_pending_reviews()
+        assert pending[0]["narrative"] == "Done everything."
+
+    def test_get_pending_reviews_narrative_none_when_absent(
+        self, tracer: SlashTracer
+    ) -> None:
+        """get_pending_reviews returns narrative=None when not set."""
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "pending_review")
+        pending = tracer.get_pending_reviews()
+        assert pending[0]["narrative"] is None
+
+    def test_migrate_adds_column_to_existing_db(self, db_path: str) -> None:
+        """_migrate is idempotent — running it twice on the same DB does not raise."""
+        t = SlashTracer(db_path)
+        # Calling _migrate again manually must not raise even though the column exists.
+        t._migrate()
+        t._migrate()
+        # Column must be present.
+        cols = [
+            row[1]
+            for row in t.conn.execute("PRAGMA table_info(tasks)").fetchall()
+        ]
+        assert "narrative" in cols
+
+    def test_narrative_column_present_in_schema(self, tracer: SlashTracer) -> None:
+        """tasks table must have a narrative column after init."""
+        cols = [
+            row[1]
+            for row in tracer.conn.execute("PRAGMA table_info(tasks)").fetchall()
+        ]
+        assert "narrative" in cols
+
+
+# ---------------------------------------------------------------------------
+# Unit — extract_narrative_from_transcript
+# ---------------------------------------------------------------------------
+
+class TestExtractNarrativeFromTranscript:
+    def test_returns_last_assistant_text(self, tmp_path: Path) -> None:
+        """Returns the concatenated text of the last visible assistant message."""
+        from slash.tracer import extract_narrative_from_transcript
+
+        transcript = tmp_path / "session.jsonl"
+        entries = [
+            {"type": "user", "message": {"content": [{"type": "text", "text": "do it"}]}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}},
+        ]
+        transcript.write_text("\n".join(json.dumps(e) for e in entries))
+        assert extract_narrative_from_transcript(str(transcript)) == "Done."
+
+    def test_skips_meta_entries(self, tmp_path: Path) -> None:
+        """isMeta entries are ignored; falls back to earlier real message."""
+        from slash.tracer import extract_narrative_from_transcript
+
+        transcript = tmp_path / "session.jsonl"
+        entries = [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Real."}]}},
+            {"type": "assistant", "isMeta": True, "message": {"content": [{"type": "text", "text": "Meta."}]}},
+        ]
+        transcript.write_text("\n".join(json.dumps(e) for e in entries))
+        assert extract_narrative_from_transcript(str(transcript)) == "Real."
+
+    def test_skips_sidechain_entries(self, tmp_path: Path) -> None:
+        """isSidechain entries are ignored."""
+        from slash.tracer import extract_narrative_from_transcript
+
+        transcript = tmp_path / "session.jsonl"
+        entries = [
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Main."}]}},
+            {"type": "assistant", "isSidechain": True, "message": {"content": [{"type": "text", "text": "Side."}]}},
+        ]
+        transcript.write_text("\n".join(json.dumps(e) for e in entries))
+        assert extract_narrative_from_transcript(str(transcript)) == "Main."
+
+    def test_concatenates_multiple_text_blocks(self, tmp_path: Path) -> None:
+        """Multiple TextBlocks in one message are joined with double newline."""
+        from slash.tracer import extract_narrative_from_transcript
+
+        transcript = tmp_path / "session.jsonl"
+        entry = {
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "text", "text": "Part one."},
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+                {"type": "text", "text": "Part two."},
+            ]},
+        }
+        transcript.write_text(json.dumps(entry))
+        result = extract_narrative_from_transcript(str(transcript))
+        assert result == "Part one.\n\nPart two."
+
+    def test_returns_empty_for_missing_file(self, tmp_path: Path) -> None:
+        """Returns empty string when transcript file does not exist."""
+        from slash.tracer import extract_narrative_from_transcript
+
+        result = extract_narrative_from_transcript(str(tmp_path / "nonexistent.jsonl"))
+        assert result == ""
+
+    def test_returns_empty_when_no_assistant_messages(self, tmp_path: Path) -> None:
+        """Returns empty string if transcript has no assistant entries."""
+        from slash.tracer import extract_narrative_from_transcript
+
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text(json.dumps({"type": "user", "message": {"content": []}}))
+        assert extract_narrative_from_transcript(str(transcript)) == ""
+
+    def test_returns_empty_for_assistant_with_no_text_blocks(
+        self, tmp_path: Path
+    ) -> None:
+        """Returns empty string if the last assistant message has only tool-use blocks."""
+        from slash.tracer import extract_narrative_from_transcript
+
+        transcript = tmp_path / "session.jsonl"
+        entry = {
+            "type": "assistant",
+            "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]},
+        }
+        transcript.write_text(json.dumps(entry))
+        assert extract_narrative_from_transcript(str(transcript)) == ""
+
+    def test_skips_blank_lines(self, tmp_path: Path) -> None:
+        """Blank lines in the JSONL file are skipped without error."""
+        from slash.tracer import extract_narrative_from_transcript
+
+        transcript = tmp_path / "session.jsonl"
+        entry = {"type": "assistant", "message": {"content": [{"type": "text", "text": "Hi."}]}}
+        transcript.write_text("\n\n" + json.dumps(entry) + "\n\n")
+        assert extract_narrative_from_transcript(str(transcript)) == "Hi."
 
 
 # ---------------------------------------------------------------------------

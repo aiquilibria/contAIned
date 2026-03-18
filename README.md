@@ -122,6 +122,46 @@ Refreshes managed hook files from the latest bundled templates. Safe to run afte
 slash update
 ```
 
+## Review flow
+
+Every task goes through an operator review when the agent signals completion.
+
+```
+Agent signals Stop
+        │
+        ▼
+  QA checks (qa.py) + diff summary built
+        │
+        ▼
+  Press Enter to approve — or type a follow-up instruction and press Enter
+        │
+        ├─── blank line / Enter ──────────────────► task closed, session ends
+        │
+        └─── follow-up instruction ──────────────► agent continues same session
+                                                    (loops back when it stops again)
+```
+
+**Approve** — press Enter on a blank line (or send `a` in CI / non-interactive
+mode).  The task is marked `closed` and the session ends cleanly.
+
+**Follow-up** — type any instruction and press Enter.  The agent wakes up with
+your message and keeps working in the same session (same conversation history).
+When it next signals Stop, the review prompt appears again.
+
+There is no separate "dismiss" or "abandon" action in the normal flow.  If you
+want to discard a task you can send the instruction `"abandon this"` or close
+the session externally.
+
+### Task states
+
+| State            | Meaning                                                     |
+|------------------|-------------------------------------------------------------|
+| `open`           | Agent is actively working (or waiting for a follow-up).     |
+| `pending_review` | Agent signalled Stop; operator review is in progress.       |
+| `closed`         | Operator approved. Task is complete. Session is over.       |
+
+---
+
 ## How it works
 
 Governance is implemented through three hook layers, evaluated in order on every tool call:

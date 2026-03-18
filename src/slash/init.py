@@ -398,9 +398,35 @@ def _build_manifest(
     runtime_mode: str,
     docker_config: dict | None,
     model: str,
+    verbosity: str = "verbose",
+    thinking_enabled: bool = False,
+    thinking_budget: int = 1024,
+    qa_choices: dict | None = None,
 ) -> str:
     """Return a YAML string for the complete manifest based on wizard choices."""
     import yaml
+
+    # In docker mode workspace boundary is enforced at the kernel level — always block.
+    if runtime_mode == "docker":
+        workspace_policy = {
+            "reads":      "block",
+            "writes":     "block",
+            "bash_paths": "block",
+        }
+    else:
+        workspace_policy = {
+            "reads":      "escalate",
+            "writes":     "block",
+            "bash_paths": "block",
+        }
+
+    default_qa = {
+        "syntax": True,
+        "lint":   True,
+        "format": True,
+        "type":   True,
+    }
+    qa = {**default_qa, **(qa_choices or {})}
 
     manifest: dict = {
         "runtime": {"mode": runtime_mode},
@@ -411,11 +437,7 @@ def _build_manifest(
                 "bash_reads":    "block",
                 "safe_variants": "allow",
             },
-            "workspace": {
-                "reads":      "escalate",
-                "writes":     "block",
-                "bash_paths": "block",
-            },
+            "workspace": workspace_policy,
             "bash": {
                 "destructive":          "block",
                 "privilege_escalation": "block",
@@ -424,17 +446,12 @@ def _build_manifest(
                 "package_publish":      "block",
             },
             "audit": {"enabled": True},
-            "qa": {
-                "syntax_check": True,
-                "lint_check":   True,
-                "format_check": True,
-                "type_check":   True,
-            },
+            "qa": qa,
         },
         "agent": {
             "model":     model,
-            "verbosity": "verbose",
-            "thinking": {"enabled": False, "budget_tokens": 1024},
+            "verbosity": verbosity,
+            "thinking": {"enabled": thinking_enabled, "budget_tokens": thinking_budget},
         },
     }
 
@@ -516,14 +533,58 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
         console.print("  [dim]Audit logging:          always on[/dim]")
         console.print("  [dim]git push / --force:     requires escalation[/dim]")
         console.print("  [dim].slash/ protection:     always enforced[/dim]")
+        if runtime_mode == "docker":
+            console.print("  [dim]Workspace boundary:     always blocked (Docker enforced)[/dim]")
         console.print()
-        model               = click.prompt("? Default model", default="claude-sonnet-4-6")
+
+        # ── QA checks ────────────────────────────────────────────────────────
+        console.print("? QA checks (enabled by default — press Enter to keep):")
+        qa_syntax  = click.confirm("    syntax  (py_compile)",          default=True)
+        qa_lint    = click.confirm("    lint    (ruff check)",           default=True)
+        qa_format  = click.confirm("    format  (ruff format --check)",  default=True)
+        qa_type    = click.confirm("    type    (pyright)",              default=True)
+        console.print()
+
+        qa_choices = {
+            "syntax": qa_syntax,
+            "lint":   qa_lint,
+            "format": qa_format,
+            "type":   qa_type,
+        }
+
+        # ── Model & agent settings ────────────────────────────────────────────
+        model = click.prompt("? Default model", default="claude-sonnet-4-6")
+
+        console.print()
+        console.print("? Agent verbosity:")
+        console.print("    [bold]verbose[/bold]  — full streaming output (thinking, text, every tool call)")
+        console.print("    [bold]concise[/bold]  — single updating status line showing current tool call")
+        console.print("    [bold]none[/bold]     — silent during execution; only final result printed")
+        verbosity = click.prompt(
+            "  Verbosity",
+            type=click.Choice(["verbose", "concise", "none"], case_sensitive=False),
+            default="verbose",
+        ).lower()
+
+        console.print()
+        thinking_enabled = click.confirm("? Enable extended thinking?", default=False)
+        thinking_budget  = 1024
+        if thinking_enabled:
+            thinking_budget = click.prompt(
+                "  Thinking budget (tokens)",
+                default=1024,
+                type=int,
+            )
         console.print()
 
         manifest_content = _build_manifest(
             runtime_mode=runtime_mode,
             docker_config=docker_config,
             model=model,
+            verbosity=verbosity,
+            thinking_enabled=thinking_enabled,
+            thinking_budget=thinking_budget,
+            qa_choices=qa_choices,
         )
 
     results: list[tuple[str, str]] = []

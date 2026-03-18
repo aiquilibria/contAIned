@@ -463,357 +463,41 @@ def _get_tracer(root: Path):
         return None
 
 
-def _run_summarizer(session_id: str, root: Path, tracer: Any) -> None:
+def _extract_narrative(session_id: str, root: Path) -> str:
     """
-    Build and render the task summary in-process, then prompt the operator
-    to approve, dismiss, or continue.
+    Return the agent's final human-readable text from the session transcript.
 
-    Called directly from _run_task_streaming after the agent finishes — no
-    subprocess involved, so there is no risk of re-triggering the hook chain.
-
-    Operator choices:
-      [a] Approve  → set status = closed  (normal completion)
-      [d] Dismiss  → set status = abandoned
-      [c] Continue → set status = open; raises _ContinueSignal so the caller
-                     can give the agent another turn.
+    Uses the SDK's ``get_session_messages`` to locate the JSONL file, then
+    walks messages in reverse to find the last visible assistant TextBlock.
+    Returns an empty string if nothing useful is found.
     """
-    import time  # noqa: PLC0415
-
-    # ── Defensive child check ──────────────────────────────────────────────────
-    open_children: list[str] = []
-    for _attempt in range(3):
-        try:
-            rows = tracer.conn.execute(
-                "SELECT session_id FROM tasks WHERE parent_session_id = ? AND status = 'open'",
-                (session_id,),
-            ).fetchall()
-            open_children = [r[0] for r in rows]
-        except Exception:
-            open_children = []
-        if not open_children:
-            break
-        time.sleep(0.2)
-
-    # ── Collect file diffs ─────────────────────────────────────────────────────
     try:
-        touched_files = tracer.list_touched_files(session_id)
-    except Exception:
-        touched_files = []
-
-    # Build a lookup of write-tool audit events per file path (for reasons).
-    try:
-        all_audit = tracer.recent_audit_events(session_id, limit=500)
-        write_events_by_file: dict[str, list[dict]] = {}
-        for ev in reversed(all_audit):
-            if ev["tool"] in ("Write", "Edit", "MultiEdit") and ev.get("input"):
-                fp = ev["input"].get("file_path") or ""
-                if fp:
-                    write_events_by_file.setdefault(fp, []).append(ev)
-                for mfp in (ev["input"].get("file_paths") or []):
-                    write_events_by_file.setdefault(mfp, []).append(ev)
-    except Exception:
-        write_events_by_file = {}
-
-    # Resolve session tree once for baseline lookups.
-    try:
-        tree_ids = tracer.tree_session_ids(session_id)
-        tree_ph  = ",".join("?" * len(tree_ids)) if tree_ids else "'__none__'"
-    except Exception:
-        tree_ids = []
-        tree_ph  = "'__none__'"
-
-    file_diffs: list[dict] = []
-    for file_path in touched_files:
-        try:
-            diff_text = tracer.diff_task(session_id, file_path)
-            if not diff_text:
+        from claude_agent_sdk import get_session_messages  # noqa: PLC0415
+        messages = get_session_messages(session_id, directory=str(root))
+        for msg in reversed(messages):
+            if getattr(msg, "type", None) != "assistant":
                 continue
-            lines_added   = sum(1 for ln in diff_text.splitlines() if ln.startswith("+") and not ln.startswith("+++"))
-            lines_removed = sum(1 for ln in diff_text.splitlines() if ln.startswith("-") and not ln.startswith("---"))
-
-            # Determine change type from the earliest baseline pre_hash.
-            change_type = "modified"
-            try:
-                if tree_ids:
-                    bl = tracer.conn.execute(
-                        f"SELECT pre_hash FROM baselines WHERE file_path = ? AND session_id IN ({tree_ph}) ORDER BY captured_at ASC LIMIT 1",
-                        [file_path, *tree_ids],
-                    ).fetchone()
-                    if bl is not None:
-                        change_type = "new file" if bl[0] is None else "modified"
-            except Exception:
-                pass
-
-            # Build a short human-readable reason from write-tool events for this file.
-            file_write_evs = write_events_by_file.get(file_path, [])
-            if file_write_evs:
-                tools_used = list(dict.fromkeys(e["tool"] for e in file_write_evs))
-                reason = ", ".join(t.lower() for t in tools_used)
+            message = getattr(msg, "message", None) or {}
+            if isinstance(message, dict):
+                content = message.get("content") or []
             else:
-                reason = change_type
-
-            file_diffs.append({
-                "file_path":     file_path,
-                "diff":          diff_text,
-                "lines_added":   lines_added,
-                "lines_removed": lines_removed,
-                "change_type":   change_type,
-                "reason":        reason,
-            })
-        except Exception:
-            pass
-
-    # ── Build action log ───────────────────────────────────────────────────────
-    try:
-        raw_events = tracer.recent_audit_events(session_id, limit=200)
-        action_log = [
-            e for e in reversed(raw_events)
-            if e["tool"] in ("Bash", "Agent") or e["outcome"] == "denied"
-        ]
-    except Exception:
-        action_log = []
-
-    # ── Look up task prompt ────────────────────────────────────────────────────
-    try:
-        row = tracer.conn.execute(
-            "SELECT prompt, started_at FROM tasks WHERE session_id = ?", (session_id,)
-        ).fetchone()
-        task_prompt  = row[0] if row else "(unknown)"
-        task_started = row[1] if row else None
-    except Exception:
-        task_prompt  = "(unknown)"
-        task_started = None
-
-    # ── Store summary ──────────────────────────────────────────────────────────
-    summary = {
-        "file_changes": [
-            {
-                "file_path":     d["file_path"],
-                "lines_added":   d["lines_added"],
-                "lines_removed": d["lines_removed"],
-                "change_type":   d["change_type"],
-                "reason":        d["reason"],
-            }
-            for d in file_diffs
-        ],
-        "action_log":          action_log,
-        "incomplete_children": open_children,
-    }
-    try:
-        tracer.set_task_status(session_id, "pending_review", summary=summary)
+                content = getattr(message, "content", []) or []
+            texts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = (block.get("text") or "").strip()
+                    if text:
+                        texts.append(text)
+                elif getattr(block, "type", None) == "text":
+                    text = (getattr(block, "text", "") or "").strip()
+                    if text:
+                        texts.append(text)
+            narrative = "\n\n".join(texts).strip()
+            if narrative:
+                return narrative
     except Exception:
         pass
-
-    # ── Render to terminal ─────────────────────────────────────────────────────
-    _STATUS_LABEL = {"new file": "A", "modified": "M", "deleted": "D"}
-    _STATUS_STYLE = {"new file": "green", "modified": "yellow", "deleted": "red"}
-
-    from rich.panel import Panel   # noqa: PLC0415
-    from rich.text  import Text    # noqa: PLC0415
-
-    # Header
-    started_str = ""
-    if task_started:
-        from datetime import datetime, timezone  # noqa: PLC0415
-        dt = datetime.fromtimestamp(task_started / 1000, tz=timezone.utc)
-        started_str = "  started " + dt.strftime("%Y-%m-%d %H:%M UTC")
-
-    header = Text()
-    header.append("Task Review", style="bold white")
-    header.append("\n")
-    header.append(task_prompt[:120], style="dim")
-    if started_str:
-        header.append("\n" + started_str, style="dim")
-    if open_children:
-        header.append(
-            "\n[!] " + str(len(open_children)) + " sub-agent(s) still open — diffs may be incomplete",
-            style="yellow",
-        )
-    console.print(Panel(header, border_style="blue", expand=False))
-
-    # ── Changes — git-status-like ──────────────────────────────────────────────
-    if file_diffs:
-        console.print("\n[bold] Changes[/bold]  [dim](" + str(len(file_diffs)) + " file(s))[/dim]\n")
-        for fd in file_diffs:
-            ct    = fd.get("change_type", "modified")
-            label = _STATUS_LABEL.get(ct, "M")
-            style = _STATUS_STYLE.get(ct, "yellow")
-            stat_str = (
-                "[green]+" + str(fd["lines_added"]) + "[/green]"
-                "  [red]-" + str(fd["lines_removed"]) + "[/red]"
-            )
-            reason_str = fd.get("reason", "")
-            status_line = (
-                "  [" + style + "][bold]" + label + "[/bold][/" + style + "]"
-                "  [bold cyan]" + escape(fd["file_path"]) + "[/bold cyan]"
-                "  " + stat_str
-            )
-            if reason_str and reason_str != ct:
-                status_line += "  [dim](" + escape(reason_str) + ")[/dim]"
-            console.print(status_line)
-
-        console.print("")
-        for fd in file_diffs:
-            console.print("[dim]──[/dim] [bold cyan]" + escape(fd["file_path"]) + "[/bold cyan]")
-            diff_text_obj = Text()
-            for line in fd["diff"].splitlines()[:200]:
-                if line.startswith("+++") or line.startswith("---"):
-                    diff_text_obj.append(line + "\n", style="dim")
-                elif line.startswith("@@"):
-                    diff_text_obj.append(line + "\n", style="cyan")
-                elif line.startswith("+"):
-                    diff_text_obj.append(line + "\n", style="green")
-                elif line.startswith("-"):
-                    diff_text_obj.append(line + "\n", style="red")
-                else:
-                    diff_text_obj.append(line + "\n", style="")
-            if len(fd["diff"].splitlines()) > 200:
-                diff_text_obj.append("  … (diff truncated)\n", style="dim")
-            console.print(diff_text_obj)
-    else:
-        console.print("\n[dim] No file changes recorded.[/dim]\n")
-
-    # ── Task Completion ────────────────────────────────────────────────────────
-    if file_diffs:
-        new_files = [fd for fd in file_diffs if fd.get("change_type") == "new file"]
-        mod_files = [fd for fd in file_diffs if fd.get("change_type") == "modified"]
-        del_files = [fd for fd in file_diffs if fd.get("change_type") == "deleted"]
-        parts: list[str] = []
-        if new_files:
-            parts.append(str(len(new_files)) + " file(s) created")
-        if mod_files:
-            parts.append(str(len(mod_files)) + " file(s) modified")
-        if del_files:
-            parts.append(str(len(del_files)) + " file(s) deleted")
-        total_added   = sum(fd["lines_added"]   for fd in file_diffs)
-        total_removed = sum(fd["lines_removed"] for fd in file_diffs)
-        change_summary = ", ".join(parts) if parts else str(len(file_diffs)) + " file(s) changed"
-        console.print("[bold] Task Completion[/bold]\n")
-        console.print(
-            "  The task [dim]\"" + escape(task_prompt[:80]) + "\"[/dim] is complete.\n"
-            "  [green]" + change_summary + "[/green]  "
-            "([green]+" + str(total_added) + "[/green] / [red]-" + str(total_removed) + "[/red] lines total).\n"
-        )
-        if new_files:
-            console.print("  [bold]New files:[/bold]")
-            for fd in new_files:
-                console.print("    [green]" + escape(fd["file_path"]) + "[/green]")
-        if mod_files:
-            console.print("  [bold]Modified:[/bold]")
-            for fd in mod_files:
-                console.print("    [yellow]" + escape(fd["file_path"]) + "[/yellow]  [dim](" + escape(fd.get("reason", "")) + ")[/dim]")
-        if del_files:
-            console.print("  [bold]Deleted:[/bold]")
-            for fd in del_files:
-                console.print("    [red]" + escape(fd["file_path"]) + "[/red]")
-        console.print("")
-
-    # ── Action log ────────────────────────────────────────────────────────────
-    if action_log:
-        bash_count   = sum(1 for e in action_log if e["tool"] == "Bash")
-        agent_count  = sum(1 for e in action_log if e["tool"] == "Agent")
-        denied_count = sum(1 for e in action_log if e["outcome"] == "denied")
-        aparts: list[str] = []
-        if bash_count:
-            aparts.append(str(bash_count) + " bash")
-        if agent_count:
-            aparts.append(str(agent_count) + " sub-agent")
-        if denied_count:
-            aparts.append(str(denied_count) + " denied")
-        console.print("[bold] Action Log[/bold]  [dim](" + ", ".join(aparts) + ")[/dim]\n")
-        for e in action_log[-30:]:
-            inp = e.get("input") or {}
-            if e["tool"] == "Bash":
-                cmd = escape((inp.get("command") or "")[:80])
-                ec  = inp.get("exit_code")
-                ec_str = (" (exit: " + str(ec) + ")") if ec is not None else ""
-                style = "red" if e["outcome"] == "denied" else "default"
-                console.print("  [" + style + "]● bash: " + cmd + ec_str + "[/" + style + "]")
-            elif e["tool"] == "Agent":
-                atype  = inp.get("agent_type") or "agent"
-                prompt = escape((inp.get("prompt_head") or "")[:60])
-                console.print("  ● agent [" + escape(str(atype)) + "]: " + prompt)
-            elif e["outcome"] == "denied":
-                rsn = escape((e.get("reason") or "")[:80])
-                console.print("  [red]✗ " + escape(e["tool"]) + " denied: " + rsn + "[/red]")
-        console.print("")
-
-    # ── Operator prompt ────────────────────────────────────────────────────────
-    console.print("")
-    console.print("[bold yellow]⏸  Awaiting your sign-off — task is NOT closed yet.[/bold yellow]")
-    console.print("[bold]Review:[/bold]  [a] Approve   [d] Dismiss   [c] Continue with new instruction")
-    console.print("[dim](Press a / d / c then Enter)[/dim] ", end="")
-
-    # Read from /dev/tty so we bypass any stdin pipe.
-    choice = ""
-    non_interactive = False
-    try:
-        with open("/dev/tty") as tty:
-            raw = tty.readline().strip()
-        choice = raw[:1].lower() if raw else ""
-    except Exception:
-        non_interactive = True
-        choice = "a"
-
-    if not non_interactive and choice not in ("a", "d", "c"):
-        try:
-            console.print("\n  Unrecognised — enter a (approve), d (dismiss), or c (continue): ", end="")
-            with open("/dev/tty") as tty:
-                raw = tty.readline().strip()
-            choice = raw[:1].lower() if raw else "d"
-        except Exception:
-            choice = "d"
-        if choice not in ("a", "d", "c"):
-            choice = "d"
-
-    console.print("")  # newline after inline prompt
-
-    if choice == "d":
-        console.print("  Dismissed — task marked abandoned.")
-        try:
-            tracer.set_task_status(session_id, "abandoned")
-        except Exception:
-            pass
-        return
-
-    if choice == "c":
-        follow_up = ""
-        try:
-            console.print("  Follow-up instruction (required — press Enter when done):")
-            console.print("  > ", end="")
-            with open("/dev/tty") as tty:
-                follow_up = tty.readline().strip()
-        except Exception:
-            pass
-
-        if not follow_up:
-            console.print("  No instruction provided — approving instead.")
-            try:
-                tracer.set_task_status(session_id, "closed")
-            except Exception:
-                pass
-            return
-
-        console.print("  Continuing with new instruction.")
-        try:
-            tracer.set_task_status(session_id, "open")
-        except Exception:
-            pass
-        raise _ContinueSignal("Operator follow-up: " + follow_up)
-
-    # Approve
-    console.print("  Approved — task closed.")
-    try:
-        tracer.set_task_status(session_id, "closed")
-    except Exception:
-        pass
-
-
-class _ContinueSignal(Exception):
-    """Raised by _run_summarizer when the operator chooses 'continue'."""
-    def __init__(self, follow_up: str) -> None:
-        super().__init__(follow_up)
-        self.follow_up = follow_up
+    return ""
 
 
 async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose") -> None:
@@ -875,30 +559,7 @@ async def _run_task_streaming(prompt: str, root: Path, verbosity: str = "verbose
 
             console.print(f"\nTrace: [dim].slash/tracer.db[/dim]\n")
 
-        # SDK context has exited; QA hook has already run.  Now run the
-        # summarizer in-process so it never triggers the hook chain again.
-        if tracer and _task_session_id:
-            # Narrow to str — the `if _task_session_id` guard above guarantees
-            # this is not None, but Pyright needs a local binding to see it.
-            task_session_id: str = _task_session_id
-            while True:
-                try:
-                    _run_summarizer(task_session_id, root, tracer)
-                    break  # approved or dismissed — done
-                except _ContinueSignal as sig:
-                    # Operator asked for another turn.  Resume the *same*
-                    # session so the agent retains its full conversation
-                    # history; no new task row is opened.
-                    async with _build_client(root, resume=task_session_id) as client:
-                        await client.query(sig.follow_up)
-                        async for message in client.receive_response():
-                            _render_message(message, verbosity)
-                            if isinstance(message, ResultMessage):
-                                result_message = message
-                    if verbosity == "verbose":
-                        console.rule(style="dim")
-                    _print_result_summary(result_message, verbosity)
-                    console.print(f"\nTrace: [dim].slash/tracer.db[/dim]\n")
+        # SDK context has exited; QA hook and summarizer hook have already run.
 
     except BaseException:
         # If the session crashed, mark the task abandoned so it doesn't surface
