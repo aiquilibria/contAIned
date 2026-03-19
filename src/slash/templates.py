@@ -106,17 +106,128 @@ SETTINGS_JSON = """\
         ]
       }}
     ]
+  }},
+  "sandbox": {{
+    "enabled": true,
+    "filesystem": {{
+      "denyWrite": [".slash"]
+    }}
+  }},
+  "statusLine": {{
+    "type": "command",
+    "command": "python3 /workspace/.claude/statusline.py"
   }}
 }}
 """
 
+STATUSLINE_PY = '''\
+#!/usr/bin/env python3
+"""
+slash status line — git branch, diff stat, session cost, context %.
+
+Installed by `slash init` to .claude/statusline.py and wired into
+Claude Code via the statusLine setting in .claude/settings.json.
+Claude Code pipes a JSON object on stdin on every update; this script
+reads it and prints a single formatted line to stdout.
+"""
+import json
+import subprocess
+import sys
+
+# ── ANSI helpers ─────────────────────────────────────────────────────────────
+_RESET  = "\\033[0m"
+_GREEN  = "\\033[32m"
+_RED    = "\\033[31m"
+
+# Foreground colours
+_FG_BLACK = "\\033[30m"
+_FG_WHITE = "\\033[97m"
+
+# Background colours
+_BG_WHITE  = "\\033[107m"
+_BG_GREEN  = "\\033[42m"
+_BG_ORANGE = "\\033[43m"   # standard yellow — renders as amber/orange
+_BG_RED    = "\\033[41m"
+
+
+def _git(cwd: str, *args: str) -> str:
+    """Run a git command in *cwd*; return stdout or empty string on error."""
+    try:
+        return subprocess.check_output(
+            ["git", "-C", cwd, *args],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return ""
+
+
+def main() -> None:
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        return
+
+    contained_part = f"{_GREEN} [✦] {_RESET}"
+
+    cwd = data.get("cwd") or ""
+
+    # ── Git branch + uncommitted diff stat ───────────────────────────────────
+    git_part = ""
+    if cwd and _git(cwd, "rev-parse", "--git-dir"):
+        branch = _git(cwd, "branch", "--show-current") or _git(cwd, "rev-parse", "--short", "HEAD")
+        shortstat = _git(cwd, "diff", "--shortstat", "HEAD")
+        ins = del_ = 0
+        for token in shortstat.split(","):
+            token = token.strip()
+            if "insertion" in token:
+                ins = int(token.split()[0])
+            elif "deletion" in token:
+                del_ = int(token.split()[0])
+
+        # Branch badge: nerd-font branch icon + name on white bg / black fg
+        branch_badge = f"{_BG_WHITE}{_FG_BLACK} |- {branch} # {_RESET}"
+        git_part = branch_badge
+
+        if ins or del_:
+            ins_str = f"{_GREEN}+{ins}{_RESET}"
+            del_str = f"{_RED}-{del_}{_RESET}"
+            git_part += f"  {ins_str} {del_str}"
+
+    # ── Session cost ─────────────────────────────────────────────────────────
+    cost_part = ""
+    cost = (data.get("cost") or {}).get("total_cost_usd")
+    if cost is not None:
+        cost_part = f"${cost:.4f}"
+
+    # ── Context window usage ─────────────────────────────────────────────────
+    ctx_part = ""
+    ctx = (data.get("context_window") or {}).get("used_percentage")
+    if ctx is not None:
+        if ctx <= 50:
+            bg, fg = _BG_GREEN, _FG_BLACK
+        elif ctx <= 80:
+            bg, fg = _BG_ORANGE, _FG_BLACK
+        else:
+            bg, fg = _BG_RED, _FG_WHITE
+        ctx_part = f"{bg}{fg} ctx {ctx}% {_RESET}"
+
+    parts = [p for p in (contained_part, git_part, cost_part, ctx_part) if p]
+    if parts:
+        print("  │  ".join(parts))
+
+
+if __name__ == "__main__":
+    main()
+'''
+
 POLICY_MANIFEST = """\
 # Slash policy manifest
 #
-# Three sections:
-#   1. runtime — controls whether slash runs locally or inside a Docker container.
+# Two sections:
+#   1. runtime — Docker container resource settings.
 #   2. policy  — enforcement settings read by the hook scripts.
-#   3. agent   — model, verbosity, and thinking settings for slash run/repl.
+#   3. agent   — model selection passed to the claude CLI.
 #
 # Action values accepted by policy settings:
 #   block    — deny the operation outright; agent receives a clear reason
@@ -127,10 +238,8 @@ POLICY_MANIFEST = """\
 # control-plane protection is hardcoded and not configurable.
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
-# Docker is the only supported runtime mode.
-# Set by `slash init`. Do not edit the mode or docker block by hand.
+# Docker resource limits. Set by `slash init`. Require container restart to apply.
 runtime:
-  mode: docker
   docker:
     image: slash:latest
     memory: 2g
@@ -146,14 +255,6 @@ policy:
     writes:        block    # Write / Edit / MultiEdit on secret files
     bash_reads:    block    # cat / head / tail / etc. targeting secret files
     safe_variants: allow    # .env.example / .env.sample / .env.template exemption
-
-  # ── Workspace boundary ───────────────────────────────────────────────────────
-  # In Docker mode these checks are redundant (Docker enforces the boundary at
-  # the kernel level), but they remain in the manifest for local-mode workspaces.
-  workspace:
-    reads:      escalate  # Read / Grep outside the project root → operator approval
-    writes:     block     # Write / Edit / MultiEdit outside the project root
-    bash_paths: block     # Bash absolute paths outside the project workspace
 
   # ── Bash command restrictions ────────────────────────────────────────────────
   bash:
@@ -179,18 +280,27 @@ policy:
     coverage:           true   # pytest --cov --cov-fail-under (requires pytest-cov)
     coverage_threshold: 80     # minimum % line coverage when coverage is true
 
-# ── Agent model settings ──────────────────────────────────────────────────────
+# ── Agent ─────────────────────────────────────────────────────────────────────
 agent:
-  # Model passed to the Claude Agent SDK. Leave blank to use the SDK default.
+  # Model passed via --model to the claude CLI. Leave blank to use claude's default.
   model: claude-sonnet-4-6
-  # Output verbosity during `slash run`:
-  #   verbose  — full streaming output: thinking, text, every tool call and result (default)
-  #   concise  — single updating status line showing the current tool call
-  #   none     — silent during execution; only the final result is printed
-  verbosity: verbose
-  thinking:
-    enabled: false
     budget_tokens: 1024
+
+# ── Sandbox ───────────────────────────────────────────────────────────────────
+# Claude Code's built-in OS-level sandbox (Seatbelt on macOS, bubblewrap on
+# Linux).  Complements slash's PreToolUse hooks: the sandbox blocks subprocess
+# writes (shell scripts, Python files run via Bash, build tools, etc.) while
+# slash hooks block Claude's own Write/Edit SDK tool calls.  Both layers are
+# needed — neither alone is sufficient.
+#
+# This section is read by `slash init` and written into .claude/settings.json.
+# Changes here take effect after re-running `slash init` (or editing
+# .claude/settings.json directly).
+sandbox:
+  enabled: true
+  filesystem:
+    denyWrite:
+      - .slash   # protect the control-plane directory from subprocess writes
 """
 
 POLICY_LOADER_HOOK = '''\
@@ -219,11 +329,6 @@ _DEFAULTS = {
         "writes":        "block",
         "bash_reads":    "block",
         "safe_variants": "allow",
-    },
-    "workspace": {
-        "reads":      "escalate",
-        "writes":     "block",
-        "bash_paths": "block",
     },
     "bash": {
         "destructive":          "block",
@@ -287,30 +392,18 @@ def load_policy(cwd="."):
         return dict(_DEFAULTS)
 
 
-def get_runtime_mode(cwd="."):
-    """Return the runtime mode: \'local\' or \'docker\'.
-
-    Returns \'local\' if the manifest is unreadable or the key is absent.
-    """
-    try:
-        import yaml
-        manifest_path = _find_manifest(cwd)
-        with manifest_path.open() as fh:
-            manifest = yaml.safe_load(fh) or {}
-        return manifest.get("runtime", {}).get("mode", "local")
-    except Exception:
-        return "local"
 '''
 
 RESTRICT_WRITES_HOOK = '''\
 #!/usr/bin/env python3
 """
-PreToolUse hook — restricts Write, Edit, MultiEdit to within the project root.
+PreToolUse hook — restricts Write, Edit, MultiEdit.
 
-Three checks in order:
-  1. Workspace boundary        — driven by policy.workspace.writes
-  2. Control-plane protection  — .slash/ writes are ALWAYS denied (not configurable)
-  3. Secret file               — driven by policy.secrets.writes
+Two checks in order:
+  1. Control-plane protection  — .slash/ writes are ALWAYS denied (not configurable)
+  2. Secret file               — driven by policy.secrets.writes
+
+Workspace boundary is enforced by the Docker container at the kernel level.
 
 Exits 0 to allow, 2 to deny (reason on stderr fed back to agent).
 Denials are written to the audit log before blocking.
@@ -360,6 +453,19 @@ def log_denial(event, target, reason):
             f.write(json.dumps(entry) + "\\n")
     except OSError:
         pass
+    # Mirror denial into tracer.db so it is queryable alongside allowed events.
+    try:
+        from slash.tracer import SlashTracer  # noqa: PLC0415
+        _db = str(Path(event.get("cwd", ".")) / ".slash" / "tracer.db")
+        SlashTracer(_db).log_event(
+            session_id=event.get("agent_id") or event.get("session_id"),
+            tool=event.get("tool_name", ""),
+            tool_input={"file_path": target},
+            outcome="denied",
+            reason=reason,
+        )
+    except Exception:
+        pass
 
 
 def enforce(action, event, target, msg):
@@ -391,18 +497,7 @@ project_root = Path(cwd).resolve()
 slash_dir    = project_root / ".slash"
 resolved     = Path(target).resolve()
 
-# ── Check 1: outside project root ─────────────────────────────────────────────
-try:
-    resolved.relative_to(project_root)
-except ValueError:
-    enforce(
-        policy["workspace"]["writes"], event, target,
-        f"Write denied: \\'{target}\\' is outside the project root.\\n"
-        f"You may only write within: {project_root}",
-    )
-    sys.exit(0)  # allow or escalate
-
-# ── Check 2: inside .slash/ control-plane (always enforced, not configurable) ─
+# ── Check 1: inside .slash/ control-plane (always enforced, not configurable) ─
 try:
     resolved.relative_to(slash_dir)
     log_denial(event, target, f"write into control-plane directory: {target}")
@@ -431,10 +526,11 @@ RESTRICT_READS_HOOK = '''\
 """
 PreToolUse hook — restricts Read, Glob, and Grep tool calls.
 
-Checks are driven by the policy: section of .slash/policy/manifest.yaml.
+Checks are driven by the policy: section of .slash/manifest.yaml.
   policy.secrets.reads         — action for secret-file read attempts
   policy.secrets.safe_variants — action for .env.example / template variants
-  policy.workspace.reads       — action for reads outside the project root
+
+Workspace boundary is enforced by the Docker container at the kernel level.
 
 Action values: block | allow | escalate
   block    — deny (exit 2, reason on stderr)
@@ -451,7 +547,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _policy import get_runtime_mode, load_policy  # noqa: E402
+from _policy import load_policy  # noqa: E402
 
 
 SECRET_FILE_PATTERNS = [
@@ -492,6 +588,19 @@ def log_denial(event, target, reason):
             f.write(json.dumps(entry) + "\\n")
     except OSError:
         pass
+    # Mirror denial into tracer.db so it is queryable alongside allowed events.
+    try:
+        from slash.tracer import SlashTracer  # noqa: PLC0415
+        _db = str(Path(event.get("cwd", ".")) / ".slash" / "tracer.db")
+        SlashTracer(_db).log_event(
+            session_id=event.get("agent_id") or event.get("session_id"),
+            tool=event.get("tool_name", ""),
+            tool_input={"file_path": target},
+            outcome="denied",
+            reason=reason,
+        )
+    except Exception:
+        pass
 
 
 def enforce(action, event, target, msg):
@@ -507,11 +616,10 @@ try:
 except json.JSONDecodeError:
     sys.exit(0)
 
-cwd          = event.get("cwd", ".")
-policy       = load_policy(cwd)
-runtime_mode = get_runtime_mode(cwd)
-tool         = event.get("tool_name", "")
-tool_input   = event.get("tool_input", {})
+cwd        = event.get("cwd", ".")
+policy     = load_policy(cwd)
+tool       = event.get("tool_name", "")
+tool_input = event.get("tool_input", {})
 
 if tool == "Read":
     target = tool_input.get("file_path", "")
@@ -525,7 +633,7 @@ else:
 if not target:
     sys.exit(0)
 
-# ── Check 1: secret file (with safe-variant override) ────────────────────────
+# ── Secret file (with safe-variant override) ──────────────────────────────────
 if matches_secret_pattern(target):
     if is_safe_variant(target):
         enforce(
@@ -538,20 +646,6 @@ if matches_secret_pattern(target):
             policy["secrets"]["reads"], event, target,
             "Access denied: secret files (credentials, keys, .env) may not be read. "
             "Only example/sample/template variants (e.g. .env.example) are permitted.",
-        )
-    sys.exit(0)  # allow or escalate: pass through
-
-# ── Check 2: workspace boundary (Read and Grep only — Glob patterns are virtual) ──
-# Skipped in Docker mode — the workspace boundary is enforced by the container
-# runtime at the kernel level; path-string analysis is redundant.
-if tool in ("Read", "Grep") and runtime_mode != "docker":
-    workspace = Path(cwd).resolve()
-    try:
-        Path(target).resolve().relative_to(workspace)
-    except ValueError:
-        enforce(
-            policy["workspace"]["reads"], event, target,
-            f"Read outside workspace: \\'{target}\\' is not within {workspace}.",
         )
 
 sys.exit(0)
@@ -566,12 +660,13 @@ All checks are driven by the policy: section of .slash/policy/manifest.yaml.
 
 Checks applied in order:
   1. policy.secrets.bash_reads        — read cmds (cat, head, ...) on secret files
-  2. policy.workspace.bash_paths      — absolute paths outside the project workspace
-  3. policy.bash.destructive          — rm / rm -rf
-  4. policy.bash.privilege_escalation — sudo
-  5. policy.bash.network_exfiltration — curl / wget / nc / ncat
-  6. policy.bash.git_mutations        — git commit / reset / rebase / merge / push
-  7. policy.bash.package_publish      — npm publish / pip upload / twine upload
+  2. policy.bash.destructive          — rm / rm -rf
+  3. policy.bash.privilege_escalation — sudo
+  4. policy.bash.network_exfiltration — curl / wget / nc / ncat
+  5. policy.bash.git_mutations        — git commit / reset / rebase / merge / push
+  6. policy.bash.package_publish      — npm publish / pip upload / twine upload
+
+Workspace boundary is enforced by the Docker container at the kernel level.
 
 Action values: block | allow | escalate
   block    — deny (exit 2, reason on stderr)
@@ -589,7 +684,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from _policy import get_runtime_mode, load_policy  # noqa: E402
+from _policy import load_policy  # noqa: E402
 
 
 SECRET_FILE_PATTERNS = [
@@ -666,6 +761,19 @@ def log_denial(event, command, reason):
             f.write(json.dumps(entry) + "\\n")
     except OSError:
         pass
+    # Mirror denial into tracer.db so it is queryable alongside allowed events.
+    try:
+        from slash.tracer import SlashTracer  # noqa: PLC0415
+        _db = str(Path(event.get("cwd", ".")) / ".slash" / "tracer.db")
+        SlashTracer(_db).log_event(
+            session_id=event.get("agent_id") or event.get("session_id"),
+            tool=event.get("tool_name", ""),
+            tool_input={"command": command},
+            outcome="denied",
+            reason=reason,
+        )
+    except Exception:
+        pass
 
 
 def enforce(action, event, command, msg):
@@ -685,9 +793,8 @@ command = event.get("tool_input", {}).get("command", "")
 if not command:
     sys.exit(0)
 
-cwd          = event.get("cwd", ".")
-policy       = load_policy(cwd)
-runtime_mode = get_runtime_mode(cwd)
+cwd    = event.get("cwd", ".")
+policy = load_policy(cwd)
 
 # ── Check 1: secret file reads ────────────────────────────────────────────────
 if READ_CMD_RE.match(command):
@@ -699,22 +806,7 @@ if READ_CMD_RE.match(command):
                 "Secret files (credentials, keys, .env) may not be read.",
             )
 
-# ── Check 2: absolute paths outside workspace ─────────────────────────────────
-# Skipped in Docker mode — the workspace boundary is enforced by the container
-# runtime at the kernel level; path-string analysis is redundant.
-if runtime_mode != "docker":
-    workspace = Path(cwd).resolve()
-    for token in abs_path_tokens(command):
-        try:
-            Path(token).resolve().relative_to(workspace)
-        except ValueError:
-            enforce(
-                policy["workspace"]["bash_paths"], event, command,
-                f"Bash denied: \\'{token}\\' is outside the project workspace.\\n"
-                f"Bash commands may only reference paths within: {workspace}",
-            )
-
-# ── Checks 3–7: bash command rules ────────────────────────────────────────────
+# ── Checks 2–6: bash command rules ────────────────────────────────────────────
 for rule_key, patterns, reason in _BASH_RULES:
     action = policy["bash"][rule_key]
     if action == "allow":
@@ -849,6 +941,18 @@ cwd      = event.get("cwd", ".")
 TASK_DIR = Path(cwd).resolve()
 policy   = load_policy(cwd)
 qa       = policy["qa"]
+
+# ── Skip QA if no Python source files were written this session ───────────────
+_session_id = event.get("session_id")
+if _session_id:
+    try:
+        from slash.tracer import SlashTracer
+        _tracer = SlashTracer(str(Path(cwd) / ".slash" / "tracer.db"))
+        _touched = _tracer.list_touched_files(_session_id)
+        if not any(f.endswith(".py") for f in _touched):
+            sys.exit(0)
+    except Exception:
+        pass  # tracer unavailable — fall through and run checks normally
 
 
 def run(cmd):
@@ -1277,12 +1381,8 @@ Flow:
   2. Defensive child check: poll up to 3 × 200 ms for open sub-agent sessions.
   3. Compute per-file unified diffs across the whole agent tree.
   4. Build action log from recent audit events (Bash, Agent, denied calls).
-  5. Store JSON summary in tasks.summary; set status = pending_review.
+  5. Store JSON summary in tasks.summary; set status = closed.
   6. Render rich-formatted summary to /dev/tty (bypasses the SDK\'s stderr pipe).
-  7. Prompt operator via /dev/tty: Press Enter to approve; non-blank = follow-up.
-     Blank line  → set status = closed,  exit 0 (agent stops cleanly).
-     Non-empty   → set status = open, emit JSON decision:block, exit 0
-                   (agent gets another turn with the follow-up as its input).
 """
 import json
 import subprocess
@@ -1365,6 +1465,14 @@ try:
     touched_files = tracer.list_touched_files(session_id)
 except Exception:
     touched_files = []
+
+# ── Skip summary UI if nothing was written this session ───────────────────────
+if not touched_files:
+    try:
+        tracer.set_task_status(session_id, "closed", summary={"file_changes": [], "action_log": []})
+    except Exception:
+        pass
+    sys.exit(0)
 
 # Build a lookup of write-tool audit events per file path (for reasons).
 try:
@@ -1467,19 +1575,66 @@ summary = {
     "incomplete_children": open_children,
 }
 
-narrative = ""
+# ── Locate Claude Code transcript for this session ────────────────────────────
+_transcript_path = ""
 try:
     import urllib.parse as _urlparse
-    _project_key = _urlparse.quote(str(Path(cwd).resolve()), safe="")
-    _transcript  = Path.home() / ".claude" / "projects" / _project_key / f"{session_id}.jsonl"
-    if _transcript.exists():
-        from slash.tracer import extract_narrative_from_transcript  # noqa: PLC0415
-        narrative = extract_narrative_from_transcript(str(_transcript)) or ""
+    _project_key     = _urlparse.quote(str(Path(cwd).resolve()), safe="")
+    _transcript_path = str(Path.home() / ".claude" / "projects" / _project_key / f"{session_id}.jsonl")
 except Exception:
     pass
 
+# ── Enrich action_log Bash entries with full stdout from transcript ────────────
+# The transcript holds untruncated tool outputs; the audit_events table has only
+# the first 500 chars.  We merge in-memory so the stored summary is richer.
+if _transcript_path and Path(_transcript_path).exists():
+    try:
+        from slash.tracer import extract_tool_outputs_from_transcript  # noqa: PLC0415
+        _tool_outputs = extract_tool_outputs_from_transcript(_transcript_path)
+        # Build per-command output lists (same command may be run multiple times).
+        _bash_outputs: dict = {}
+        for _to in _tool_outputs:
+            if _to["tool_name"] == "Bash":
+                _cmd = (_to["input"].get("command") or "").strip()
+                if _cmd:
+                    _bash_outputs.setdefault(_cmd, []).append({
+                        "output":    _to["output"],
+                        "exit_code": _to["exit_code"],
+                    })
+        # Enrich action_log entries in-place (mutates the in-memory list only).
+        _bash_use_counts: dict = {}
+        for _entry in action_log:
+            if _entry.get("tool") == "Bash":
+                _cmd = ((_entry.get("input") or {}).get("command") or "").strip()
+                _idx = _bash_use_counts.get(_cmd, 0)
+                _bash_use_counts[_cmd] = _idx + 1
+                _avail = _bash_outputs.get(_cmd, [])
+                if _idx < len(_avail):
+                    _full = _avail[_idx]
+                    _entry.setdefault("input", {})
+                    _entry["input"]["stdout"] = _full["output"][:10240]  # cap at 10 KB
+                    if _full["exit_code"] is not None:
+                        _entry["input"]["exit_code"] = _full["exit_code"]
+    except Exception:
+        pass
+
+# Rebuild summary with enriched action_log.
+summary["action_log"] = action_log
+
+# ── Extract structured narrative from transcript ──────────────────────────────
+# Collects thinking blocks + pre-tool reasoning + closing statement in one pass.
+_narrative_data: dict = {}
+if _transcript_path and Path(_transcript_path).exists():
+    try:
+        from slash.tracer import extract_session_narrative  # noqa: PLC0415
+        _narrative_data = extract_session_narrative(_transcript_path) or {}
+    except Exception:
+        pass
+
+_narrative_json = json.dumps(_narrative_data) if _narrative_data else None
+
 try:
-    tracer.set_task_status(session_id, "pending_review", summary=summary, narrative=narrative or None)
+    tracer.set_task_status(session_id, "closed", summary=summary, narrative=_narrative_json)
 except Exception:
     pass
 
@@ -1494,6 +1649,7 @@ except OSError:
 try:
     from rich.console import Console  # noqa: PLC0415
     from rich.panel   import Panel    # noqa: PLC0415
+    from rich.text    import Text     # noqa: PLC0415
 
     con = Console(file=_tty_w, highlight=False)
 
@@ -1504,15 +1660,15 @@ try:
         dt = datetime.fromtimestamp(task_started / 1000, tz=timezone.utc)
         started_str = "  started " + dt.strftime("%Y-%m-%d %H:%M UTC")
 
-    header = Text()
-    header.append("Task Review", style="bold white")
-    header.append("\\n")
-    header.append(task_prompt[:120], style="dim")
-    if started_str:
-        header.append("\\n" + started_str, style="dim")
-    if open_children:
-        header.append("\\n[!] " + str(len(open_children)) + " sub-agent(s) still open — diffs may be incomplete", style="yellow")
-    con.print(Panel(header, border_style="blue", expand=False))
+    # header = Text()
+    # header.append("Task Review", style="bold white")
+    # header.append("\\n")
+    # header.append(task_prompt[:120], style="dim")
+    # if started_str:
+    #     header.append("\\n" + started_str, style="dim")
+    # if open_children:
+    #     header.append("\\n[!] " + str(len(open_children)) + " sub-agent(s) still open — diffs may be incomplete", style="yellow")
+    # con.print(Panel(header, border_style="blue", expand=False))
 
     # ── File Changes — git-status-like format ──────────────────────────────────
     if file_diffs:
@@ -1541,7 +1697,7 @@ try:
                 status_line += "  [dim](" + reason_str + ")[/dim]"
             con.print(status_line)
 
-        con.print("[dim]  (full diffs persisted in tracer.db — use /review to inspect)[/dim]")
+        # con.print("[dim]  (full diffs persisted in tracer.db — use /review to inspect)[/dim]")
     else:
         con.print("\\n[dim] No file changes recorded.[/dim]\\n")
 
@@ -1595,64 +1751,16 @@ try:
         con.print("[bold] Action Log[/bold]  [dim](" + ", ".join(parts) + ")[/dim]")
         con.print("[dim]  (full log persisted in tracer.db — use /review to inspect)[/dim]\\n")
 
-    # Operator prompt — clearly signal that a response is required before the
-    # task is finalised.  A blank line + highlighted banner makes it impossible
-    # to miss.  Press Enter to approve; typing a follow-up instruction sends
-    # the agent back for another pass.
     con.print("")
-    con.print("[bold yellow]⏸  Awaiting your sign-off — task is NOT closed yet.[/bold yellow]")
-    con.print("[bold]Press Enter to approve[/bold] — or type a follow-up instruction and press Enter")
-    con.print("[dim]⚡ [/dim]", end="")
-    con.file.flush()  # flush Rich\'s internal buffer so the prompt appears before blocking on tty input
 
 except Exception:
     # Fall back to plain output if rich is unavailable.
     print("\\n=== Task Review: " + task_prompt[:80] + " ===", file=_tty_w, flush=True)
     print(str(len(file_diffs)) + " file(s) changed.", file=_tty_w)
     print("", file=_tty_w)
-    print("⏸  Awaiting your sign-off — task is NOT closed yet.", file=_tty_w)
-    print("Press Enter to approve — or type a follow-up instruction and press Enter", file=_tty_w)
-    print("⚡ ", end="", file=_tty_w, flush=True)
 
-# ── Read input from terminal ───────────────────────────────────────────────────
-# /dev/tty bypasses the hook\'s stdin pipe and reads directly from the terminal.
-def _tty_readline(prompt_text: str = "") -> str:
-    """Print *prompt_text* to stderr and read one line from /dev/tty."""
-    if prompt_text:
-        print(prompt_text, end="", flush=True, file=sys.stderr)
-    with open("/dev/tty") as tty:
-        return tty.readline().strip()
-
-raw_input = ""
-non_interactive = False
-try:
-    raw_input = _tty_readline()
-except Exception:
-    # /dev/tty unavailable — CI / non-interactive environment: default approve.
-    non_interactive = True
-
-print("", file=_tty_w, flush=True)  # newline after the inline prompt
-
-# ── Follow-up instruction — agent gets another turn ───────────────────────────
-if not non_interactive and raw_input:
-    print("  Continuing with follow-up instruction.", file=_tty_w, flush=True)
-    if _tty_w is not sys.stderr:
-        _tty_w.close()
-    try:
-        tracer.set_task_status(session_id, "open")   # revert to open for the next turn
-    except Exception:
-        pass
-    print(json.dumps({"decision": "block", "reason": "Operator: " + raw_input}))
-    sys.exit(0)
-
-# ── Approve (blank line or CI default) ────────────────────────────────────────
-    print("  Approved — task closed.", file=_tty_w, flush=True)
 if _tty_w is not sys.stderr:
     _tty_w.close()
-try:
-    tracer.set_task_status(session_id, "closed")
-except Exception:
-    pass
 sys.exit(0)
 '''
 
@@ -1662,15 +1770,12 @@ USER_PROMPT_SUBMIT_HOOK = '''\
 UserPromptSubmit hook — intercepts hash commands before Claude processes them.
 
 Commands handled here (output-only, non-interactive):
-  #db [SQL]   — query tracer.db
-  #status     — tail recent audit log
-  #sh <cmd>   — run a shell command
-  #update     — refresh hook files from latest templates
-
-Commands NOT handled here (remain in PTY proxy or need process control):
-  /review     — interactive approval UI  (PTY proxy)
-  /new        — restart claude session   (PTY proxy)
-  /exit /quit — terminate claude         (PTY proxy)
+  #db [SQL]              — query tracer.db
+  #status                — tail recent audit log
+  #sh <cmd>              — run a shell command
+  #update                — show current manifest policy
+  #update <path>=<value> — set a manifest key by dot-path (e.g. policy.qa.lint=false)
+  #review                — list pending reviews, or approve one by number (#review <n>)
 
 On match: output is printed to /dev/tty, hook exits 2 to block Claude.
 On miss:  exit 0 — Claude\'s own /help, /compact, /clear, etc. pass through.
@@ -1707,7 +1812,7 @@ parts    = prompt.split(None, 1)
 cmd_word = parts[0].lower()
 args     = parts[1].strip() if len(parts) > 1 else ""
 
-_HOOK_COMMANDS = frozenset({"#db", "#status", "#sh", "#update"})
+_HOOK_COMMANDS = frozenset({"#db", "#status", "#sh", "#update", "#review"})
 
 if cmd_word not in _HOOK_COMMANDS:
     sys.exit(0)  # not a known hash command — pass through to Claude
@@ -1813,17 +1918,214 @@ elif cmd_word == "#sh":
 
 # ── #update ───────────────────────────────────────────────────────────────────
 elif cmd_word == "#update":
-    try:
-        from slash.init import run_update
-        run_update(Path(cwd))
-    except Exception as e:
-        _p(f"[red]Update failed:[/red] {e}")
+    import yaml as _yaml
+    _manifest_path = Path(cwd) / ".slash" / "manifest.yaml"
+
+    if not _manifest_path.exists():
+        _p("[red]No manifest.yaml found.[/red] Run [bold]slash init[/bold] first.")
+    elif not args:
+        # Display current manifest
+        _manifest_text = _manifest_path.read_text()
+        try:
+            from rich.syntax import Syntax as _Syn
+            con.print(_Syn(_manifest_text, "yaml", theme="monokai", line_numbers=False))
+        except Exception:
+            _p(_manifest_text)
+    else:
+        # Parse "dotpath=value" or "dotpath: value"
+        if "=" in args:
+            _dotpath, _, _raw_val = args.partition("=")
+        elif ": " in args:
+            _dotpath, _, _raw_val = args.partition(": ")
+        else:
+            _p("[red]Usage:[/red] #update <path>=<value>")
+            _p("[dim]Example: [bold]#update policy.qa.lint=false[/bold][/dim]")
+            _p("[dim]Run [bold]#update[/bold] with no arguments to see the current manifest.[/dim]")
+            _dotpath = None
+
+        if _dotpath is not None:
+            _dotpath  = _dotpath.strip()
+            _raw_val  = _raw_val.strip()
+
+            # Parse value — bool, int, float, or string
+            if _raw_val.lower() == "true":
+                _val = True
+            elif _raw_val.lower() == "false":
+                _val = False
+            else:
+                try:
+                    _val = int(_raw_val)
+                except ValueError:
+                    try:
+                        _val = float(_raw_val)
+                    except ValueError:
+                        _val = _raw_val
+
+            # Load manifest
+            try:
+                _data = _yaml.safe_load(_manifest_path.read_text()) or {}
+            except Exception as _e:
+                _p(f"[red]Could not parse manifest.yaml:[/red] {_e}")
+                _data = None
+
+            if _data is not None:
+                # Navigate to parent node
+                _keys = _dotpath.split(".")
+                _node = _data
+                _ok   = True
+                for _k in _keys[:-1]:
+                    if not isinstance(_node, dict) or _k not in _node:
+                        _ok = False
+                        break
+                    _node = _node[_k]
+
+                _final = _keys[-1]
+                if not _ok or not isinstance(_node, dict) or _final not in _node:
+                    _p(f"[red]Unknown path:[/red] [bold]{_dotpath}[/bold]")
+                    _p("[dim]Run [bold]#update[/bold] to see all available paths.[/dim]")
+                else:
+                    _old = _node[_final]
+                    _node[_final] = _val
+                    _manifest_path.write_text(
+                        _yaml.dump(_data, default_flow_style=False, sort_keys=False, allow_unicode=True)
+                    )
+                    _p(f"[green]✓[/green] [bold]{_dotpath}[/bold]: [dim]{_old!r}[/dim] → [bold]{_val!r}[/bold]")
+                    if _dotpath.startswith("runtime.docker."):
+                        _p("[dim]  Note: Docker resource changes take effect on container restart.[/dim]")
+
+# ── #review ───────────────────────────────────────────────────────────────────
+elif cmd_word == "#review":
+    db_path = Path(cwd) / ".slash" / "tracer.db"
+    if not db_path.exists():
+        _p("[red]No tracer.db found.[/red] Run [bold]slash init[/bold] first.")
+    else:
+        try:
+            from slash.tracer import SlashTracer as _ST
+            _tr = _ST(str(db_path))
+            _reviews = _tr.get_pending_reviews()
+        except Exception as _e:
+            _p(f"[red]Tracer error:[/red] {_e}")
+            _reviews = []
+
+        if not _reviews:
+            _p("[dim]No tasks awaiting review.[/dim]")
+        elif not args:
+            # ── List pending tasks ─────────────────────────────────────────
+            _p(f"\\n[bold]Pending reviews ({len(_reviews)}):[/bold]\\n")
+            _CT_LABEL = {"new file": "A", "modified": "M", "deleted": "D"}
+            _CT_STYLE = {"new file": "green", "modified": "yellow", "deleted": "red"}
+            for _i, _r in enumerate(_reviews, 1):
+                from datetime import datetime as _dt, timezone as _tz
+                _ts = _dt.fromtimestamp(_r["started_at"] / 1000, tz=_tz.utc)
+                _p(
+                    f"  [bold]{_i}.[/bold] [dim]{_r[\'session_id\'][:12]}…[/dim]"
+                    f"  \\"{_r[\'prompt\'][:60]}\\"  [dim]({_ts.strftime(\'%Y-%m-%d %H:%M\')})[/dim]"
+                )
+                for _fc in (_r.get("summary") or {}).get("file_changes", []):
+                    _ct  = _fc.get("change_type", "modified")
+                    _lbl = _CT_LABEL.get(_ct, "M")
+                    _sty = _CT_STYLE.get(_ct, "yellow")
+                    _fp  = _fc.get("file_path", "?")
+                    _add = _fc.get("lines_added", 0)
+                    _rem = _fc.get("lines_removed", 0)
+                    _p(
+                        f"      [{_sty}][bold]{_lbl}[/bold][/{_sty}]"
+                        f"  [cyan]{_fp}[/cyan]"
+                        f"  [green]+{_add}[/green] [red]-{_rem}[/red]"
+                    )
+            _p(f"\\n[dim]Type [bold]#review <n>[/bold] to approve a task.[/dim]")
+        else:
+            # ── Show summary and approve ───────────────────────────────────
+            if not args.isdigit() or int(args) < 1:
+                _p("[red]Usage:[/red] #review <number>  (run #review to see the list)")
+            else:
+                _idx = int(args) - 1
+                if _idx >= len(_reviews):
+                    _p(f"[red]No task {args}.[/red] Type [bold]#review[/bold] to see the list.")
+                else:
+                    _r = _reviews[_idx]
+                    from datetime import datetime as _dt, timezone as _tz
+                    from rich.panel import Panel as _Panel
+                    from rich.text import Text as _Text
+                    _ts = _dt.fromtimestamp(_r["started_at"] / 1000, tz=_tz.utc)
+                    _hdr = _Text()
+                    _hdr.append("Task Review", style="bold white")
+                    _hdr.append(f"\\n{_r[\'prompt\'][:120]}", style="dim")
+                    _hdr.append(f"\\n  started {_ts.strftime(\'%Y-%m-%d %H:%M UTC\')}", style="dim")
+                    con.print(_Panel(_hdr, border_style="blue", expand=False))
+
+                    _file_changes = (_r.get("summary") or {}).get("file_changes", [])
+                    _action_log   = (_r.get("summary") or {}).get("action_log", [])
+
+                    if _file_changes:
+                        _p(f"\\n[bold] File Changes[/bold]  [dim]({len(_file_changes)} file(s))[/dim]\\n")
+                        for _fc in _file_changes:
+                            _fp  = _fc.get("file_path", "?")
+                            _add = _fc.get("lines_added", 0)
+                            _rem = _fc.get("lines_removed", 0)
+                            _p(f"  [bold cyan]{_fp}[/bold cyan]  [green]+{_add}[/green]  [red]-{_rem}[/red]")
+                            try:
+                                _diff = _tr.diff_task(_r["session_id"], _fp)
+                                _dlines = _diff.splitlines() if _diff else []
+                            except Exception:
+                                _dlines = []
+                            if _dlines:
+                                _dout = _Text()
+                                for _ln in _dlines[:200]:
+                                    if _ln.startswith("+++") or _ln.startswith("---"):
+                                        _dout.append(_ln + "\\n", style="dim")
+                                    elif _ln.startswith("@@"):
+                                        _dout.append(_ln + "\\n", style="cyan")
+                                    elif _ln.startswith("+"):
+                                        _dout.append(_ln + "\\n", style="green")
+                                    elif _ln.startswith("-"):
+                                        _dout.append(_ln + "\\n", style="red")
+                                    else:
+                                        _dout.append(_ln + "\\n")
+                                if len(_dlines) > 200:
+                                    _dout.append("  … (diff truncated)\\n", style="dim")
+                                con.print(_dout)
+                    else:
+                        _p("\\n[dim]  No file changes recorded.[/dim]\\n")
+
+                    if _r.get("narrative"):
+                        _p(f"\\n[bold] Summary[/bold]\\n")
+                        _p(f"  [dim]{_r[\'narrative\'][:400]}[/dim]\\n")
+
+                    _notable = [
+                        _e for _e in _action_log
+                        if _e.get("tool") in ("Bash", "Agent") or _e.get("outcome") == "denied"
+                    ]
+                    if _notable:
+                        _p(f"[bold] Action Log[/bold]  [dim]({len(_notable)} entries)[/dim]\\n")
+                        for _e in _notable[-20:]:
+                            _inp = _e.get("input") or {}
+                            if _e.get("tool") == "Bash":
+                                _cmd = (_inp.get("command") or "")[:80]
+                                _ec  = _inp.get("exit_code")
+                                _p(f"  ● bash: {_cmd}" + (f" (exit: {_ec})" if _ec is not None else ""))
+                            elif _e.get("tool") == "Agent":
+                                _p(f"  ● agent [{_inp.get(\'agent_type\') or \'agent\'}]: {(_inp.get(\'prompt_head\') or \'\')[:60]}")
+                            elif _e.get("outcome") == "denied":
+                                _p(f"  [red]✗ {_e.get(\'tool\')} denied: {(_e.get(\'reason\') or \'\')[:80]}[/red]")
+                        _p()
+
+                    try:
+                        _tr.set_task_status(_r["session_id"], "closed")
+                        _p("[green]✓ Task approved and closed.[/green]")
+                    except Exception as _e:
+                        _p(f"[yellow]Warning: could not close task: {_e}[/yellow]")
 
 _p()
 if _tty is not sys.stderr:
+    _tty.flush()
     _tty.close()
 
-# Block Claude from processing the command as a regular prompt.
-print(f"[slash] {cmd_word} handled locally.", file=sys.stderr)
-sys.exit(2)
+# Let tty output flush to the terminal before the block decision is rendered.
+import time as _time
+_time.sleep(0.5)
+
+import json as _json
+print(_json.dumps({"decision": "block", "reason": "Handled by slash"}))
+sys.exit(0)
 '''

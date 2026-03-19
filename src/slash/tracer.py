@@ -106,12 +106,15 @@ def extract_narrative_from_transcript(transcript_path: str) -> str:
     """
     Return the agent's final human-readable narrative from *transcript_path*.
 
-    Reads the JSONL transcript file produced by the Claude Agent SDK, walks
-    entries in reverse, and extracts the concatenated text from the last
-    visible assistant message that contains at least one TextBlock.
+    Reads the JSONL transcript file produced by Claude Code, walks entries in
+    reverse, and extracts the concatenated text from the last visible assistant
+    message that contains at least one TextBlock.
 
     Returns an empty string if the transcript is missing, unreadable, or
     contains no qualifying assistant message.
+
+    For richer structured extraction (thinking blocks + reasoning steps +
+    closing statement) use :func:`extract_session_narrative` instead.
     """
     try:
         lines = Path(transcript_path).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -144,6 +147,217 @@ def extract_narrative_from_transcript(transcript_path: str) -> str:
             return narrative
 
     return ""
+
+
+def extract_tool_outputs_from_transcript(transcript_path: str) -> list[dict]:
+    """
+    Return a list of tool call records from the Claude Code session transcript.
+
+    Walks the JSONL transcript forward, pairing ``tool_use`` blocks in
+    assistant messages with their corresponding ``tool_result`` entries in
+    subsequent user-turn messages.
+
+    Each returned record::
+
+        {
+            "tool_use_id": str,
+            "tool_name":   str,
+            "input":       dict,
+            "output":      str,       # full text output (untruncated)
+            "exit_code":   int|None,
+        }
+
+    Returns an empty list if the transcript is missing, unreadable, or
+    contains no paired tool calls.
+    """
+    try:
+        lines = Path(transcript_path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+
+    # tool_use_id → {tool_name, input} for calls awaiting their result
+    pending: dict[str, dict] = {}
+    results: list[dict] = []
+
+    for raw_line in lines:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            entry = json.loads(raw_line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+        entry_type = entry.get("type")
+
+        # ── Collect tool_use blocks from assistant messages ────────────────
+        if entry_type == "assistant":
+            if entry.get("isMeta") or entry.get("isSidechain"):
+                continue
+            message = entry.get("message") or {}
+            content = message.get("content") or []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    tid = block.get("id") or ""
+                    if tid:
+                        pending[tid] = {
+                            "tool_name": block.get("name") or "",
+                            "input":     block.get("input") or {},
+                        }
+
+        # ── Match tool_result entries (appear in user turns) ───────────────
+        elif entry_type == "user":
+            message = entry.get("message") or {}
+            content = message.get("content") or []
+            if isinstance(content, str):
+                continue  # plain text user message, not a tool result
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") != "tool_result":
+                    continue
+                tid = block.get("tool_use_id") or ""
+                if not tid or tid not in pending:
+                    continue
+
+                pend    = pending.pop(tid)
+                raw     = block.get("content") or ""
+
+                # Normalise output to a plain string
+                if isinstance(raw, list):
+                    output = "\n".join(
+                        b.get("text", "") for b in raw
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+                else:
+                    output = str(raw)
+
+                # exit_code may be embedded at the block level or inside content
+                exit_code: int | None = block.get("exit_code")
+                if exit_code is None and isinstance(raw, list):
+                    for b in raw:
+                        if isinstance(b, dict) and b.get("exit_code") is not None:
+                            exit_code = b["exit_code"]
+                            break
+
+                results.append({
+                    "tool_use_id": tid,
+                    "tool_name":   pend["tool_name"],
+                    "input":       pend["input"],
+                    "output":      output,
+                    "exit_code":   exit_code,
+                })
+
+    return results
+
+
+def extract_session_narrative(transcript_path: str) -> dict:
+    """
+    Build a structured narrative from the Claude Code session transcript.
+
+    Makes a single forward pass and collects three kinds of content:
+
+    * **thinking_excerpts** — ``thinking`` blocks from assistant messages.
+      These are Claude's internal reasoning: what it observed, what
+      alternatives it considered, what tradeoffs it weighed.
+
+    * **reasoning_steps** — text blocks that immediately precede a
+      ``tool_use`` block within the same assistant message.  These are
+      Claude's stated intent just before each action.
+
+    * **closing** — the concatenated text of the final non-meta assistant
+      message that contains no ``tool_use`` blocks (Claude's closing
+      summary of what it accomplished).
+
+    Returns an empty dict ``{}`` on any failure or if the transcript
+    contains no qualifying content.  Callers should persist this as JSON
+    in ``tasks.narrative`` so it is queryable via ``json_extract()``.
+    """
+    try:
+        lines = Path(transcript_path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {}
+
+    thinking_excerpts: list[str] = []
+    reasoning_steps:   list[dict] = []
+    closing = ""
+
+    for raw_line in lines:
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            entry = json.loads(raw_line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+        if entry.get("type") != "assistant":
+            continue
+        if entry.get("isMeta") or entry.get("isSidechain"):
+            continue
+
+        message = entry.get("message") or {}
+        content = message.get("content") or []
+        if not isinstance(content, list):
+            continue
+
+        has_tool_use = any(
+            isinstance(b, dict) and b.get("type") == "tool_use"
+            for b in content
+        )
+
+        pending_text: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+
+            if btype == "thinking":
+                excerpt = (block.get("thinking") or "").strip()
+                if excerpt:
+                    thinking_excerpts.append(excerpt)
+                pending_text = []  # thinking resets pre-tool text accumulation
+
+            elif btype == "text":
+                text = (block.get("text") or "").strip()
+                if text:
+                    pending_text.append(text)
+
+            elif btype == "tool_use":
+                # Flush accumulated text as a reasoning step for this tool call
+                if pending_text:
+                    reasoning_steps.append({
+                        "before_tool": block.get("name") or "",
+                        "tool_input": {
+                            k: (str(v)[:200] if v is not None else None)
+                            for k, v in (block.get("input") or {}).items()
+                            if k in ("command", "file_path", "description", "prompt")
+                        },
+                        "rationale": " ".join(pending_text),
+                    })
+                pending_text = []
+
+        # Messages with no tool_use are narrative text; the last one is the closing
+        if not has_tool_use:
+            text_parts = [
+                (b.get("text") or "").strip()
+                for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            combined = " ".join(t for t in text_parts if t)
+            if combined:
+                closing = combined
+
+    if not thinking_excerpts and not reasoning_steps and not closing:
+        return {}
+
+    return {
+        "thinking_excerpts": thinking_excerpts,
+        "reasoning_steps":   reasoning_steps,
+        "closing":           closing,
+    }
 
 
 import threading as _threading

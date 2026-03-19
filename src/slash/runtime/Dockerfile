@@ -3,7 +3,11 @@ FROM python:3.13-slim
 # Install runtimes and tools the agent may legitimately use
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs npm git curl bash ca-certificates \
+    bubblewrap socat \
     && rm -rf /var/lib/apt/lists/*
+
+# Install sandbox-runtime for seccomp filter support
+RUN npm install -g @anthropic-ai/sandbox-runtime
 
 # Install the Claude Code CLI using the official native installer.
 # The script installs to /root/.local/bin (mode 700 dir — inaccessible to
@@ -42,6 +46,10 @@ RUN mkdir -p /home/agent/.local/bin \
 ENV PATH="/home/agent/.local/bin:$PATH"
 
 USER agent
+
+# Trust /workspace regardless of host UID/GID ownership
+RUN git config --global --add safe.directory /workspace
+
 WORKDIR /workspace
 
 ENTRYPOINT ["slash"]

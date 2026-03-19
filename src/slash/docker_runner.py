@@ -1,11 +1,11 @@
 """
 slash Docker runtime — executes slash commands inside an isolated container.
 
-When ``runtime.mode`` in ``.slash/manifest.yaml`` is ``docker``, ``slash repl``
-delegates here instead of running the agent in-process.  The container receives
-only the workspace bind-mount; the rest of the host filesystem is invisible.
+When ``slash`` is invoked, it delegates here to run the agent inside an
+isolated Docker container.  The container receives only the workspace
+bind-mount; the rest of the host filesystem is invisible.
 
-This module is an implementation detail of the ``repl`` command and is not
+This module is an implementation detail of the REPL entry point and is not
 part of the public API.
 """
 from __future__ import annotations
@@ -94,7 +94,7 @@ def _find_docker() -> str:
 
 class DockerRunner:
     """
-    Wraps ``docker run`` to execute ``slash repl`` inside a container
+    Wraps ``docker run`` to execute ``slash`` inside a container
     configured from the ``runtime.docker`` block of the manifest.
 
     Parameters
@@ -176,21 +176,16 @@ class DockerRunner:
 
     # ── public interface ──────────────────────────────────────────────────────
 
-    def run_repl(self, verbosity: str | None = None) -> None:
+    def run_repl(self) -> None:
         """
-        Execute ``slash repl`` inside a Docker container with an interactive
-        TTY and block until the session ends.  Exits with the container's exit
-        code.
+        Execute ``slash`` inside a Docker container with an interactive TTY
+        and block until the session ends.  Exits with the container's exit code.
         """
         args = self._base_args()
         # Insert -it (interactive TTY) before the image name
         image = self.config.get("image", "slash:latest")
         idx = args.index(image)
         args.insert(idx, "-it")
-
-        args += ["repl"]
-        if verbosity:
-            args += ["--verbosity", verbosity]
 
         result = subprocess.run(args)
         sys.exit(result.returncode)

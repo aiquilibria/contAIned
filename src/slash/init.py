@@ -39,6 +39,7 @@ from slash.templates import (
     RESTRICT_READS_HOOK,
     RESTRICT_WRITES_HOOK,
     SETTINGS_JSON,
+    STATUSLINE_PY,
     SUBAGENT_START_HOOK,
     SUBAGENT_STOP_HOOK,
     SUMMARIZER_HOOK,
@@ -197,6 +198,7 @@ def _managed_files(target: Path) -> list[tuple[Path, str, bool]]:
         (target / ".slash" / "hooks" / "qa.py",               QA_HOOK,              True),
         (target / ".slash" / "hooks" / "user_prompt_submit.py", USER_PROMPT_SUBMIT_HOOK, True),
         (target / ".claude" / "settings.json",                settings,             False),
+        (target / ".claude" / "statusline.py",               STATUSLINE_PY,        True),
         (target / "CLAUDE.md",                                CLAUDE_MD,            False),
     ]
 
@@ -400,30 +402,12 @@ def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> No
 # ── Manifest builder ──────────────────────────────────────────────────────────
 
 def _build_manifest(
-    runtime_mode: str,
     docker_config: dict | None,
     model: str,
-    verbosity: str = "verbose",
-    thinking_enabled: bool = False,
-    thinking_budget: int = 1024,
     qa_choices: dict | None = None,
 ) -> str:
     """Return a YAML string for the complete manifest based on wizard choices."""
     import yaml
-
-    # In docker mode workspace boundary is enforced at the kernel level — always block.
-    if runtime_mode == "docker":
-        workspace_policy = {
-            "reads":      "block",
-            "writes":     "block",
-            "bash_paths": "block",
-        }
-    else:
-        workspace_policy = {
-            "reads":      "escalate",
-            "writes":     "block",
-            "bash_paths": "block",
-        }
 
     default_qa = {
         "syntax": True,
@@ -434,7 +418,7 @@ def _build_manifest(
     qa = {**default_qa, **(qa_choices or {})}
 
     manifest: dict = {
-        "runtime": {"mode": runtime_mode},
+        "runtime": {},
         "policy": {
             "secrets": {
                 "reads":         "block",
@@ -442,7 +426,6 @@ def _build_manifest(
                 "bash_reads":    "block",
                 "safe_variants": "allow",
             },
-            "workspace": workspace_policy,
             "bash": {
                 "destructive":          "block",
                 "privilege_escalation": "block",
@@ -454,13 +437,11 @@ def _build_manifest(
             "qa": qa,
         },
         "agent": {
-            "model":     model,
-            "verbosity": verbosity,
-            "thinking": {"enabled": thinking_enabled, "budget_tokens": thinking_budget},
+            "model": model,
         },
     }
 
-    if runtime_mode == "docker" and docker_config:
+    if docker_config:
         manifest["runtime"]["docker"] = {
             "image":               docker_config["image"],
             "memory":              docker_config["memory"],
@@ -524,10 +505,9 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
             raise SystemExit(1)
 
         console.print()
-        console.print("  [dim]Audit logging:          always on[/dim]")
-        console.print("  [dim]git push / --force:     requires escalation[/dim]")
-        console.print("  [dim].slash/ protection:     always enforced[/dim]")
-        console.print("  [dim]Workspace boundary:     always blocked (Docker enforced)[/dim]")
+        console.print("  [dim]Audit logging:      always on[/dim]")
+        console.print("  [dim]git push / --force: requires escalation[/dim]")
+        console.print("  [dim].slash/ protection: always enforced[/dim]")
         console.print()
 
         # ── QA checks ────────────────────────────────────────────────────────
@@ -545,38 +525,13 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
             "type":   qa_type,
         }
 
-        # ── Model & agent settings ────────────────────────────────────────────
+        # ── Model ─────────────────────────────────────────────────────────────
         model = click.prompt("? Default model", default="claude-sonnet-4-6")
-
-        console.print()
-        console.print("? Agent verbosity:")
-        console.print("    [bold]verbose[/bold]  — full streaming output (thinking, text, every tool call)")
-        console.print("    [bold]concise[/bold]  — single updating status line showing current tool call")
-        console.print("    [bold]none[/bold]     — silent during execution; only final result printed")
-        verbosity = click.prompt(
-            "  Verbosity",
-            type=click.Choice(["verbose", "concise", "none"], case_sensitive=False),
-            default="verbose",
-        ).lower()
-
-        console.print()
-        thinking_enabled = click.confirm("? Enable extended thinking?", default=True)
-        thinking_budget  = 1024
-        if thinking_enabled:
-            thinking_budget = click.prompt(
-                "  Thinking budget (tokens)",
-                default=1024,
-                type=int,
-            )
         console.print()
 
         manifest_content = _build_manifest(
-            runtime_mode="docker",
             docker_config=docker_config,
             model=model,
-            verbosity=verbosity,
-            thinking_enabled=thinking_enabled,
-            thinking_budget=thinking_budget,
             qa_choices=qa_choices,
         )
 
@@ -593,9 +548,12 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
     git_root = _git_root(target)
 
     # ── Managed files (hooks, settings, CLAUDE.md) ────────────────────────────
+    # Overwrite on re-runs so that slash init refreshes hooks to the latest
+    # bundled templates.  On first-time init the files don't exist yet, so
+    # overwrite=False and overwrite=True are equivalent.
     for path, content, executable in _managed_files(target):
         rel = path.relative_to(target)
-        status = _write_file(path, content, executable=executable, overwrite=False)
+        status = _write_file(path, content, executable=executable, overwrite=already_init)
         results.append((str(rel), status))
 
     # ── Manifest ──────────────────────────────────────────────────────────────
@@ -609,7 +567,10 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
         manifest_new.write_text(manifest_old.read_text())
         results.append((".slash/manifest.yaml", "migrated"))
     else:
-        results.append((".slash/manifest.yaml", "exists" if manifest_new.exists() else "exists"))
+        # Sync any new template keys introduced in this slash version,
+        # preserving all user-configured values.
+        from slash.templates import POLICY_MANIFEST
+        results.append((".slash/manifest.yaml", _sync_manifest(manifest_new, POLICY_MANIFEST)))
 
     # ── Directory markers ─────────────────────────────────────────────────────
     for path in _markers(target):
@@ -627,54 +588,3 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
     console.print("  slash  # For REPL\n")
 
 
-# ── update ────────────────────────────────────────────────────────────────────
-
-def run_update(target: Path) -> None:
-    """Overwrites managed files with latest templates. Never touches user-editable files."""
-    target = target.resolve()
-    console.print(f"\n[bold]slash update[/bold] — [dim]{target}[/dim]\n")
-    console.print("[dim]Refreshing managed hook files from latest templates…[/dim]\n")
-
-    results: list[tuple[str, str]] = []
-
-    # Managed files — always overwrite
-    for path, content, executable in _managed_files(target):
-        rel = path.relative_to(target)
-        status = _write_file(path, content, executable=executable, overwrite=True)
-        results.append((str(rel), status))
-
-    # Manifest: migrate old path → new path if needed, then sync
-    manifest_new = target / ".slash" / "manifest.yaml"
-    manifest_old = target / ".slash" / "policy" / "manifest.yaml"
-
-    if manifest_old.exists() and not manifest_new.exists():
-        manifest_new.parent.mkdir(parents=True, exist_ok=True)
-        manifest_new.write_text(manifest_old.read_text())
-        results.append((".slash/manifest.yaml", "migrated"))
-
-    # Sync the manifest (add any keys present in template that are absent in file)
-    from slash.templates import POLICY_MANIFEST
-    results.append((".slash/manifest.yaml", _sync_manifest(manifest_new, POLICY_MANIFEST)))
-
-    _print_table(results)
-    console.print("[dim]manifest.yaml: user values preserved; any missing keys were added.[/dim]\n")
-
-    # ── Docker image refresh ───────────────────────────────────────────────────
-    # When the workspace is in docker mode, check whether the image is still
-    # current.  _docker_setup() rebuilds automatically when the installed slash
-    # version differs from the label stamped into the image — a no-op when
-    # already up to date.
-    try:
-        import yaml as _yaml
-        _mp = manifest_new if manifest_new.exists() else (manifest_old if manifest_old.exists() else None)
-        _manifest = _yaml.safe_load(_mp.read_text()) or {} if _mp else {}
-    except Exception:
-        _manifest = {}
-
-    if _manifest.get("runtime", {}).get("mode") == "docker":
-        docker_config = _manifest["runtime"].get("docker") or dict(_DEFAULT_DOCKER_CONFIG)
-        console.print("[dim]Docker mode — checking image…[/dim]")
-        try:
-            _docker_setup(docker_config, target)
-        except RuntimeError as exc:
-            console.print(f"[red]✗[/red] Docker image update failed: {exc}\n")

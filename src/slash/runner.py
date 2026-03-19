@@ -38,17 +38,6 @@ def _load_manifest(root: Path) -> dict[str, Any]:
         return {}
 
 
-def _load_verbosity_config(root: Path) -> str:
-    """
-    Read ``agent.verbosity`` from ``.slash/manifest.yaml``.
-
-    Returns one of ``"verbose"``, ``"concise"``, or ``"none"``; defaults to
-    ``"verbose"`` if not set or invalid.
-    """
-    value = _load_manifest(root).get("agent", {}).get("verbosity", "verbose")
-    return value if value in ("verbose", "concise", "none") else "verbose"
-
-
 def _load_model_config(root: Path) -> str | None:
     """
     Read ``agent.model`` from ``.slash/manifest.yaml``.
