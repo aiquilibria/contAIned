@@ -30,7 +30,9 @@ def _find_root() -> Path:
 def main(ctx: click.Context) -> None:
     """contAIned — a contAIned coding agent CLI."""
     if ctx.invoked_subcommand is None:
+        from contained.runner import _print_splash
         from contained.repl import start_repl
+        _print_splash()
         start_repl(_find_root())
 
 
@@ -68,5 +70,7 @@ def init(directory: str, force: bool, rebuild: bool) -> None:
       contAIned init --force    # re-run setup wizard (reconfigure model, docker, etc.)
       contAIned init --rebuild  # force-rebuild the Docker image without re-running wizard
     """
+    from contained.runner import _print_splash
     from contained.init import run_init
+    _print_splash()
     run_init(Path(directory), force=force, rebuild=rebuild)

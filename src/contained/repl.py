@@ -4,7 +4,7 @@
 terminal inherited.  All I/O passes through unmodified — there is no PTY proxy
 or input interception layer.
 
-Hash commands (``#db``, ``#status``, ``#sh``, ``#update``, ``#review``) are
+Hash commands (``#db``, ``#status``, ``#update``, ``#review``) are
 handled entirely by the ``UserPromptSubmit`` hook that Claude Code invokes
 before each prompt is processed.
 
@@ -31,22 +31,6 @@ from .runner import (
 )
 
 console = Console()
-
-
-def _pre_launch_checks(root: Path) -> None:
-    """Print a banner if there are tasks awaiting review."""
-    tracer = _get_tracer(root)
-    if tracer is None:
-        return
-    try:
-        reviews = tracer.get_pending_reviews()
-    except Exception:
-        reviews = []
-    if reviews:
-        console.print(
-            f"\n[bold yellow]You have {len(reviews)} task(s) awaiting review.[/bold yellow]"
-            "  Type [bold]#review[/bold] to see them.\n"
-        )
 
 
 def start_repl(root: Path) -> None:
@@ -80,8 +64,6 @@ def start_repl(root: Path) -> None:
             console.print(f"  [dim]{m}[/dim]")
         console.print()
         raise SystemExit(1)
-
-    _pre_launch_checks(root)
 
     cmd = ["claude"]
     model = _load_model_config(root)

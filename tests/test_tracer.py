@@ -9,20 +9,20 @@ Coverage:
     - track_write (content stored, snapshot appended, multiple writes)
     - log_event / _extract_trace_unit (per-tool dispatch)
     - Actor ID resolution formula (root vs sub-agent)
-    - open_task / set_task_status / get_pending_reviews
+    - open_task / set_task_status
     - tree_session_ids (flat and nested)
     - list_touched_files / diff_task
     - recent_audit_events (scoped and global)
-    - gc (prunes old closed/abandoned; protects open/pending_review)
+    - gc (prunes old closed tasks; protects open)
 
   Integration tests:
-    - Single-agent task: write files → pending_review → approve → closed
+    - Single-agent task: write files → closed
     - Sub-agent task: SubagentStart → child writes → SubagentStop → root Stop
       → tree diff covers all files
     - Concurrent baseline writes: MIN(captured_at) wins
-    - REPL startup with pending review (review surfaced, approve → closed)
-    - REPL /new and /review (task rows, pending task list)
-    - Stale open-task recovery at REPL startup
+    - Startup with pending review (review surfaced, approve → closed)
+    - Task creation and pending review surfacing
+    - Stale open-task detection
 """
 from __future__ import annotations
 
@@ -417,53 +417,41 @@ class TestTaskLifecycle:
         assert row is not None
         assert row[0] == "open"
 
-    def test_open_task_idempotent(self, tracer: contAInedTracer) -> None:
+    def test_open_task_preserves_original_prompt(self, tracer: contAInedTracer) -> None:
+        """Calling open_task again must not overwrite the original prompt."""
         tracer.open_task("S1", "prompt v1")
-        tracer.open_task("S1", "prompt v2")  # must NOT overwrite
+        tracer.open_task("S1", "prompt v2")
         row = tracer.conn.execute(
             "SELECT prompt FROM tasks WHERE session_id = 'S1'"
         ).fetchone()
         assert row[0] == "prompt v1"
 
-    def test_set_task_status_transitions(self, tracer: contAInedTracer) -> None:
+    def test_open_task_reopens_closed_task(self, tracer: contAInedTracer) -> None:
+        """In a multi-turn session, open_task must reopen a closed task to 'open'."""
         tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "pending_review")
+        tracer.set_task_status("S1", "closed")
+        tracer.open_task("S1", "follow-up prompt")  # second turn
         row = tracer.conn.execute(
             "SELECT status FROM tasks WHERE session_id = 'S1'"
         ).fetchone()
-        assert row[0] == "pending_review"
+        assert row[0] == "open"
+
+    def test_set_task_status_transitions(self, tracer: contAInedTracer) -> None:
+        tracer.open_task("S1", "task")
+        tracer.set_task_status("S1", "closed")
+        row = tracer.conn.execute(
+            "SELECT status FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert row[0] == "closed"
 
     def test_set_task_status_stores_summary(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         summary = {"files": ["a.py"], "diff": "---"}
-        tracer.set_task_status("S1", "pending_review", summary=summary)
+        tracer.set_task_status("S1", "closed", summary=summary)
         row = tracer.conn.execute(
             "SELECT summary FROM tasks WHERE session_id = 'S1'"
         ).fetchone()
         assert json.loads(row[0]) == summary
-
-    def test_get_pending_reviews_returns_root_only(
-        self, tracer: contAInedTracer
-    ) -> None:
-        tracer.open_task("ROOT", "root task")
-        tracer.open_task("CHILD", "child task", parent_session_id="ROOT")
-        tracer.set_task_status("ROOT", "pending_review")
-        tracer.set_task_status("CHILD", "pending_review")
-        pending = tracer.get_pending_reviews()
-        ids = [p["session_id"] for p in pending]
-        assert "ROOT" in ids
-        assert "CHILD" not in ids  # children excluded
-
-    def test_get_pending_reviews_sorted_newest_first(
-        self, tracer: contAInedTracer
-    ) -> None:
-        for sid in ("S1", "S2", "S3"):
-            tracer.open_task(sid, f"task {sid}")
-            tracer.set_task_status(sid, "pending_review")
-            time.sleep(0.001)  # ensure distinct timestamps
-        pending = tracer.get_pending_reviews()
-        ids = [p["session_id"] for p in pending]
-        assert ids == sorted(ids, reverse=True) or ids[0] == "S3"
 
     def test_get_child_sessions(self, tracer: contAInedTracer) -> None:
         tracer.open_task("ROOT", "root")
@@ -759,23 +747,6 @@ class TestGC:
         count = tracer.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
         assert count == 1  # protected; must remain
 
-    def test_gc_protects_pending_review_tasks(
-        self, tracer: contAInedTracer
-    ) -> None:
-        tracer.open_task("PR", "pending task")
-        tracer.set_task_status("PR", "pending_review")
-        old_ms = self._old_ms()
-        tracer.conn.execute(
-            "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
-            "VALUES ('PR', 'x.py', ?, ?)",
-            (tracer._store_blob(b"x"), old_ms),
-        )
-        tracer.conn.commit()
-
-        tracer.gc(keep_days=14)
-        count = tracer.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
-        assert count == 1
-
     def test_gc_removes_orphaned_blobs(self, tracer: contAInedTracer) -> None:
         tracer.open_task("OLD", "task")
         tracer.set_task_status("OLD", "closed")
@@ -881,17 +852,17 @@ class TestGC:
 # ---------------------------------------------------------------------------
 
 class TestSingleAgentIntegration:
-    def test_open_write_review_close(
+    def test_open_write_close(
         self, tracer: contAInedTracer, tmp_file
     ) -> None:
         """
         Simulate: runner opens task → hooks capture baseline + write →
-        summarizer sets pending_review → operator approves → closed.
+        summarizer closes with summary.
         """
         p = tmp_file("main.py", "v0\n")
         session_id = "SESS_A"
 
-        # 1. Open task (runner.py)
+        # 1. Open task
         tracer.open_task(session_id, "implement feature")
 
         # 2. Pre-hook: capture baseline
@@ -901,20 +872,13 @@ class TestSingleAgentIntegration:
         p.write_text("v1\n")
         tracer.track_write(session_id, str(p), p.read_bytes())
 
-        # 4. Summarizer → pending_review with summary
+        # 4. Summarizer → closed with summary
         summary = {"files": [str(p)]}
-        tracer.set_task_status(session_id, "pending_review", summary=summary)
-
-        pending = tracer.get_pending_reviews()
-        assert any(t["session_id"] == session_id for t in pending)
-
-        # 5. Operator approves
-        tracer.set_task_status(session_id, "closed")
+        tracer.set_task_status(session_id, "closed", summary=summary)
 
         assert tracer.conn.execute(
             "SELECT status FROM tasks WHERE session_id = ?", (session_id,)
         ).fetchone()[0] == "closed"
-        assert not any(t["session_id"] == session_id for t in tracer.get_pending_reviews())
 
     def test_diff_reflects_write(self, tracer: contAInedTracer, tmp_file) -> None:
         p = tmp_file("a.py", "before\n")
@@ -962,7 +926,7 @@ class TestSubAgentIntegration:
         # SubagentStop → child closed
         tracer.set_task_status(child_sid, "closed")
 
-        # Root Stop hook → pending_review
+        # Root Stop hook → list touched files
         touched = tracer.list_touched_files(root_sid)
         assert str(root_file) in touched
         assert str(child_file) in touched
@@ -974,17 +938,6 @@ class TestSubAgentIntegration:
         assert "-child_v0" in child_diff
         assert "+child_v1" in child_diff
 
-    def test_sub_agent_not_in_pending_reviews(
-        self, tracer: contAInedTracer
-    ) -> None:
-        tracer.open_task("ROOT",  "root")
-        tracer.open_task("CHILD", "child", parent_session_id="ROOT")
-        tracer.set_task_status("CHILD", "closed")
-        tracer.set_task_status("ROOT", "pending_review")
-        pending = tracer.get_pending_reviews()
-        ids = [p["session_id"] for p in pending]
-        assert "CHILD" not in ids
-        assert "ROOT" in ids
 
 
 # ---------------------------------------------------------------------------
@@ -1067,80 +1020,14 @@ class TestConcurrentBaselines:
 
 
 # ---------------------------------------------------------------------------
-# Integration — REPL startup with pending review
-# ---------------------------------------------------------------------------
-
-class TestReplStartupPendingReview:
-    def test_pending_review_surfaces_at_startup(
-        self, tracer: contAInedTracer, tmp_path: Path
-    ) -> None:
-        """
-        _check_startup_tasks reads pending_review tasks from the DB and
-        surfaces them.  We test the tracer side only (not the REPL I/O).
-        """
-        tracer.open_task("OLD_SESS", "fix the bug")
-        tracer.set_task_status("OLD_SESS", "pending_review",
-                               summary={"files": []})
-
-        pending = tracer.get_pending_reviews()
-        assert len(pending) == 1
-        assert pending[0]["session_id"] == "OLD_SESS"
-        assert pending[0]["prompt"] == "fix the bug"
-
-    def test_approve_transitions_to_closed(self, tracer: contAInedTracer) -> None:
-        tracer.open_task("S", "task")
-        tracer.set_task_status("S", "pending_review")
-
-        # Simulate operator approving
-        tracer.set_task_status("S", "closed")
-
-        pending = tracer.get_pending_reviews()
-        assert not any(p["session_id"] == "S" for p in pending)
-        status = tracer.conn.execute(
-            "SELECT status FROM tasks WHERE session_id = 'S'"
-        ).fetchone()[0]
-        assert status == "closed"
-
-    def test_followup_transitions_back_to_open(self, tracer: contAInedTracer) -> None:
-        """Providing a follow-up instruction reverts the task to open."""
-        tracer.open_task("S", "task")
-        tracer.set_task_status("S", "pending_review")
-
-        # Simulate operator providing a follow-up instruction
-        tracer.set_task_status("S", "open")
-
-        pending = tracer.get_pending_reviews()
-        assert not any(p["session_id"] == "S" for p in pending)
-        status = tracer.conn.execute(
-            "SELECT status FROM tasks WHERE session_id = 'S'"
-        ).fetchone()[0]
-        assert status == "open"
-
-    def test_blank_line_approve_transitions_to_closed(self, tracer: contAInedTracer) -> None:
-        """Blank-line (Enter) approval closes the task — CI default path."""
-        tracer.open_task("S2", "task")
-        tracer.set_task_status("S2", "pending_review")
-
-        # Simulate CI / blank-line approve
-        tracer.set_task_status("S2", "closed")
-
-        status = tracer.conn.execute(
-            "SELECT status FROM tasks WHERE session_id = 'S2'"
-        ).fetchone()[0]
-        assert status == "closed"
-        assert not tracer.get_pending_reviews()
-
-
-# ---------------------------------------------------------------------------
 # Integration — stale open task recovery
 # ---------------------------------------------------------------------------
 
 class TestStaleOpenTaskRecovery:
     """
-    At REPL startup _check_startup_tasks surfaces open tasks older than
-    _STALE_TASK_THRESHOLD_SECS (3600s) for operator information.
-    No automatic status change occurs; the operator decides what to do next.
-    We test the tracer state transitions only.
+    Open tasks older than the stale threshold (3600s) are surfaced for
+    operator information via get_open_root_tasks.  No automatic status
+    change occurs; the operator decides what to do next.
     """
 
     def _stale_open(self, tracer: contAInedTracer, session_id: str) -> None:
@@ -1157,7 +1044,7 @@ class TestStaleOpenTaskRecovery:
         self, tracer: contAInedTracer
     ) -> None:
         """Stale open tasks are surfaced for information only; no status change
-        occurs automatically — the operator takes action via a new task or /review.
+        occurs automatically — the operator takes explicit action.
         """
         self._stale_open(tracer, "STALE")
         status = tracer.conn.execute(
@@ -1237,18 +1124,14 @@ class TestGetOpenRootTasks:
         assert "ROOT" in ids
         assert "CHILD" not in ids
 
-    def test_excludes_non_open_statuses(self, tracer: contAInedTracer) -> None:
-        """Tasks in pending_review or closed state are not returned."""
-        tracer.open_task("PR", "pending task")
+    def test_excludes_closed_statuses(self, tracer: contAInedTracer) -> None:
+        """Closed tasks are not returned."""
         tracer.open_task("CL", "closed task")
-        self._backdate(tracer, "PR", 7200)
         self._backdate(tracer, "CL", 7200)
-        tracer.set_task_status("PR", "pending_review")
         tracer.set_task_status("CL", "closed")
 
         result = tracer.get_open_root_tasks(older_than_secs=3600)
         ids = [r["session_id"] for r in result]
-        assert "PR" not in ids
         assert "CL" not in ids
 
     def test_returns_newest_first(self, tracer: contAInedTracer) -> None:
@@ -1290,49 +1173,18 @@ class TestGetOpenRootTasks:
 
 
 # ---------------------------------------------------------------------------
-# Integration — session resume: _check_startup_tasks returns session_id
+# Integration — stale open task detection
 # ---------------------------------------------------------------------------
 
 class TestSessionResumeSignal:
     """
-    Tests that the tracer state is correct for the session-resume feature.
-
-    _check_startup_tasks in repl.py reads from the tracer and returns a
-    session_id when the operator opts to resume.  These tests verify the
-    tracer API (get_open_root_tasks / get_pending_reviews / set_task_status)
-    produces the state that the REPL logic depends on.
+    Verifies get_open_root_tasks surfaces interrupted sessions correctly.
     """
 
-    def test_followup_on_pending_review_puts_task_back_to_open(
+    def test_stale_open_session_id_is_retrievable(
         self, tracer: contAInedTracer
     ) -> None:
-        """
-        When the operator provides a follow-up for a pending_review task,
-        set_task_status('open') is called.  The session_id is then available
-        in get_open_root_tasks (once backdated past the stale threshold) or
-        directly from the tasks table, and can be passed to _build_client as
-        resume=session_id.
-        """
-        tracer.open_task("SESS", "implement feature X")
-        tracer.set_task_status("SESS", "pending_review")
-
-        # Operator provides follow-up — repl.py calls set_task_status("open")
-        tracer.set_task_status("SESS", "open")
-
-        row = tracer.conn.execute(
-            "SELECT status FROM tasks WHERE session_id = 'SESS'"
-        ).fetchone()
-        assert row[0] == "open"
-        # No longer in pending_review
-        assert not any(p["session_id"] == "SESS" for p in tracer.get_pending_reviews())
-
-    def test_stale_open_session_id_is_retrievable_for_resume(
-        self, tracer: contAInedTracer
-    ) -> None:
-        """
-        A session left in open state after a REPL crash can be retrieved via
-        get_open_root_tasks and its session_id passed to _build_client(resume=).
-        """
+        """A session left open after an interrupted run appears in get_open_root_tasks."""
         tracer.open_task("INTERRUPTED", "big refactor")
         old_ms = int((time.time() - 7200) * 1000)
         tracer.conn.execute(
@@ -1346,30 +1198,23 @@ class TestSessionResumeSignal:
         session_ids = [r["session_id"] for r in stale]
         assert "INTERRUPTED" in session_ids
 
-    def test_approve_closes_task_no_resume_needed(
+    def test_closed_task_not_in_open_root_tasks(
         self, tracer: contAInedTracer
     ) -> None:
-        """
-        When the operator approves (blank Enter), the task moves to closed and
-        get_pending_reviews returns nothing — no resume is needed.
-        """
-        tracer.open_task("DONE", "task to approve")
-        tracer.set_task_status("DONE", "pending_review")
-
-        # Operator approves — repl.py calls set_task_status("closed")
+        """Closed tasks must not appear in get_open_root_tasks."""
+        tracer.open_task("DONE", "completed task")
         tracer.set_task_status("DONE", "closed")
 
-        assert tracer.get_pending_reviews() == []
         assert tracer.get_open_root_tasks(older_than_secs=0) == []
 
 
 # ---------------------------------------------------------------------------
-# Integration — REPL /new creates task row; /review surfaces pending
+# Integration — task creation
 # ---------------------------------------------------------------------------
 
-class TestReplNewAndReview:
+class TestTaskCreation:
     def test_new_session_open_task_row(self, tracer: contAInedTracer) -> None:
-        """Each REPL /new creates a fresh open task row."""
+        """Each new task creates a fresh open task row."""
         for i, sid in enumerate(("SID1", "SID2", "SID3")):
             tracer.open_task(sid, f"user message {i}")
         count = tracer.conn.execute(
@@ -1377,25 +1222,17 @@ class TestReplNewAndReview:
         ).fetchone()[0]
         assert count == 3
 
-    def test_review_command_lists_pending(self, tracer: contAInedTracer) -> None:
-        """After summarizer fires, /review must surface the task."""
-        tracer.open_task("MID_SESS", "mid-session task")
-        tracer.set_task_status("MID_SESS", "pending_review",
-                               summary={"files": ["a.py"]})
-
-        pending = tracer.get_pending_reviews()
-        ids = [p["session_id"] for p in pending]
-        assert "MID_SESS" in ids
-
-    def test_multiple_sessions_each_reviewable(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_closed_tasks_queryable(self, tracer: contAInedTracer) -> None:
+        """Closed tasks are queryable for #review history display."""
         for sid in ("S1", "S2"):
             tracer.open_task(sid, f"task {sid}")
-            tracer.set_task_status(sid, "pending_review")
+            tracer.set_task_status(sid, "closed")
 
-        pending = tracer.get_pending_reviews()
-        ids = {p["session_id"] for p in pending}
+        rows = tracer.conn.execute(
+            "SELECT session_id FROM tasks WHERE status = 'closed' "
+            "AND parent_session_id IS NULL ORDER BY ended_at DESC"
+        ).fetchall()
+        ids = {r[0] for r in rows}
         assert {"S1", "S2"} <= ids
 
 
@@ -1525,30 +1362,6 @@ class TestTaskLifecycleEdgeCases:
         ).fetchone()
         assert row[0] == "ROOT"
 
-    def test_get_pending_reviews_excludes_closed(
-        self, tracer: contAInedTracer
-    ) -> None:
-        """Closed tasks must not appear in pending_reviews."""
-        tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "closed")
-        assert tracer.get_pending_reviews() == []
-
-    def test_get_pending_reviews_excludes_abandoned(
-        self, tracer: contAInedTracer
-    ) -> None:
-        """Abandoned tasks must not appear in pending_reviews."""
-        tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "abandoned")
-        assert tracer.get_pending_reviews() == []
-
-    def test_get_pending_reviews_summary_none(self, tracer: contAInedTracer) -> None:
-        """pending_reviews entry has summary=None when none was stored."""
-        tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "pending_review")
-        pending = tracer.get_pending_reviews()
-        assert pending[0]["summary"] is None
-
-
 # ---------------------------------------------------------------------------
 # Unit — narrative persistence
 # ---------------------------------------------------------------------------
@@ -1557,7 +1370,7 @@ class TestNarrative:
     def test_set_task_status_stores_narrative(self, tracer: contAInedTracer) -> None:
         """narrative is persisted when passed to set_task_status."""
         tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "pending_review", narrative="I fixed the bug.")
+        tracer.set_task_status("S1", "closed", narrative="I fixed the bug.")
         row = tracer.conn.execute(
             "SELECT narrative FROM tasks WHERE session_id = 'S1'"
         ).fetchone()
@@ -1566,10 +1379,10 @@ class TestNarrative:
     def test_set_task_status_narrative_none_preserves_existing(
         self, tracer: contAInedTracer
     ) -> None:
-        """Passing narrative=None to set_task_status must NOT overwrite an existing value."""
+        """Passing narrative=None must NOT overwrite an existing value (COALESCE)."""
         tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "pending_review", narrative="First narrative.")
-        # Approve without passing narrative — existing value must survive.
+        tracer.set_task_status("S1", "closed", narrative="First narrative.")
+        # Second call without narrative — existing value must survive.
         tracer.set_task_status("S1", "closed")
         row = tracer.conn.execute(
             "SELECT narrative FROM tasks WHERE session_id = 'S1'"
@@ -1581,40 +1394,42 @@ class TestNarrative:
     ) -> None:
         """Passing an explicit narrative overwrites the previous value."""
         tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "pending_review", narrative="Draft.")
+        tracer.set_task_status("S1", "closed", narrative="Draft.")
         tracer.set_task_status("S1", "closed", narrative="Final.")
         row = tracer.conn.execute(
             "SELECT narrative FROM tasks WHERE session_id = 'S1'"
         ).fetchone()
         assert row[0] == "Final."
 
-    def test_summary_also_preserved_on_approve(self, tracer: contAInedTracer) -> None:
-        """Approving (no summary arg) must not clear an existing summary."""
+    def test_summary_preserved_on_second_close(self, tracer: contAInedTracer) -> None:
+        """A second set_task_status call without summary must not clear an existing one."""
         tracer.open_task("S1", "task")
         summary = {"file_changes": [], "action_log": []}
-        tracer.set_task_status("S1", "pending_review", summary=summary)
-        # Simulate approve — no summary passed.
+        tracer.set_task_status("S1", "closed", summary=summary)
         tracer.set_task_status("S1", "closed")
         row = tracer.conn.execute(
             "SELECT summary FROM tasks WHERE session_id = 'S1'"
         ).fetchone()
         assert json.loads(row[0]) == summary
 
-    def test_get_pending_reviews_returns_narrative(self, tracer: contAInedTracer) -> None:
-        """get_pending_reviews must include the narrative field."""
+    def test_narrative_queryable_on_closed_task(self, tracer: contAInedTracer) -> None:
+        """Narrative stored at close is retrievable via direct SQL (used by #review)."""
         tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "pending_review", narrative="Done everything.")
-        pending = tracer.get_pending_reviews()
-        assert pending[0]["narrative"] == "Done everything."
+        tracer.set_task_status("S1", "closed", narrative="Done everything.")
+        row = tracer.conn.execute(
+            "SELECT narrative FROM tasks WHERE session_id = 'S1' AND status = 'closed'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "Done everything."
 
-    def test_get_pending_reviews_narrative_none_when_absent(
-        self, tracer: contAInedTracer
-    ) -> None:
-        """get_pending_reviews returns narrative=None when not set."""
+    def test_narrative_none_when_absent(self, tracer: contAInedTracer) -> None:
+        """narrative is NULL when not set at close."""
         tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "pending_review")
-        pending = tracer.get_pending_reviews()
-        assert pending[0]["narrative"] is None
+        tracer.set_task_status("S1", "closed")
+        row = tracer.conn.execute(
+            "SELECT narrative FROM tasks WHERE session_id = 'S1'"
+        ).fetchone()
+        assert row[0] is None
 
     def test_migrate_adds_column_to_existing_db(self, db_path: str) -> None:
         """_migrate is idempotent — running it twice on the same DB does not raise."""
@@ -1738,34 +1553,139 @@ class TestExtractNarrativeFromTranscript:
 # ---------------------------------------------------------------------------
 # Unit — GC edge cases
 # ---------------------------------------------------------------------------
+# Unit — extract_session_narrative
+# ---------------------------------------------------------------------------
+
+class TestExtractSessionNarrative:
+    """Tests for extract_session_narrative — the structured multi-turn extractor."""
+
+    def _write(self, tmp_path: Path, entries: list) -> str:
+        p = tmp_path / "session.jsonl"
+        p.write_text("\n".join(json.dumps(e) for e in entries))
+        return str(p)
+
+    def test_returns_empty_dict_for_missing_file(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_session_narrative
+        assert extract_session_narrative(str(tmp_path / "missing.jsonl")) == {}
+
+    def test_returns_empty_dict_when_no_content(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_session_narrative
+        path = self._write(tmp_path, [{"type": "user", "message": {"content": []}}])
+        assert extract_session_narrative(path) == {}
+
+    def test_collects_thinking_excerpts(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_session_narrative
+        entry = {
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "thinking", "thinking": "I should write a test."},
+                {"type": "text", "text": "Done."},
+            ]},
+        }
+        path = self._write(tmp_path, [entry])
+        result = extract_session_narrative(path)
+        assert "I should write a test." in result["thinking_excerpts"]
+
+    def test_collects_reasoning_steps_before_tool_use(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_session_narrative
+        entry = {
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "text", "text": "Let me read the file."},
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "x.py"}},
+            ]},
+        }
+        path = self._write(tmp_path, [entry])
+        result = extract_session_narrative(path)
+        assert len(result["reasoning_steps"]) == 1
+        step = result["reasoning_steps"][0]
+        assert step["before_tool"] == "Read"
+        assert step["rationale"] == "Let me read the file."
+
+    def test_closings_accumulates_across_turns(self, tmp_path: Path) -> None:
+        """closings must contain one entry per turn, not just the last one."""
+        from contained.tracer import extract_session_narrative
+        turn1 = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Turn 1 done."}]},
+        }
+        turn2 = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Turn 2 done."}]},
+        }
+        path = self._write(tmp_path, [turn1, turn2])
+        result = extract_session_narrative(path)
+        assert result["closings"] == ["Turn 1 done.", "Turn 2 done."]
+
+    def test_closings_excludes_messages_with_tool_use(self, tmp_path: Path) -> None:
+        """Messages that contain tool_use blocks are not added to closings."""
+        from contained.tracer import extract_session_narrative
+        tool_msg = {
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "text", "text": "Running tool now."},
+                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+            ]},
+        }
+        closing_msg = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "All done."}]},
+        }
+        path = self._write(tmp_path, [tool_msg, closing_msg])
+        result = extract_session_narrative(path)
+        assert result["closings"] == ["All done."]
+
+    def test_skips_meta_and_sidechain_entries(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_session_narrative
+        real = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Real."}]},
+        }
+        meta = {
+            "type": "assistant", "isMeta": True,
+            "message": {"content": [{"type": "text", "text": "Meta."}]},
+        }
+        side = {
+            "type": "assistant", "isSidechain": True,
+            "message": {"content": [{"type": "text", "text": "Side."}]},
+        }
+        path = self._write(tmp_path, [real, meta, side])
+        result = extract_session_narrative(path)
+        assert result["closings"] == ["Real."]
+
+    def test_thinking_resets_pending_text(self, tmp_path: Path) -> None:
+        """Text before a thinking block must not be attributed to the next tool call."""
+        from contained.tracer import extract_session_narrative
+        entry = {
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "text", "text": "Preamble."},
+                {"type": "thinking", "thinking": "Hmm."},
+                {"type": "tool_use", "name": "Write", "input": {"file_path": "a.py"}},
+            ]},
+        }
+        path = self._write(tmp_path, [entry])
+        result = extract_session_narrative(path)
+        # pending_text was reset by thinking, so no reasoning step is emitted
+        assert result["reasoning_steps"] == []
+
+    def test_result_keys(self, tmp_path: Path) -> None:
+        """Result dict always has exactly these three keys when non-empty."""
+        from contained.tracer import extract_session_narrative
+        entry = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Hi."}]},
+        }
+        path = self._write(tmp_path, [entry])
+        result = extract_session_narrative(path)
+        assert set(result.keys()) == {"thinking_excerpts", "reasoning_steps", "closings"}
+
+
+# ---------------------------------------------------------------------------
 
 class TestGCEdgeCases:
     def _old_ms(self, days: int = 20) -> int:
         return int((time.time() - days * 86400) * 1000)
-
-    def test_gc_removes_old_abandoned_snapshots(
-        self, tracer: contAInedTracer
-    ) -> None:
-        """GC must prune snapshots for abandoned tasks, not just closed."""
-        tracer.open_task("ABA", "abandoned task")
-        tracer.set_task_status("ABA", "abandoned")
-        old_ms = self._old_ms()
-        tracer.conn.execute(
-            "UPDATE tasks SET ended_at = ? WHERE session_id = 'ABA'",
-            (old_ms,),
-        )
-        tracer.conn.execute(
-            "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
-            "VALUES ('ABA', 'x.py', ?, ?)",
-            (tracer._store_blob(b"abandoned data"), old_ms),
-        )
-        tracer.conn.commit()
-
-        tracer.gc(keep_days=14)
-        count = tracer.conn.execute(
-            "SELECT COUNT(*) FROM snapshots"
-        ).fetchone()[0]
-        assert count == 0
 
     def test_gc_removes_old_baselines(self, tracer: contAInedTracer) -> None:
         """GC must delete baselines for old closed tasks."""

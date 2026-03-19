@@ -21,6 +21,14 @@ from rich.console import Console
 console = Console()
 
 
+def _print_splash() -> None:
+    """Print the contAIned logo and tagline."""
+    console.print(
+        "\n[bold green]cont\\[AI✦]ned[/bold green]"
+        "  [dim]take back control of your agent![/dim]\n"
+    )
+
+
 def _load_manifest(root: Path) -> dict[str, Any]:
     """
     Load and return the parsed manifest, or an empty dict if missing.

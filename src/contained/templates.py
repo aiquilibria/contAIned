@@ -1576,13 +1576,11 @@ summary = {
 }
 
 # ── Locate Claude Code transcript for this session ────────────────────────────
-_transcript_path = ""
-try:
-    import urllib.parse as _urlparse
-    _project_key     = _urlparse.quote(str(Path(cwd).resolve()), safe="")
-    _transcript_path = str(Path.home() / ".claude" / "projects" / _project_key / f"{session_id}.jsonl")
-except Exception:
-    pass
+# Claude Code injects transcript_path directly into the hook event payload.
+# Do NOT reconstruct this path from cwd: inside the container cwd resolves to
+# /workspace, but Claude Code names the project directory using the host
+# absolute path, so a reconstructed path would never match the real file.
+_transcript_path = event.get("transcript_path", "") or ""
 
 # ── Enrich action_log Bash entries with full stdout from transcript ────────────
 # The transcript holds untruncated tool outputs; the audit_events table has only
@@ -1697,7 +1695,6 @@ try:
                 status_line += "  [dim](" + reason_str + ")[/dim]"
             con.print(status_line)
 
-        # con.print("[dim]  (full diffs persisted in tracer.db — use /review to inspect)[/dim]")
     else:
         con.print("\\n[dim] No file changes recorded.[/dim]\\n")
 
@@ -1749,7 +1746,6 @@ try:
         if denied_count:
             parts.append(str(denied_count) + " denied")
         con.print("[bold] Action Log[/bold]  [dim](" + ", ".join(parts) + ")[/dim]")
-        con.print("[dim]  (full log persisted in tracer.db — use /review to inspect)[/dim]\\n")
 
     con.print("")
 
@@ -1772,10 +1768,10 @@ UserPromptSubmit hook — intercepts hash commands before Claude processes them.
 Commands handled here (output-only, non-interactive):
   #db [SQL]              — query tracer.db
   #status                — tail recent audit log
-  #sh <cmd>              — run a shell command
-  #update                — show current manifest policy
+#update                — show current manifest policy
   #update <path>=<value> — set a manifest key by dot-path (e.g. policy.qa.lint=false)
-  #review                — list pending reviews, or approve one by number (#review <n>)
+  #review                — list recent completed tasks
+  #review <n>            — show narrative + diff summary for task n
 
 On match: output is printed to /dev/tty, hook exits 2 to block Claude.
 On miss:  exit 0 — Claude\'s own /help, /compact, /clear, etc. pass through.
@@ -1812,7 +1808,7 @@ parts    = prompt.split(None, 1)
 cmd_word = parts[0].lower()
 args     = parts[1].strip() if len(parts) > 1 else ""
 
-_HOOK_COMMANDS = frozenset({"#db", "#status", "#sh", "#update", "#review"})
+_HOOK_COMMANDS = frozenset({"#db", "#status", "#update", "#review"})
 
 if cmd_word not in _HOOK_COMMANDS:
     sys.exit(0)  # not a known hash command — pass through to Claude
@@ -1909,13 +1905,6 @@ elif cmd_word == "#status":
         else:
             _p("[dim]No audit events yet.[/dim]")
 
-# ── #sh ───────────────────────────────────────────────────────────────────────
-elif cmd_word == "#sh":
-    if not args:
-        _p("Usage: #sh <command>")
-    else:
-        subprocess.run(args, shell=True, stdout=_tty, stderr=_tty)
-
 # ── #update ───────────────────────────────────────────────────────────────────
 elif cmd_word == "#update":
     import yaml as _yaml
@@ -2002,57 +1991,74 @@ elif cmd_word == "#review":
         try:
             from contained.tracer import contAInedTracer as _ST
             _tr = _ST(str(db_path))
-            _reviews = _tr.get_pending_reviews()
+            _tasks = _tr.conn.execute(
+                """
+                SELECT session_id, prompt, started_at, ended_at, summary, narrative
+                FROM tasks
+                WHERE status = \'closed\'
+                  AND parent_session_id IS NULL
+                ORDER BY ended_at DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            _tasks = [
+                {
+                    "session_id": r[0], "prompt": r[1],
+                    "started_at": r[2], "ended_at": r[3],
+                    "summary": json.loads(r[4]) if r[4] else None,
+                    "narrative": json.loads(r[5]) if r[5] else None,
+                }
+                for r in _tasks
+            ]
         except Exception as _e:
             _p(f"[red]Tracer error:[/red] {_e}")
-            _reviews = []
+            _tasks = []
 
-        if not _reviews:
-            _p("[dim]No tasks awaiting review.[/dim]")
+        if not _tasks:
+            _p("[dim]No completed tasks found.[/dim]")
         elif not args:
-            # ── List pending tasks ─────────────────────────────────────────
-            _p(f"\\n[bold]Pending reviews ({len(_reviews)}):[/bold]\\n")
-            _CT_LABEL = {"new file": "A", "modified": "M", "deleted": "D"}
-            _CT_STYLE = {"new file": "green", "modified": "yellow", "deleted": "red"}
-            for _i, _r in enumerate(_reviews, 1):
+            # ── List recent completed tasks ────────────────────────────────
+            _p(f"\\n[bold]Recent tasks ({len(_tasks)}):[/bold]\\n")
+            for _i, _r in enumerate(_tasks, 1):
                 from datetime import datetime as _dt, timezone as _tz
-                _ts = _dt.fromtimestamp(_r["started_at"] / 1000, tz=_tz.utc)
+                _ts = _dt.fromtimestamp(_r["ended_at"] / 1000, tz=_tz.utc)
+                _fc_count = len((_r.get("summary") or {}).get("file_changes", []))
+                _has_narrative = bool((_r.get("narrative") or {}).get("closings"))
                 _p(
                     f"  [bold]{_i}.[/bold] [dim]{_r[\'session_id\'][:12]}…[/dim]"
                     f"  \\"{_r[\'prompt\'][:60]}\\"  [dim]({_ts.strftime(\'%Y-%m-%d %H:%M\')})[/dim]"
+                    + (f"  [dim]{_fc_count} file(s)[/dim]" if _fc_count else "")
+                    + ("  [dim cyan]narrative[/dim cyan]" if _has_narrative else "")
                 )
-                for _fc in (_r.get("summary") or {}).get("file_changes", []):
-                    _ct  = _fc.get("change_type", "modified")
-                    _lbl = _CT_LABEL.get(_ct, "M")
-                    _sty = _CT_STYLE.get(_ct, "yellow")
-                    _fp  = _fc.get("file_path", "?")
-                    _add = _fc.get("lines_added", 0)
-                    _rem = _fc.get("lines_removed", 0)
-                    _p(
-                        f"      [{_sty}][bold]{_lbl}[/bold][/{_sty}]"
-                        f"  [cyan]{_fp}[/cyan]"
-                        f"  [green]+{_add}[/green] [red]-{_rem}[/red]"
-                    )
-            _p(f"\\n[dim]Type [bold]#review <n>[/bold] to approve a task.[/dim]")
+            _p(f"\\n[dim]Type [bold]#review <n>[/bold] to see details for a task.[/dim]")
         else:
-            # ── Show summary and approve ───────────────────────────────────
+            # ── Show task detail ───────────────────────────────────────────
             if not args.isdigit() or int(args) < 1:
                 _p("[red]Usage:[/red] #review <number>  (run #review to see the list)")
             else:
                 _idx = int(args) - 1
-                if _idx >= len(_reviews):
+                if _idx >= len(_tasks):
                     _p(f"[red]No task {args}.[/red] Type [bold]#review[/bold] to see the list.")
                 else:
-                    _r = _reviews[_idx]
+                    _r = _tasks[_idx]
                     from datetime import datetime as _dt, timezone as _tz
                     from rich.panel import Panel as _Panel
                     from rich.text import Text as _Text
-                    _ts = _dt.fromtimestamp(_r["started_at"] / 1000, tz=_tz.utc)
+                    _ts = _dt.fromtimestamp(_r["ended_at"] / 1000, tz=_tz.utc)
                     _hdr = _Text()
-                    _hdr.append("Task Review", style="bold white")
+                    _hdr.append("Task", style="bold white")
                     _hdr.append(f"\\n{_r[\'prompt\'][:120]}", style="dim")
-                    _hdr.append(f"\\n  started {_ts.strftime(\'%Y-%m-%d %H:%M UTC\')}", style="dim")
+                    _hdr.append(f"\\n  completed {_ts.strftime(\'%Y-%m-%d %H:%M UTC\')}", style="dim")
                     con.print(_Panel(_hdr, border_style="blue", expand=False))
+
+                    _narrative = _r.get("narrative") or {}
+                    _closings  = _narrative.get("closings") or []
+                    if _closings:
+                        _p(f"\\n[bold] Narrative[/bold]\\n")
+                        for _turn_i, _closing in enumerate(_closings, 1):
+                            if len(_closings) > 1:
+                                _p(f"  [dim]Turn {_turn_i}:[/dim]")
+                            _p(f"  [dim]{_closing[:400]}[/dim]\\n")
 
                     _file_changes = (_r.get("summary") or {}).get("file_changes", [])
                     _action_log   = (_r.get("summary") or {}).get("action_log", [])
@@ -2088,10 +2094,6 @@ elif cmd_word == "#review":
                     else:
                         _p("\\n[dim]  No file changes recorded.[/dim]\\n")
 
-                    if _r.get("narrative"):
-                        _p(f"\\n[bold] Summary[/bold]\\n")
-                        _p(f"  [dim]{_r[\'narrative\'][:400]}[/dim]\\n")
-
                     _notable = [
                         _e for _e in _action_log
                         if _e.get("tool") in ("Bash", "Agent") or _e.get("outcome") == "denied"
@@ -2110,13 +2112,7 @@ elif cmd_word == "#review":
                                 _p(f"  [red]✗ {_e.get(\'tool\')} denied: {(_e.get(\'reason\') or \'\')[:80]}[/red]")
                         _p()
 
-                    try:
-                        _tr.set_task_status(_r["session_id"], "closed")
-                        _p("[green]✓ Task approved and closed.[/green]")
-                    except Exception as _e:
-                        _p(f"[yellow]Warning: could not close task: {_e}[/yellow]")
-
-_p()
+print("\\n" * 5, file=_tty, end="")
 if _tty is not sys.stderr:
     _tty.flush()
     _tty.close()

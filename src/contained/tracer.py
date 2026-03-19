@@ -36,17 +36,14 @@ CREATE TABLE IF NOT EXISTS blobs (
 
 -- Task / session registry.
 -- One row per contAIned run invocation, REPL session, or sub-agent session.
--- NOTE: 'abandoned' status is deprecated — no new rows are written with that
--- status.  Existing 'abandoned' rows are retained for historical record only.
--- The normal review flow now uses only: open|pending_review|closed.
 CREATE TABLE IF NOT EXISTS tasks (
     session_id          TEXT    PRIMARY KEY,
     parent_session_id   TEXT    REFERENCES tasks(session_id),
     prompt              TEXT    NOT NULL,
-    status              TEXT    NOT NULL DEFAULT 'open',  -- open|pending_review|closed|abandoned(deprecated)
+    status              TEXT    NOT NULL DEFAULT 'open',  -- open|closed
     started_at          INTEGER NOT NULL,
     ended_at            INTEGER,
-    summary             TEXT,   -- JSON: per-file diff summary, populated at pending_review
+    summary             TEXT,   -- JSON: per-file diff summary, populated at close
     narrative           TEXT    -- agent's final human-readable summary, set on close
 );
 
@@ -267,9 +264,10 @@ def extract_session_narrative(transcript_path: str) -> dict:
       ``tool_use`` block within the same assistant message.  These are
       Claude's stated intent just before each action.
 
-    * **closing** — the concatenated text of the final non-meta assistant
-      message that contains no ``tool_use`` blocks (Claude's closing
-      summary of what it accomplished).
+    * **closings** — list of text from every non-meta assistant message that
+      contains no ``tool_use`` blocks, one entry per turn.  Across a
+      multi-turn session this captures the agent's reply at the end of each
+      turn rather than only the last one.
 
     Returns an empty dict ``{}`` on any failure or if the transcript
     contains no qualifying content.  Callers should persist this as JSON
@@ -282,7 +280,7 @@ def extract_session_narrative(transcript_path: str) -> dict:
 
     thinking_excerpts: list[str] = []
     reasoning_steps:   list[dict] = []
-    closing = ""
+    closings:          list[str]  = []
 
     for raw_line in lines:
         raw_line = raw_line.strip()
@@ -339,7 +337,7 @@ def extract_session_narrative(transcript_path: str) -> dict:
                     })
                 pending_text = []
 
-        # Messages with no tool_use are narrative text; the last one is the closing
+        # Messages with no tool_use are narrative text; collect all of them across turns
         if not has_tool_use:
             text_parts = [
                 (b.get("text") or "").strip()
@@ -348,15 +346,15 @@ def extract_session_narrative(transcript_path: str) -> dict:
             ]
             combined = " ".join(t for t in text_parts if t)
             if combined:
-                closing = combined
+                closings.append(combined)
 
-    if not thinking_excerpts and not reasoning_steps and not closing:
+    if not thinking_excerpts and not reasoning_steps and not closings:
         return {}
 
     return {
         "thinking_excerpts": thinking_excerpts,
         "reasoning_steps":   reasoning_steps,
-        "closing":           closing,
+        "closings":          closings,
     }
 
 
@@ -664,17 +662,21 @@ class contAInedTracer:
         parent_session_id: Optional[str] = None,
     ) -> None:
         """
-        Register a new task as ``open``.
+        Register a new task as ``open``, or reopen it if it already exists.
 
-        INSERT OR IGNORE is idempotent — calling this twice for the same
-        session_id (e.g. REPL resume) leaves the existing row untouched.
+        On first call for a session_id the row is created.  On subsequent
+        calls (e.g. the user sends a follow-up in a multi-turn session) the
+        status is reset to ``open`` so the task accurately reflects that the
+        agent is actively working again.  The original prompt, timestamps, and
+        parent linkage are preserved.
         """
         with self.conn:
             self.conn.execute(
                 """
-                INSERT OR IGNORE INTO tasks
+                INSERT INTO tasks
                     (session_id, parent_session_id, prompt, status, started_at)
                 VALUES (?, ?, ?, 'open', ?)
+                ON CONFLICT(session_id) DO UPDATE SET status = 'open'
                 """,
                 (session_id, parent_session_id, prompt, int(time.time() * 1000)),
             )
@@ -725,41 +727,13 @@ class contAInedTracer:
         ).fetchall()
         return [r[0] for r in rows]
 
-    def get_pending_reviews(self) -> list[dict]:
-        """
-        Return all root tasks in ``pending_review`` state, newest first.
-
-        A root task has ``parent_session_id IS NULL``.
-        """
-        rows = self.conn.execute(
-            """
-            SELECT session_id, prompt, started_at, summary, narrative
-            FROM tasks
-            WHERE status = 'pending_review'
-              AND parent_session_id IS NULL
-            ORDER BY started_at DESC
-            """
-        ).fetchall()
-        return [
-            {
-                "session_id": r[0],
-                "prompt": r[1],
-                "started_at": r[2],
-                "summary": json.loads(r[3]) if r[3] else None,
-                "narrative": r[4],
-            }
-            for r in rows
-        ]
-
     def get_open_root_tasks(self, older_than_secs: int = 3600) -> list[dict]:
         """
         Return root tasks in ``open`` state that started more than
         *older_than_secs* seconds ago, newest first.
 
         These represent sessions that were interrupted (e.g. REPL crash) before
-        the agent could finish and transition to ``pending_review``.  Callers
-        can use the returned ``session_id`` values with ``options.resume`` to
-        restore the agent's conversation context.
+        the agent could finish and transition to ``closed``.
 
         A root task has ``parent_session_id IS NULL``.
         """
@@ -966,28 +940,27 @@ class contAInedTracer:
         """
         Prune old data.  Rules:
 
-        - Tasks in ``open`` or ``pending_review`` (and their whole subtree)
-          are **never** pruned.
-        - Snapshots and baselines for closed/abandoned tasks older than
-          *keep_days* days are removed.
+        - Tasks in ``open`` state (and their whole subtree) are **never** pruned.
+        - Snapshots and baselines for closed tasks older than *keep_days* days
+          are removed.
         - Blobs no longer referenced by any remaining snapshot or baseline
           are removed (orphaned blob sweep).
         - Audit events older than *keep_days* are removed, but at least the
           10,000 most recent events are always kept.
-        - Task rows for closed/abandoned sessions older than *keep_days* are
-          removed last (after their snapshots/baselines are gone).
+        - Task rows for closed sessions older than *keep_days* are removed last
+          (after their snapshots/baselines are gone).
         """
         cutoff_ms = int((time.time() - keep_days * 86400) * 1000)
 
-        # Collect every session_id that must be protected (open or pending_review,
-        # and their entire subtrees).
+        # Collect every session_id that must be protected (open tasks and their
+        # entire subtrees).
         protected = {
             row[0]
             for row in self.conn.execute(
                 """
                 WITH RECURSIVE tree(sid) AS (
                     SELECT session_id FROM tasks
-                    WHERE status IN ('open', 'pending_review')
+                    WHERE status = 'open'
                     UNION ALL
                     SELECT t.session_id FROM tasks t
                     JOIN tree ON t.parent_session_id = tree.sid
@@ -1052,7 +1025,7 @@ class contAInedTracer:
             self.conn.execute(
                 f"""
                 DELETE FROM tasks
-                WHERE status IN ('closed', 'abandoned')
+                WHERE status = 'closed'
                   AND ended_at < ?
                   AND session_id NOT IN ({placeholders})
                 """,

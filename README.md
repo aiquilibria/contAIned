@@ -86,12 +86,11 @@ Claude Code runs as a direct child process with your terminal inherited — all 
 
 | Command | What it does |
 |---|---|
-| `#review` | List tasks awaiting review |
-| `#review <N>` | Show diff + approve task N |
+| `#review` | List recent completed tasks |
+| `#review <N>` | Show narrative + diff summary for task N |
 | `#db` | Query `tracer.db` — last 10 tasks |
 | `#db <SQL>` | Run arbitrary SQL against `tracer.db` |
 | `#status` | Show last 20 audit-log entries |
-| `#sh <cmd>` | Run a shell command without involving the agent |
 | `#update` | Display the current manifest (YAML) |
 | `#update <dotpath>=<value>` | Set a manifest value live (e.g. `#update policy.qa.lint=false`) |
 
@@ -139,32 +138,30 @@ Re-running `contAIned init` without `--force` refreshes hook files from the late
 
 ---
 
-## Review flow
+## Task lifecycle
 
-Every task goes through an operator review when the agent signals completion.
+When the agent signals completion, QA checks run and a diff summary is built. The task is then marked `closed` automatically.
 
 ```
 Agent signals Stop
         │
         ▼
-  QA checks (qa.py) + diff summary built
+  QA checks (qa.py) + diff summary + narrative built
         │
         ▼
-  #review          → list pending tasks
-  #review <N>      → show diff for task N + approve
+  Task marked closed
 ```
 
-**Approve** — `#review <N>` marks the task `closed`.
-
-**Follow-up** — type any instruction and press Enter. The agent wakes up with your message and keeps working in the same session.
+Use `#review` at any time to browse completed tasks and read their narratives.
 
 ### Task states
 
-| State            | Meaning                                                     |
-|------------------|-------------------------------------------------------------|
-| `open`           | Agent is actively working.                                  |
-| `pending_review` | Agent signalled Stop; awaiting operator review.             |
-| `closed`         | Operator approved. Task is complete.                        |
+| State    | Meaning                          |
+|----------|----------------------------------|
+| `open`   | Agent is actively working.       |
+| `closed` | Turn complete; narrative stored. |
+
+In a multi-turn session the task cycles: each new user message reopens it to `open`, and the Stop hook closes it again when the agent finishes that turn.
 
 ---
 
@@ -227,13 +224,17 @@ This prevents any Bash subprocess (shell scripts, Python executed via Bash, buil
 
 Edit `.contAIned/manifest.yaml` to adjust what the agent can do, or use `#update <dotpath>=<value>` from within a session. Manifest changes are live — hooks read the manifest on every tool call.
 
-Edit `.contAIned/hooks/qa.py` to add project-specific quality checks (linting, tests, etc.). Hook file changes require a container rebuild (`contAIned init --rebuild`).
-
 Edit `.claude/settings.json` to add or remove allow/deny rules.
+
+> **Do not edit hook files directly.** Files under `.contAIned/hooks/` are generated from internal templates. Running `contAIned init` (with or without `--rebuild`) will overwrite them, silently discarding any local changes. Policy customisation belongs in `manifest.yaml`; structural hook changes should be raised as feature requests.
 
 ---
 
 ## Known gaps
+
+### QA hook coverage
+
+The built-in `qa.py` Stop hook ships with quality checks for Python projects (linting, type checking, tests). There are no pre-built QA checks for other languages — Go, JavaScript, TypeScript, etc. Projects using those languages must write their own checks in `qa.py`, which requires Python knowledge and is not guided by the current tooling. Broader language coverage is planned.
 
 ### Garbage collection (`tracer.db`)
 
