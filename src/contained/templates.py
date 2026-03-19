@@ -1763,21 +1763,20 @@ sys.exit(0)
 USER_PROMPT_SUBMIT_HOOK = '''\
 #!/usr/bin/env python3
 """
-UserPromptSubmit hook — intercepts hash commands before Claude processes them.
+UserPromptSubmit hook — pre-processes hash commands and injects data for Claude to format.
 
-Commands handled here (output-only, non-interactive):
+Commands handled here:
   #db [SQL]              — query tracer.db
   #status                — tail recent audit log
-#update                — show current manifest policy
+  #update                — show current manifest policy
   #update <path>=<value> — set a manifest key by dot-path (e.g. policy.qa.lint=false)
   #review                — list recent completed tasks
   #review <n>            — show narrative + diff summary for task n
 
-On match: output is printed to /dev/tty, hook exits 2 to block Claude.
+On match: data is collected and injected as additionalContext; Claude formats and presents it.
 On miss:  exit 0 — Claude\'s own /help, /compact, /clear, etc. pass through.
 """
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -1813,32 +1812,17 @@ _HOOK_COMMANDS = frozenset({"#db", "#status", "#update", "#review"})
 if cmd_word not in _HOOK_COMMANDS:
     sys.exit(0)  # not a known hash command — pass through to Claude
 
-# ── Open /dev/tty for output ──────────────────────────────────────────────────
-try:
-    _tty = open("/dev/tty", "w")
-except OSError:
-    _tty = sys.stderr
-
-try:
-    from rich.console import Console as _Con
-    con = _Con(file=_tty, highlight=False)
-except Exception:
-    con = None
-
-
-def _p(text="", **kw):
-    if con:
-        con.print(text, **kw)
-    else:
-        print(text, file=_tty)
-
+# ── Collect data for Claude to format ────────────────────────────────────────
+_lines = []        # data lines to pass to Claude
+_instruction = ""  # formatting instruction for Claude
 
 # ── #db ───────────────────────────────────────────────────────────────────────
 if cmd_word == "#db":
     import sqlite3 as _sl
     db_path = Path(cwd) / ".contAIned" / "tracer.db"
     if not db_path.exists():
-        _p("[red]No tracer.db found.[/red] Run [bold]contAIned init[/bold] first.")
+        _lines.append("Error: No tracer.db found. Run `contAIned init` first.")
+        _instruction = "Inform the user that the database does not exist yet."
     else:
         query = args or (
             "SELECT session_id, status, "
@@ -1847,35 +1831,34 @@ if cmd_word == "#db":
             "FROM tasks WHERE parent_session_id IS NULL "
             "ORDER BY started_at DESC LIMIT 10"
         )
+        _lines.append(f"Query: {query}")
+        _lines.append("")
         conn = _sl.connect(str(db_path))
         conn.row_factory = _sl.Row
         try:
             rows = conn.execute(query).fetchall()
         except _sl.Error as exc:
-            _p(f"[red]SQL error:[/red] {exc}")
             rows = []
+            _lines.append(f"SQL error: {exc}")
         finally:
             conn.close()
-        if rows and con:
-            from rich.table import Table as _Table
-            table = _Table(show_header=True, header_style="bold cyan", box=None)
-            for col in rows[0].keys():
-                table.add_column(col)
+        if rows:
+            cols = list(rows[0].keys())
+            _lines.append(" | ".join(cols))
+            _lines.append("-" * (sum(len(c) for c in cols) + 3 * (len(cols) - 1)))
             for row in rows:
-                table.add_row(*[str(v) if v is not None else "" for v in row])
-            con.print(table)
-        elif rows:
-            for row in rows:
-                print(dict(row), file=_tty)
+                _lines.append(" | ".join(str(v) if v is not None else "" for v in row))
         else:
-            _p("[dim]No rows.[/dim]")
+            _lines.append("(no rows)")
+        _instruction = "Format and present these database query results clearly to the user."
 
 # ── #status ───────────────────────────────────────────────────────────────────
 elif cmd_word == "#status":
     import sqlite3 as _sl
     db_path = Path(cwd) / ".contAIned" / "tracer.db"
     if not db_path.exists():
-        _p("[red]No tracer.db found.[/red] Run [bold]contAIned init[/bold] first.")
+        _lines.append("Error: No tracer.db found. Run `contAIned init` first.")
+        _instruction = "Inform the user that the database does not exist yet."
     else:
         conn = _sl.connect(str(db_path))
         conn.row_factory = _sl.Row
@@ -1888,22 +1871,16 @@ elif cmd_word == "#status":
             rows = []
         finally:
             conn.close()
-        if rows and con:
-            from rich.table import Table as _Table
-            table = _Table(
-                show_header=True, header_style="bold cyan", box=None,
-                title="Audit log — last 20 entries (newest first)",
-            )
-            for col in rows[0].keys():
-                table.add_column(col)
+        if rows:
+            _lines.append("Recent audit events (newest first, up to 20):")
+            _lines.append("")
+            _lines.append("ts | session | tool | outcome")
+            _lines.append("-" * 40)
             for row in rows:
-                table.add_row(*[str(v) if v is not None else "" for v in row])
-            con.print(table)
-        elif rows:
-            for row in rows:
-                print(dict(row), file=_tty)
+                _lines.append(" | ".join(str(v) if v is not None else "" for v in row))
         else:
-            _p("[dim]No audit events yet.[/dim]")
+            _lines.append("No audit events found.")
+        _instruction = "Present this audit log clearly, highlighting any denied operations or patterns worth noting."
 
 # ── #update ───────────────────────────────────────────────────────────────────
 elif cmd_word == "#update":
@@ -1911,32 +1888,30 @@ elif cmd_word == "#update":
     _manifest_path = Path(cwd) / ".contAIned" / "manifest.yaml"
 
     if not _manifest_path.exists():
-        _p("[red]No manifest.yaml found.[/red] Run [bold]contAIned init[/bold] first.")
+        _lines.append("Error: No manifest.yaml found. Run `contAIned init` first.")
+        _instruction = "Inform the user that the manifest does not exist yet."
     elif not args:
-        # Display current manifest
         _manifest_text = _manifest_path.read_text()
-        try:
-            from rich.syntax import Syntax as _Syn
-            con.print(_Syn(_manifest_text, "yaml", theme="monokai", line_numbers=False))
-        except Exception:
-            _p(_manifest_text)
+        _lines.append("Current manifest.yaml:")
+        _lines.append("")
+        _lines.append(_manifest_text)
+        _instruction = "Present this policy manifest clearly to the user, formatting the YAML readably and briefly explaining the key settings."
     else:
-        # Parse "dotpath=value" or "dotpath: value"
         if "=" in args:
             _dotpath, _, _raw_val = args.partition("=")
         elif ": " in args:
             _dotpath, _, _raw_val = args.partition(": ")
         else:
-            _p("[red]Usage:[/red] #update <path>=<value>")
-            _p("[dim]Example: [bold]#update policy.qa.lint=false[/bold][/dim]")
-            _p("[dim]Run [bold]#update[/bold] with no arguments to see the current manifest.[/dim]")
+            _lines.append("Usage error: #update <path>=<value>")
+            _lines.append("Example: #update policy.qa.lint=false")
+            _lines.append("Run #update with no arguments to see all available paths.")
             _dotpath = None
+            _instruction = "Explain the correct usage of #update to the user."
 
         if _dotpath is not None:
-            _dotpath  = _dotpath.strip()
-            _raw_val  = _raw_val.strip()
+            _dotpath = _dotpath.strip()
+            _raw_val = _raw_val.strip()
 
-            # Parse value — bool, int, float, or string
             if _raw_val.lower() == "true":
                 _val = True
             elif _raw_val.lower() == "false":
@@ -1950,15 +1925,14 @@ elif cmd_word == "#update":
                     except ValueError:
                         _val = _raw_val
 
-            # Load manifest
             try:
                 _data = _yaml.safe_load(_manifest_path.read_text()) or {}
             except Exception as _e:
-                _p(f"[red]Could not parse manifest.yaml:[/red] {_e}")
                 _data = None
+                _lines.append(f"Error: Could not parse manifest.yaml: {_e}")
+                _instruction = "Inform the user of the manifest parse error."
 
             if _data is not None:
-                # Navigate to parent node
                 _keys = _dotpath.split(".")
                 _node = _data
                 _ok   = True
@@ -1970,23 +1944,28 @@ elif cmd_word == "#update":
 
                 _final = _keys[-1]
                 if not _ok or not isinstance(_node, dict) or _final not in _node:
-                    _p(f"[red]Unknown path:[/red] [bold]{_dotpath}[/bold]")
-                    _p("[dim]Run [bold]#update[/bold] to see all available paths.[/dim]")
+                    _lines.append(f"Unknown path: {_dotpath}")
+                    _lines.append("Run #update with no arguments to see all available paths.")
+                    _instruction = "Inform the user the dotpath was not found and suggest they run #update to see available settings."
                 else:
                     _old = _node[_final]
                     _node[_final] = _val
                     _manifest_path.write_text(
                         _yaml.dump(_data, default_flow_style=False, sort_keys=False, allow_unicode=True)
                     )
-                    _p(f"[green]✓[/green] [bold]{_dotpath}[/bold]: [dim]{_old!r}[/dim] → [bold]{_val!r}[/bold]")
+                    _lines.append(f"Updated: {_dotpath}")
+                    _lines.append(f"  Old value: {_old!r}")
+                    _lines.append(f"  New value: {_val!r}")
                     if _dotpath.startswith("runtime.docker."):
-                        _p("[dim]  Note: Docker resource changes take effect on container restart.[/dim]")
+                        _lines.append("  Note: Docker resource changes take effect on container restart.")
+                    _instruction = "Confirm this manifest update to the user clearly and concisely."
 
 # ── #review ───────────────────────────────────────────────────────────────────
 elif cmd_word == "#review":
     db_path = Path(cwd) / ".contAIned" / "tracer.db"
     if not db_path.exists():
-        _p("[red]No tracer.db found.[/red] Run [bold]contAIned init[/bold] first.")
+        _lines.append("Error: No tracer.db found. Run `contAIned init` first.")
+        _instruction = "Inform the user that the database does not exist yet."
     else:
         try:
             from contained.tracer import contAInedTracer as _ST
@@ -2011,117 +1990,120 @@ elif cmd_word == "#review":
                 for r in _tasks
             ]
         except Exception as _e:
-            _p(f"[red]Tracer error:[/red] {_e}")
+            _lines.append(f"Tracer error: {_e}")
             _tasks = []
+            _instruction = "Inform the user of the tracer error."
 
-        if not _tasks:
-            _p("[dim]No completed tasks found.[/dim]")
-        elif not args:
-            # ── List recent completed tasks ────────────────────────────────
-            _p(f"\\n[bold]Recent tasks ({len(_tasks)}):[/bold]\\n")
-            for _i, _r in enumerate(_tasks, 1):
+        if not _tasks and not _instruction:
+            _lines.append("No completed tasks found.")
+            _instruction = "Inform the user there are no completed tasks yet."
+        elif not _instruction:
+            if not args:
                 from datetime import datetime as _dt, timezone as _tz
-                _ts = _dt.fromtimestamp(_r["ended_at"] / 1000, tz=_tz.utc)
-                _fc_count = len((_r.get("summary") or {}).get("file_changes", []))
-                _has_narrative = bool((_r.get("narrative") or {}).get("closings"))
-                _p(
-                    f"  [bold]{_i}.[/bold] [dim]{_r[\'session_id\'][:12]}…[/dim]"
-                    f"  \\"{_r[\'prompt\'][:60]}\\"  [dim]({_ts.strftime(\'%Y-%m-%d %H:%M\')})[/dim]"
-                    + (f"  [dim]{_fc_count} file(s)[/dim]" if _fc_count else "")
-                    + ("  [dim cyan]narrative[/dim cyan]" if _has_narrative else "")
-                )
-            _p(f"\\n[dim]Type [bold]#review <n>[/bold] to see details for a task.[/dim]")
-        else:
-            # ── Show task detail ───────────────────────────────────────────
-            if not args.isdigit() or int(args) < 1:
-                _p("[red]Usage:[/red] #review <number>  (run #review to see the list)")
-            else:
-                _idx = int(args) - 1
-                if _idx >= len(_tasks):
-                    _p(f"[red]No task {args}.[/red] Type [bold]#review[/bold] to see the list.")
-                else:
-                    _r = _tasks[_idx]
-                    from datetime import datetime as _dt, timezone as _tz
-                    from rich.panel import Panel as _Panel
-                    from rich.text import Text as _Text
+                _lines.append(f"Recent completed tasks ({len(_tasks)}):")
+                _lines.append("")
+                for _i, _r in enumerate(_tasks, 1):
                     _ts = _dt.fromtimestamp(_r["ended_at"] / 1000, tz=_tz.utc)
-                    _hdr = _Text()
-                    _hdr.append("Task", style="bold white")
-                    _hdr.append(f"\\n{_r[\'prompt\'][:120]}", style="dim")
-                    _hdr.append(f"\\n  completed {_ts.strftime(\'%Y-%m-%d %H:%M UTC\')}", style="dim")
-                    con.print(_Panel(_hdr, border_style="blue", expand=False))
-
-                    _narrative = _r.get("narrative") or {}
-                    _closings  = _narrative.get("closings") or []
-                    if _closings:
-                        _p(f"\\n[bold] Narrative[/bold]\\n")
-                        for _turn_i, _closing in enumerate(_closings, 1):
-                            if len(_closings) > 1:
-                                _p(f"  [dim]Turn {_turn_i}:[/dim]")
-                            _p(f"  [dim]{_closing[:400]}[/dim]\\n")
-
-                    _file_changes = (_r.get("summary") or {}).get("file_changes", [])
-                    _action_log   = (_r.get("summary") or {}).get("action_log", [])
-
-                    if _file_changes:
-                        _p(f"\\n[bold] File Changes[/bold]  [dim]({len(_file_changes)} file(s))[/dim]\\n")
-                        for _fc in _file_changes:
-                            _fp  = _fc.get("file_path", "?")
-                            _add = _fc.get("lines_added", 0)
-                            _rem = _fc.get("lines_removed", 0)
-                            _p(f"  [bold cyan]{_fp}[/bold cyan]  [green]+{_add}[/green]  [red]-{_rem}[/red]")
-                            try:
-                                _diff = _tr.diff_task(_r["session_id"], _fp)
-                                _dlines = _diff.splitlines() if _diff else []
-                            except Exception:
-                                _dlines = []
-                            if _dlines:
-                                _dout = _Text()
-                                for _ln in _dlines[:200]:
-                                    if _ln.startswith("+++") or _ln.startswith("---"):
-                                        _dout.append(_ln + "\\n", style="dim")
-                                    elif _ln.startswith("@@"):
-                                        _dout.append(_ln + "\\n", style="cyan")
-                                    elif _ln.startswith("+"):
-                                        _dout.append(_ln + "\\n", style="green")
-                                    elif _ln.startswith("-"):
-                                        _dout.append(_ln + "\\n", style="red")
-                                    else:
-                                        _dout.append(_ln + "\\n")
-                                if len(_dlines) > 200:
-                                    _dout.append("  … (diff truncated)\\n", style="dim")
-                                con.print(_dout)
+                    _fc_count = len((_r.get("summary") or {}).get("file_changes", []))
+                    _has_narrative = bool((_r.get("narrative") or {}).get("closings"))
+                    _entry = f"{_i}. {_r[\'session_id\'][:12]}  \\"{_r[\'prompt\'][:60]}\\"  ({_ts.strftime(\'%Y-%m-%d %H:%M\')})"
+                    if _fc_count:
+                        _entry += f"  [{_fc_count} file(s)]"
+                    if _has_narrative:
+                        _entry += "  [has narrative]"
+                    _lines.append(_entry)
+                _instruction = (
+                    "Present this list of completed tasks clearly. "
+                    "Remind the user they can type `#review <n>` to see full detail for a task."
+                )
+            else:
+                if not args.isdigit() or int(args) < 1:
+                    _lines.append("Usage error: #review <number>  (run #review to see the list)")
+                    _instruction = "Explain the correct usage of #review to the user."
+                else:
+                    _idx = int(args) - 1
+                    if _idx >= len(_tasks):
+                        _lines.append(f"No task {args}. Run #review to see the list.")
+                        _instruction = "Inform the user the task number is out of range."
                     else:
-                        _p("\\n[dim]  No file changes recorded.[/dim]\\n")
+                        _r = _tasks[_idx]
+                        from datetime import datetime as _dt, timezone as _tz
+                        _ts = _dt.fromtimestamp(_r["ended_at"] / 1000, tz=_tz.utc)
+                        _lines.append(f"Task {args}:")
+                        _lines.append(f"  Original user prompt: {_r[\'prompt\']}")
+                        _lines.append(f"  Completed: {_ts.strftime(\'%Y-%m-%d %H:%M UTC\')}")
 
-                    _notable = [
-                        _e for _e in _action_log
-                        if _e.get("tool") in ("Bash", "Agent") or _e.get("outcome") == "denied"
-                    ]
-                    if _notable:
-                        _p(f"[bold] Action Log[/bold]  [dim]({len(_notable)} entries)[/dim]\\n")
-                        for _e in _notable[-20:]:
-                            _inp = _e.get("input") or {}
-                            if _e.get("tool") == "Bash":
-                                _cmd = (_inp.get("command") or "")[:80]
-                                _ec  = _inp.get("exit_code")
-                                _p(f"  ● bash: {_cmd}" + (f" (exit: {_ec})" if _ec is not None else ""))
-                            elif _e.get("tool") == "Agent":
-                                _p(f"  ● agent [{_inp.get(\'agent_type\') or \'agent\'}]: {(_inp.get(\'prompt_head\') or \'\')[:60]}")
-                            elif _e.get("outcome") == "denied":
-                                _p(f"  [red]✗ {_e.get(\'tool\')} denied: {(_e.get(\'reason\') or \'\')[:80]}[/red]")
-                        _p()
+                        _narrative = _r.get("narrative") or {}
+                        _closings  = _narrative.get("closings") or []
+                        if _closings:
+                            _lines.append("")
+                            _lines.append("Agent narrative (closing statements by turn):")
+                            for _turn_i, _closing in enumerate(_closings, 1):
+                                if len(_closings) > 1:
+                                    _lines.append(f"  [Turn {_turn_i}]")
+                                _lines.append(f"  {_closing}")
 
-print("\\n" * 5, file=_tty, end="")
-if _tty is not sys.stderr:
-    _tty.flush()
-    _tty.close()
+                        _file_changes = (_r.get("summary") or {}).get("file_changes", [])
+                        _action_log   = (_r.get("summary") or {}).get("action_log", [])
 
-# Let tty output flush to the terminal before the block decision is rendered.
-import time as _time
-_time.sleep(0.5)
+                        if _file_changes:
+                            _lines.append("")
+                            _lines.append(f"File changes ({len(_file_changes)}):")
+                            for _fc in _file_changes:
+                                _fp  = _fc.get("file_path", "?")
+                                _add = _fc.get("lines_added", 0)
+                                _rem = _fc.get("lines_removed", 0)
+                                _lines.append(f"  {_fp}  +{_add}/-{_rem}")
+                                try:
+                                    _diff = _tr.diff_task(_r["session_id"], _fp)
+                                    _dlines = _diff.splitlines() if _diff else []
+                                except Exception:
+                                    _dlines = []
+                                for _ln in _dlines[:200]:
+                                    _lines.append(f"  {_ln}")
+                                if len(_dlines) > 200:
+                                    _lines.append("  ... (diff truncated)")
+                        else:
+                            _lines.append("")
+                            _lines.append("No file changes recorded.")
 
-import json as _json
-print(_json.dumps({"decision": "block", "reason": "Handled by contAIned"}))
+                        _notable = [
+                            _e for _e in _action_log
+                            if _e.get("tool") in ("Bash", "Agent") or _e.get("outcome") == "denied"
+                        ]
+                        if _notable:
+                            _lines.append("")
+                            _lines.append(f"Notable actions ({len(_notable)}):")
+                            for _e in _notable[-20:]:
+                                _inp = _e.get("input") or {}
+                                if _e.get("tool") == "Bash":
+                                    _cmd = (_inp.get("command") or "")[:80]
+                                    _ec  = _inp.get("exit_code")
+                                    _entry = f"  bash: {_cmd}"
+                                    if _ec is not None:
+                                        _entry += f" (exit: {_ec})"
+                                    _lines.append(_entry)
+                                elif _e.get("tool") == "Agent":
+                                    _lines.append(f"  agent [{_inp.get(\'agent_type\') or \'agent\'}]: {(_inp.get(\'prompt_head\') or \'\')[:60]}")
+                                elif _e.get("outcome") == "denied":
+                                    _lines.append(f"  DENIED: {_e.get(\'tool\')} — {(_e.get(\'reason\') or \'\')[:80]}")
+
+                        _instruction = (
+                            "Using the original user prompt, the agent\'s narrative, and the list of "
+                            "actions taken, write a clear and concise justification of why each action "
+                            "was necessary and sufficient to fulfil what the user asked. Be specific — "
+                            "connect each step directly to the requirement it addressed."
+                        )
+
+# ── Pass data to Claude for formatting ────────────────────────────────────────
+_context = "\\n".join(_lines)
+print(json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": (
+            f"[contAIned hook data for \'{prompt}\']\\n\\n{_context}\\n\\n{_instruction}"
+        ),
+    },
+}))
 sys.exit(0)
 '''

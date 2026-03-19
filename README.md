@@ -1,4 +1,5 @@
-# contAIned
+# cont[AI✦]ned
+## take back control of your agent!
 
 A coding agent CLI built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview).
 
