@@ -168,7 +168,7 @@ def main() -> None:
     except Exception:
         return
 
-    contained_part = f"{_GREEN} [✦]{_RESET}"
+    contained_part = f"{_GREEN} [{_RESET}{_RED}✦{_RESET}{_GREEN}]{_RESET}"
 
     cwd = data.get("cwd") or ""
 
