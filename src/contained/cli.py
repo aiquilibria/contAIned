@@ -5,6 +5,7 @@ Commands:
   contAIned        Start an interactive REPL session (default when no subcommand given)
   contAIned init   Initialise a workspace in the current directory
 """
+
 from pathlib import Path
 
 import click
@@ -30,13 +31,14 @@ def _find_root() -> Path:
 def main(ctx: click.Context) -> None:
     """contAIned — a contAIned coding agent CLI."""
     if ctx.invoked_subcommand is None:
-        from contained.runner import _print_splash
-        from contained.repl import start_repl
+        from contained.session import _print_splash, start_repl
+
         _print_splash()
         start_repl(_find_root())
 
 
 # ── init ──────────────────────────────────────────────────────────────────────
+
 
 @main.command()
 @click.argument(
@@ -45,13 +47,15 @@ def main(ctx: click.Context) -> None:
     type=click.Path(file_okay=False, writable=True, resolve_path=True),
 )
 @click.option(
-    "--force", "-f",
+    "--force",
+    "-f",
     is_flag=True,
     default=False,
     help="Re-run the setup wizard even if already initialised.",
 )
 @click.option(
-    "--rebuild", "-r",
+    "--rebuild",
+    "-r",
     is_flag=True,
     default=False,
     help="Force a full Docker image rebuild even if the image is already up to date.",
@@ -68,9 +72,10 @@ def init(directory: str, force: bool, rebuild: bool) -> None:
       contAIned init            # initialise in current directory
       contAIned init ./myrepo   # initialise in a specific directory
       contAIned init --force    # re-run setup wizard (reconfigure model, docker, etc.)
-      contAIned init --rebuild  # force-rebuild the Docker image without re-running wizard
+      contAIned init --rebuild  # force-rebuild the Docker image
     """
-    from contained.runner import _print_splash
     from contained.init import run_init
+    from contained.session import _print_splash
+
     _print_splash()
     run_init(Path(directory), force=force, rebuild=rebuild)

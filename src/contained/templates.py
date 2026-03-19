@@ -175,7 +175,9 @@ def main() -> None:
     # ── Git branch + uncommitted diff stat ───────────────────────────────────
     git_part = ""
     if cwd and _git(cwd, "rev-parse", "--git-dir"):
-        branch = _git(cwd, "branch", "--show-current") or _git(cwd, "rev-parse", "--short", "HEAD")
+        branch = _git(cwd, "branch", "--show-current") or _git(
+            cwd, "rev-parse", "--short", "HEAD"
+        )
         shortstat = _git(cwd, "diff", "--shortstat", "HEAD")
         ins = del_ = 0
         for token in shortstat.split(","):
@@ -212,7 +214,15 @@ def main() -> None:
             bg, fg = _BG_RED, _FG_WHITE
         ctx_part = f"{bg}{fg} ctx {ctx}% {_RESET}"
 
-    parts = [p for p in (contained_part, git_part, cost_part, ctx_part) if p]
+    # ── Session ID ────────────────────────────────────────────────────────────
+    session_part = ""
+    session_id = data.get("session_id") or ""
+    if session_id:
+        session_part = session_id[:8]
+
+    parts = [
+        p for p in (contained_part, git_part, cost_part, ctx_part, session_part) if p
+    ]
     if parts:
         print("  │  ".join(parts))
 
@@ -263,6 +273,23 @@ policy:
     network_exfiltration: block     # curl / wget / nc / ncat
     git_mutations:        escalate  # git push / push --force → operator approval required
     package_publish:      block     # npm publish / pip upload / twine upload
+
+  # ── Egress filtering (outbound network proxy) ─────────────────────────────────
+  # When enabled, a filtering proxy sidecar container is started alongside the
+  # agent.  All outbound HTTP/HTTPS traffic routed through HTTP_PROXY /
+  # HTTPS_PROXY is filtered against the domain allowlist; everything else is
+  # rejected with 403 Forbidden.
+  #
+  # api.anthropic.com must remain in allowed_domains — the agent cannot function
+  # without it.  Add project-specific domains (package registries, APIs) as needed.
+  #
+  # Note: enforcement covers processes that honour HTTP_PROXY / HTTPS_PROXY.
+  # For full kernel-level enforcement add iptables redirect rules on the Docker
+  # bridge — see docs/egress-and-exfiltration-protection.md.
+  egress:
+    enabled: false
+    allowed_domains:
+      - api.anthropic.com    # required — Anthropic API
 
   # ── Audit logging ─────────────────────────────────────────────────────────────
   # Always enabled — cannot be disabled.
@@ -965,16 +992,9 @@ def run(cmd):
     return result.returncode, result.stdout + result.stderr
 
 
-# ── Ensure dev dependencies are installed (pytest, pytest-cov, etc.) ──────────
-# Run uv sync --dev silently so that subsequent uv run calls can find pytest
-# even if the venv is missing or stale.  Failures are non-fatal — if uv is not
-# present the individual check steps will handle missing tools gracefully.
-if (TASK_DIR / "pyproject.toml").exists() or (TASK_DIR / "uv.lock").exists():
-    subprocess.run(
-        ["uv", "sync", "--dev", "--quiet"],
-        cwd=TASK_DIR,
-        capture_output=True,
-    )
+# Dev dependencies (pytest, pytest-cov, pyright, ruff) are pre-installed in
+# the container image.  No uv sync needed — and uv sync would fail inside the
+# container because PyPI is blocked by the egress proxy.
 
 
 def block(reason):
@@ -996,7 +1016,7 @@ failures = []
 # ── Syntax check ──────────────────────────────────────────────────────────────
 if qa["syntax"]:
     for f in py_files:
-        code, out = run(["uv", "run", "python", "-m", "py_compile", str(f)])
+        code, out = run(["uv", "run", "--no-sync", "python", "-m", "py_compile", str(f)])
         if code != 0:
             failures.append({"check": "syntax", "file": str(f.relative_to(TASK_DIR)), "output": out})
     if failures:
@@ -1036,7 +1056,7 @@ if qa["type"] and py_files:
 if qa["test"]:
     tests_dir = TASK_DIR / "tests"
     if tests_dir.is_dir():
-        code, out = run(["uv", "run", "pytest", str(tests_dir),
+        code, out = run(["uv", "run", "--no-sync", "pytest", str(tests_dir),
                          "-x", "--tb=short", "-q"])
         # Exit code 5 means pytest collected no tests — not a failure.
         if code not in (0, 5):
@@ -1047,13 +1067,13 @@ if qa["coverage"]:
     tests_dir = TASK_DIR / "tests"
     if tests_dir.is_dir():
         # Check that pytest-cov is available before attempting the run.
-        probe_code, _ = run(["uv", "run", "python", "-c", "import pytest_cov"])
+        probe_code, _ = run(["uv", "run", "--no-sync", "python", "-c", "import pytest_cov"])
         if probe_code != 0:
             print("pytest-cov not installed — skipping coverage check", file=sys.stderr)
         else:
             threshold = int(qa.get("coverage_threshold", 80))
             code, out = run([
-                "uv", "run", "pytest", str(tests_dir),
+                "uv", "run", "--no-sync", "pytest", str(tests_dir),
                 "--cov", "--cov-report=term-missing",
                 f"--cov-fail-under={threshold}",
                 "-q",
@@ -1371,18 +1391,20 @@ sys.exit(0)
 SUMMARIZER_HOOK = '''\
 #!/usr/bin/env python3
 """
-Stop hook — runs QA checks, builds a diff summary, and presents it to the operator.
+Stop hook — runs QA checks, builds a diff summary, and has Claude present it.
 
 Fires only for root-agent Stop events (not SubagentStop — that is wired to
-subagent_stop.py).  This is the sole Stop hook; it owns both QA and approval.
+subagent_stop.py).  This is the sole Stop hook; it owns both QA and summary.
 
 Flow:
-  1. Run qa.py inline — if any check fails, block and return to agent immediately.
-  2. Defensive child check: poll up to 3 × 200 ms for open sub-agent sessions.
-  3. Compute per-file unified diffs across the whole agent tree.
-  4. Build action log from recent audit events (Bash, Agent, denied calls).
-  5. Store JSON summary in tasks.summary; set status = closed.
-  6. Render rich-formatted summary to /dev/tty (bypasses the SDK\'s stderr pipe).
+  1. Sentinel check: if task already "closed", exit 0 (second Stop — let it through).
+  2. Run qa.py inline — if any check fails, block and return to agent immediately.
+  3. Defensive child check: poll up to 3 × 200 ms for open sub-agent sessions.
+  4. Compute per-file unified diffs across the whole agent tree.
+  5. Build action log from recent audit events (Bash, Agent, denied calls).
+  6. Store JSON summary in tasks.summary; set status = closed.
+  7. Block with structured summary data — Claude formats and presents it, then stops.
+  8. Second Stop fires; sentinel (step 1) sees "closed" and exits 0 cleanly.
 """
 import json
 import subprocess
@@ -1442,6 +1464,19 @@ try:
 except Exception:
     # If the tracer is unavailable the agent should still be allowed to stop.
     sys.exit(0)
+
+# ── Sentinel: second Stop after Claude has already presented the summary ───────
+# The first pass stores the summary and blocks with it for Claude to format.
+# On the second Stop (after Claude has presented and stopped again), the task
+# is already "closed" — exit 0 so the agent stops cleanly.
+try:
+    _status_row = tracer.conn.execute(
+        "SELECT status FROM tasks WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if _status_row and _status_row[0] == "closed":
+        sys.exit(0)
+except Exception:
+    pass
 
 # ── Defensive child check ──────────────────────────────────────────────────────
 # The SDK fires SubagentStop for all children before the root Stop, but under
@@ -1636,127 +1671,36 @@ try:
 except Exception:
     pass
 
-# ── Render summary to terminal ─────────────────────────────────────────────────
-# Write directly to /dev/tty so the approval UI is always visible even when the
-# SDK captures the hook\'s stderr (which it typically does for hook-result parsing).
-try:
-    _tty_w = open("/dev/tty", "w")
-except OSError:
-    _tty_w = sys.stderr  # fallback for CI / non-interactive environments
+# ── Pass summary to Claude for formatting and presentation ────────────────────
+# Block the stop and hand Claude the structured summary data. Claude formats
+# and presents it to the operator, then stops again. The sentinel check at the
+# top of this hook catches that second Stop and exits 0 cleanly.
+_summary_for_presentation = {
+    "task": task_prompt,
+    "file_changes": [
+        {
+            "path":          d["file_path"],
+            "change_type":   d["change_type"],
+            "lines_added":   d["lines_added"],
+            "lines_removed": d["lines_removed"],
+            "reason":        d["reason"],
+        }
+        for d in file_diffs
+    ],
+    "action_log_stats": {
+        "bash":      sum(1 for e in action_log if e["tool"] == "Bash"),
+        "sub_agent": sum(1 for e in action_log if e["tool"] == "Agent"),
+        "denied":    sum(1 for e in action_log if e["outcome"] == "denied"),
+    },
+    "incomplete_children": open_children,
+}
 
-try:
-    from rich.console import Console  # noqa: PLC0415
-    from rich.panel   import Panel    # noqa: PLC0415
-    from rich.text    import Text     # noqa: PLC0415
-
-    con = Console(file=_tty_w, highlight=False)
-
-    # Header
-    started_str = ""
-    if task_started:
-        from datetime import datetime, timezone  # noqa: PLC0415
-        dt = datetime.fromtimestamp(task_started / 1000, tz=timezone.utc)
-        started_str = "  started " + dt.strftime("%Y-%m-%d %H:%M UTC")
-
-    # header = Text()
-    # header.append("Task Review", style="bold white")
-    # header.append("\\n")
-    # header.append(task_prompt[:120], style="dim")
-    # if started_str:
-    #     header.append("\\n" + started_str, style="dim")
-    # if open_children:
-    #     header.append("\\n[!] " + str(len(open_children)) + " sub-agent(s) still open — diffs may be incomplete", style="yellow")
-    # con.print(Panel(header, border_style="blue", expand=False))
-
-    # ── File Changes — git-status-like format ──────────────────────────────────
-    if file_diffs:
-        con.print("\\n[bold] Changes[/bold]  [dim](" + str(len(file_diffs)) + " file(s))[/dim]\\n")
-
-        # Status letter mapping
-        _STATUS_LABEL = {"new file": "A", "modified": "M", "deleted": "D"}
-        _STATUS_STYLE = {"new file": "green", "modified": "yellow", "deleted": "red"}
-
-        for fd in file_diffs:
-            ct    = fd.get("change_type", "modified")
-            label = _STATUS_LABEL.get(ct, "M")
-            style = _STATUS_STYLE.get(ct, "yellow")
-            stat_str = (
-                "[green]+" + str(fd["lines_added"]) + "[/green]"
-                "  [red]-" + str(fd["lines_removed"]) + "[/red]"
-            )
-            reason_str = fd.get("reason", "")
-            # Print the status line: "  M  path/to/file  +N -N  (reason)"
-            status_line = (
-                "  [" + style + "][bold]" + label + "[/bold][/" + style + "]"
-                "  [bold cyan]" + fd["file_path"] + "[/bold cyan]"
-                "  " + stat_str
-            )
-            if reason_str and reason_str != ct:
-                status_line += "  [dim](" + reason_str + ")[/dim]"
-            con.print(status_line)
-
-    else:
-        con.print("\\n[dim] No file changes recorded.[/dim]\\n")
-
-    # ── Task Completion ────────────────────────────────────────────────────────
-    if file_diffs:
-        _new_files  = [fd for fd in file_diffs if fd.get("change_type") == "new file"]
-        _mod_files  = [fd for fd in file_diffs if fd.get("change_type") == "modified"]
-        _del_files  = [fd for fd in file_diffs if fd.get("change_type") == "deleted"]
-        _parts = []
-        if _new_files:
-            _parts.append(str(len(_new_files)) + " file(s) created")
-        if _mod_files:
-            _parts.append(str(len(_mod_files)) + " file(s) modified")
-        if _del_files:
-            _parts.append(str(len(_del_files)) + " file(s) deleted")
-        _total_added   = sum(fd["lines_added"]   for fd in file_diffs)
-        _total_removed = sum(fd["lines_removed"] for fd in file_diffs)
-        _change_summary = ", ".join(_parts) if _parts else str(len(file_diffs)) + " file(s) changed"
-        con.print("[bold] Task Completion[/bold]\\n")
-        con.print(
-            "  The task [dim]\\"" + task_prompt[:80] + "\\"[/dim] is complete.\\n"
-            "  [green]" + _change_summary + "[/green]  "
-            "([green]+" + str(_total_added) + "[/green] / [red]-" + str(_total_removed) + "[/red] lines total).\\n"
-        )
-        if _new_files:
-            con.print("  [bold]New files:[/bold]")
-            for fd in _new_files:
-                con.print("    [green]" + fd["file_path"] + "[/green]")
-        if _mod_files:
-            con.print("  [bold]Modified:[/bold]")
-            for fd in _mod_files:
-                con.print("    [yellow]" + fd["file_path"] + "[/yellow]  [dim](" + fd.get("reason", "") + ")[/dim]")
-        if _del_files:
-            con.print("  [bold]Deleted:[/bold]")
-            for fd in _del_files:
-                con.print("    [red]" + fd["file_path"] + "[/red]")
-        con.print("")
-
-    # Action log
-    if action_log:
-        bash_count   = sum(1 for e in action_log if e["tool"] == "Bash")
-        agent_count  = sum(1 for e in action_log if e["tool"] == "Agent")
-        denied_count = sum(1 for e in action_log if e["outcome"] == "denied")
-        parts = []
-        if bash_count:
-            parts.append(str(bash_count) + " bash")
-        if agent_count:
-            parts.append(str(agent_count) + " sub-agent")
-        if denied_count:
-            parts.append(str(denied_count) + " denied")
-        con.print("[bold] Action Log[/bold]  [dim](" + ", ".join(parts) + ")[/dim]")
-
-    con.print("")
-
-except Exception:
-    # Fall back to plain output if rich is unavailable.
-    print("\\n=== Task Review: " + task_prompt[:80] + " ===", file=_tty_w, flush=True)
-    print(str(len(file_diffs)) + " file(s) changed.", file=_tty_w)
-    print("", file=_tty_w)
-
-if _tty_w is not sys.stderr:
-    _tty_w.close()
+_reason = (
+    "QA checks passed. The task is complete.\\n"
+    "Present the following completion summary clearly to the operator, then stop.\\n\\n"
+    + json.dumps(_summary_for_presentation, indent=2)
+)
+print(json.dumps({"decision": "block", "reason": _reason}))
 sys.exit(0)
 '''
 

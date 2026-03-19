@@ -22,7 +22,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 # Install contAIned from the distributed package
 COPY . /opt/contAIned
-RUN uv pip install --system --python python3.13 --no-cache --break-system-packages /opt/contAIned
+RUN uv pip install --system --python python3.13 --no-cache --break-system-packages "/opt/contAIned[dev]"
 
 # Create a non-root user whose UID/GID matches the host operator.
 # The GID may already exist in the base image (e.g., macOS staff group is 20,

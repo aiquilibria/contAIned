@@ -8,12 +8,14 @@ bind-mount; the rest of the host filesystem is invisible.
 This module is an implementation detail of the REPL entry point and is not
 part of the public API.
 """
+
 from __future__ import annotations
 
 import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -43,7 +45,7 @@ def _parse_env_file(env_file: Path) -> dict[str, str]:
             continue
         # Strip optional 'export ' prefix
         if line.startswith("export "):
-            line = line[len("export "):].strip()
+            line = line[len("export ") :].strip()
         # Must contain '=' to be a valid assignment
         if "=" not in line:
             continue
@@ -104,11 +106,21 @@ class DockerRunner:
     workspace:
         Absolute path to the workspace root (bound to ``/workspace`` inside
         the container).
+    policy:
+        The ``policy`` dict from ``.contAIned/manifest.yaml``.  Used to
+        configure the egress filtering proxy when ``policy.egress.enabled``
+        is true.
     """
 
-    def __init__(self, docker_config: dict, workspace: Path) -> None:
+    def __init__(
+        self,
+        docker_config: dict,
+        workspace: Path,
+        policy: dict | None = None,
+    ) -> None:
         self.config = docker_config
         self.workspace = workspace.resolve()
+        self.policy = policy or {}
 
     # ── internal helpers ──────────────────────────────────────────────────────
 
@@ -132,26 +144,35 @@ class DockerRunner:
         #   ~/.claude.json   — main config (model prefs, auth tokens, etc.)
         # Both are created on the host if absent so that a first-time
         # in-container login writes back to the host automatically.
-        host_claude_dir  = Path.home() / ".claude"
+        host_claude_dir = Path.home() / ".claude"
         host_claude_json = Path.home() / ".claude.json"
         host_claude_dir.mkdir(exist_ok=True)
         if not host_claude_json.exists():
             host_claude_json.touch()  # Docker needs a file, not a directory
 
         args = [
-            docker_bin, "run", "--rm",
-            "--name", name,
-            "--volume", f"{self.workspace}:/workspace",
-            "--volume", f"{host_claude_dir}:/home/agent/.claude",
-            "--volume", f"{host_claude_json}:/home/agent/.claude.json",
-            "--volume", f"{config_volume}:/home/agent/.config/agent",
-            "--env", f"ANTHROPIC_API_KEY={api_key}",
+            docker_bin,
+            "run",
+            "--rm",
+            "--name",
+            name,
+            "--volume",
+            f"{self.workspace}:/workspace",
+            "--volume",
+            f"{host_claude_dir}:/home/agent/.claude",
+            "--volume",
+            f"{host_claude_json}:/home/agent/.claude.json",
+            "--volume",
+            f"{config_volume}:/home/agent/.config/agent",
+            "--env",
+            f"ANTHROPIC_API_KEY={api_key}",
             # Prevent the in-container contAIned process from re-entering docker
             # mode when it reads the workspace manifest.  Without this flag
             # contAIned repl inside the container would read the host manifest
             # (mode: docker), call _find_docker(), fail to find docker inside
             # the container, and crash with "Docker executable not found".
-            "--env", "contAIned_FORCE_LOCAL=1",
+            "--env",
+            "contAIned_FORCE_LOCAL=1",
         ]
         # Inject workspace .env file if present so project secrets are
         # available inside the container without being baked into the image.
@@ -166,13 +187,116 @@ class DockerRunner:
         if env_file.is_file():
             for key, value in _parse_env_file(env_file).items():
                 args += ["--env", f"{key}={value}"]
+        # If egress filtering is enabled, point the agent at the proxy sidecar.
+        egress = self.policy.get("egress", {})
+        if egress.get("enabled", False):
+            proxy_url = f"http://{self._proxy_name()}:3128"
+            args += [
+                "--env",
+                f"HTTP_PROXY={proxy_url}",
+                "--env",
+                f"HTTPS_PROXY={proxy_url}",
+                "--env",
+                "NO_PROXY=localhost,127.0.0.1",
+            ]
+
         args += [
-            "--network", network,
-            "--memory", memory,
-            "--cpus", cpus,
+            "--network",
+            network,
+            "--memory",
+            memory,
+            "--cpus",
+            cpus,
             image,
         ]
         return args
+
+    # ── proxy sidecar ─────────────────────────────────────────────────────────
+
+    def _proxy_name(self) -> str:
+        """Deterministic name for the proxy sidecar container."""
+        return f"contAIned-proxy-{self.workspace.name}"
+
+    def _start_proxy(self) -> str | None:
+        """
+        Start the egress filtering proxy sidecar if ``policy.egress.enabled``
+        is true.
+
+        The proxy is a second container running ``python3 -m contained.proxy``
+        inside the same ``contained:latest`` image, with the allowed domain
+        list passed as CLI arguments.  It listens on port 3128 of the Docker
+        network, and the agent container reaches it by container name.
+
+        Returns the container name on success, or ``None`` if egress filtering
+        is disabled or the proxy fails to start (a warning is printed but the
+        session continues).
+        """
+        egress = self.policy.get("egress", {})
+        if not egress.get("enabled", False):
+            return None
+
+        docker_bin = _find_docker()
+        domains: list[str] = egress.get("allowed_domains", ["api.anthropic.com"])
+        image = self.config.get("image", "contained:latest")
+        network = self.config.get("network", "contAIned-net")
+        name = self._proxy_name()
+
+        # Remove any stale proxy container left over from a crashed session.
+        subprocess.run([docker_bin, "rm", "-f", name], capture_output=True)
+
+        cmd = [
+            docker_bin,
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            name,
+            "--network",
+            network,
+            "--entrypoint",
+            "python3",
+            image,
+            "-m",
+            "contained.proxy",
+        ] + domains
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            import sys as _sys
+
+            print(
+                f"[contAIned] Warning: egress proxy failed to start — "
+                f"{result.stderr.strip() or result.stdout.strip()}",
+                file=_sys.stderr,
+            )
+            return None
+
+        # Poll until the container is confirmed running (up to 5 s).
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            check = subprocess.run(
+                [docker_bin, "inspect", "--format", "{{.State.Running}}", name],
+                capture_output=True,
+                text=True,
+            )
+            if check.stdout.strip() == "true":
+                # Give the Python process inside a moment to bind the port.
+                time.sleep(0.3)
+                return name
+            time.sleep(0.1)
+
+        import sys as _sys
+
+        print(
+            "[contAIned] Warning: egress proxy did not become ready in time.",
+            file=_sys.stderr,
+        )
+        return None
+
+    def _stop_proxy(self, name: str) -> None:
+        """Stop and remove the proxy sidecar container."""
+        docker_bin = _find_docker()
+        subprocess.run([docker_bin, "rm", "-f", name], capture_output=True)
 
     # ── public interface ──────────────────────────────────────────────────────
 
@@ -180,12 +304,21 @@ class DockerRunner:
         """
         Execute ``contAIned`` inside a Docker container with an interactive TTY
         and block until the session ends.  Exits with the container's exit code.
-        """
-        args = self._base_args()
-        # Insert -it (interactive TTY) before the image name
-        image = self.config.get("image", "contained:latest")
-        idx = args.index(image)
-        args.insert(idx, "-it")
 
-        result = subprocess.run(args)
-        sys.exit(result.returncode)
+        If egress filtering is enabled, a proxy sidecar container is started
+        before the agent and stopped (regardless of how the session ends) after.
+        """
+        proxy_name = self._start_proxy()
+        exit_code = 1
+        try:
+            args = self._base_args()
+            # Insert -it (interactive TTY) before the image name
+            image = self.config.get("image", "contained:latest")
+            idx = args.index(image)
+            args.insert(idx, "-it")
+            result = subprocess.run(args)
+            exit_code = result.returncode
+        finally:
+            if proxy_name:
+                self._stop_proxy(proxy_name)
+        sys.exit(exit_code)

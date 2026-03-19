@@ -24,26 +24,21 @@ Coverage:
     - Task creation and pending review surfacing
     - Stale open-task detection
 """
+
 from __future__ import annotations
 
 import json
-import os
-import sqlite3
+
+# ---------------------------------------------------------------------------
+# Helpers / fixtures
+# ---------------------------------------------------------------------------
 import threading
 import time
 import zlib
 from pathlib import Path
 from typing import Optional
-from unittest.mock import MagicMock, patch
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# Helpers / fixtures
-# ---------------------------------------------------------------------------
-
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from contained.tracer import contAInedTracer
 
@@ -61,16 +56,19 @@ def tracer(db_path: str) -> contAInedTracer:
 @pytest.fixture()
 def tmp_file(tmp_path: Path):
     """Return a helper that creates a file with given content."""
+
     def _make(name: str, content: str = "hello\n") -> Path:
         p = tmp_path / name
         p.write_text(content)
         return p
+
     return _make
 
 
 # ---------------------------------------------------------------------------
 # Unit — constructor / schema
 # ---------------------------------------------------------------------------
+
 
 class TestInit:
     def test_db_file_created(self, db_path: str) -> None:
@@ -101,9 +99,11 @@ class TestInit:
 # Unit — blob store
 # ---------------------------------------------------------------------------
 
+
 class TestBlobStore:
     def test_store_returns_sha256(self, tracer: contAInedTracer) -> None:
         import hashlib
+
         content = b"hello world"
         h = tracer._store_blob(content)
         assert h == hashlib.sha256(content).hexdigest()
@@ -146,8 +146,11 @@ class TestBlobStore:
 # Unit — capture_baseline
 # ---------------------------------------------------------------------------
 
+
 class TestCaptureBaseline:
-    def test_new_file_returns_none(self, tracer: contAInedTracer, tmp_path: Path) -> None:
+    def test_new_file_returns_none(
+        self, tracer: contAInedTracer, tmp_path: Path
+    ) -> None:
         nonexistent = str(tmp_path / "new.txt")
         tracer.open_task("S1", "task")
         result = tracer.capture_baseline("S1", nonexistent)
@@ -217,9 +220,11 @@ class TestCaptureBaseline:
 # Unit — track_write
 # ---------------------------------------------------------------------------
 
+
 class TestTrackWrite:
     def test_returns_hash(self, tracer: contAInedTracer) -> None:
         import hashlib
+
         tracer.open_task("S1", "task")
         h = tracer.track_write("S1", "foo.py", b"content")
         assert h == hashlib.sha256(b"content").hexdigest()
@@ -238,7 +243,9 @@ class TestTrackWrite:
         count = tracer.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
         assert count == 3
 
-    def test_identical_content_deduplicates_blobs(self, tracer: contAInedTracer) -> None:
+    def test_identical_content_deduplicates_blobs(
+        self, tracer: contAInedTracer
+    ) -> None:
         tracer.open_task("S1", "task")
         tracer.track_write("S1", "a.py", b"same")
         tracer.track_write("S1", "b.py", b"same")
@@ -248,9 +255,7 @@ class TestTrackWrite:
     def test_metadata_stored_as_json(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.track_write("S1", "a.py", b"x", metadata={"pass": 1})
-        row = tracer.conn.execute(
-            "SELECT metadata FROM snapshots"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT metadata FROM snapshots").fetchone()
         assert json.loads(row[0]) == {"pass": 1}
 
 
@@ -258,14 +263,19 @@ class TestTrackWrite:
 # Unit — log_event / _extract_trace_unit
 # ---------------------------------------------------------------------------
 
+
 class TestLogEvent:
     def _events(self, tracer: contAInedTracer) -> list[dict]:
         rows = tracer.conn.execute(
             "SELECT tool, input, outcome, reason FROM audit_events"
         ).fetchall()
         return [
-            {"tool": r[0], "input": json.loads(r[1]) if r[1] else None,
-             "outcome": r[2], "reason": r[3]}
+            {
+                "tool": r[0],
+                "input": json.loads(r[1]) if r[1] else None,
+                "outcome": r[2],
+                "reason": r[3],
+            }
             for r in rows
         ]
 
@@ -284,7 +294,8 @@ class TestLogEvent:
     def test_multiedit_stores_file_paths(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.log_event(
-            "S1", "MultiEdit",
+            "S1",
+            "MultiEdit",
             {"edits": [{"file_path": "a.py"}, {"file_path": "b.py"}]},
             "success",
         )
@@ -301,7 +312,9 @@ class TestLogEvent:
     def test_bash_tool_stores_command_and_stdout(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.log_event(
-            "S1", "Bash", {"command": "ls -la"},
+            "S1",
+            "Bash",
+            {"command": "ls -la"},
             "success",
             tool_response={"exit_code": 0, "stdout": "total 4\n"},
         )
@@ -314,7 +327,9 @@ class TestLogEvent:
         tracer.open_task("S1", "task")
         long_out = "x" * 1000
         tracer.log_event(
-            "S1", "Bash", {"command": "x"},
+            "S1",
+            "Bash",
+            {"command": "x"},
             "success",
             tool_response={"exit_code": 0, "stdout": long_out},
         )
@@ -324,7 +339,8 @@ class TestLogEvent:
     def test_agent_tool_stores_type_and_prompt(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.log_event(
-            "S1", "Agent",
+            "S1",
+            "Agent",
             {"subagent_type": "general-purpose", "prompt": "do something"},
             "success",
         )
@@ -336,14 +352,17 @@ class TestLogEvent:
         tracer.open_task("S1", "task")
         long_prompt = "p" * 400
         tracer.log_event(
-            "S1", "Agent",
+            "S1",
+            "Agent",
             {"subagent_type": "general-purpose", "prompt": long_prompt},
             "success",
         )
         ev = self._events(tracer)[0]
         assert len(ev["input"]["prompt_head"]) == 200
 
-    def test_unknown_tool_fallback_first_five_keys(self, tracer: contAInedTracer) -> None:
+    def test_unknown_tool_fallback_first_five_keys(
+        self, tracer: contAInedTracer
+    ) -> None:
         tracer.open_task("S1", "task")
         inp = {f"k{i}": f"v{i}" for i in range(8)}
         tracer.log_event("S1", "SomeTool", inp, "success")
@@ -353,14 +372,19 @@ class TestLogEvent:
     def test_denied_event_stores_reason(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.log_event(
-            "S1", "Write", {"file_path": "x"}, "denied",
+            "S1",
+            "Write",
+            {"file_path": "x"},
+            "denied",
             reason="restricted path",
         )
         ev = self._events(tracer)[0]
         assert ev["outcome"] == "denied"
         assert ev["reason"] == "restricted path"
 
-    def test_log_event_never_raises_on_bad_session(self, tracer: contAInedTracer) -> None:
+    def test_log_event_never_raises_on_bad_session(
+        self, tracer: contAInedTracer
+    ) -> None:
         """log_event must not raise even for an unknown session_id."""
         tracer.log_event("UNKNOWN_SESSION", "Write", {}, "success")
 
@@ -368,6 +392,7 @@ class TestLogEvent:
 # ---------------------------------------------------------------------------
 # Unit — actor ID resolution
 # ---------------------------------------------------------------------------
+
 
 class TestActorIdResolution:
     """
@@ -380,7 +405,7 @@ class TestActorIdResolution:
     @staticmethod
     def resolve(event: dict) -> Optional[str]:
         session_id = event.get("session_id")
-        agent_id   = event.get("agent_id")
+        agent_id = event.get("agent_id")
         return agent_id or session_id
 
     def test_root_agent_uses_session_id(self) -> None:
@@ -407,6 +432,7 @@ class TestActorIdResolution:
 # ---------------------------------------------------------------------------
 # Unit — task lifecycle
 # ---------------------------------------------------------------------------
+
 
 class TestTaskLifecycle:
     def test_open_task_creates_row(self, tracer: contAInedTracer) -> None:
@@ -465,6 +491,7 @@ class TestTaskLifecycle:
 # Unit — tree traversal
 # ---------------------------------------------------------------------------
 
+
 class TestTreeTraversal:
     def test_single_node_tree(self, tracer: contAInedTracer) -> None:
         tracer.open_task("ROOT", "task")
@@ -490,18 +517,14 @@ class TestTreeTraversal:
         ids = tracer.tree_session_ids("GHOST")
         assert ids == ["GHOST"]
 
-    def test_list_touched_files_single_session(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_list_touched_files_single_session(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.track_write("S1", "a.py", b"v1")
         tracer.track_write("S1", "b.py", b"v1")
         files = tracer.list_touched_files("S1")
         assert files == ["a.py", "b.py"]
 
-    def test_list_touched_files_across_subtree(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_list_touched_files_across_subtree(self, tracer: contAInedTracer) -> None:
         tracer.open_task("ROOT", "root")
         tracer.open_task("C1", "c1", parent_session_id="ROOT")
         tracer.track_write("ROOT", "root.py", b"v1")
@@ -510,9 +533,7 @@ class TestTreeTraversal:
         assert "root.py" in files
         assert "child.py" in files
 
-    def test_list_touched_files_empty_tree(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_list_touched_files_empty_tree(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         assert tracer.list_touched_files("S1") == []
 
@@ -520,6 +541,7 @@ class TestTreeTraversal:
 # ---------------------------------------------------------------------------
 # Unit — diff_task
 # ---------------------------------------------------------------------------
+
 
 class TestDiffTask:
     def _setup(
@@ -535,15 +557,17 @@ class TestDiffTask:
         now_ms = int(time.time() * 1000)
         if before is None:
             tracer.conn.execute(
-                "INSERT OR IGNORE INTO baselines (session_id, file_path, pre_hash, captured_at) "
-                "VALUES (?, ?, NULL, ?)",
+                "INSERT OR IGNORE INTO baselines"
+                " (session_id, file_path, pre_hash, captured_at)"
+                " VALUES (?, ?, NULL, ?)",
                 (session_id, file_path, now_ms),
             )
         else:
             pre_hash = tracer._store_blob(before)
             tracer.conn.execute(
-                "INSERT OR IGNORE INTO baselines (session_id, file_path, pre_hash, captured_at) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO baselines"
+                " (session_id, file_path, pre_hash, captured_at)"
+                " VALUES (?, ?, ?, ?)",
                 (session_id, file_path, pre_hash, now_ms),
             )
             tracer.conn.commit()
@@ -557,7 +581,9 @@ class TestDiffTask:
 
     def test_modified_file_diff_shows_changes(self, tracer: contAInedTracer) -> None:
         self._setup(
-            tracer, "S1", "mod.py",
+            tracer,
+            "S1",
+            "mod.py",
             b"before\n",
             b"after\n",
         )
@@ -617,10 +643,10 @@ class TestDiffTask:
 
         fp = "shared.py"
         early_ms = int(time.time() * 1000) - 5000
-        late_ms  = int(time.time() * 1000)
+        late_ms = int(time.time() * 1000)
 
         early_hash = tracer._store_blob(b"earliest\n")
-        late_hash  = tracer._store_blob(b"later\n")
+        late_hash = tracer._store_blob(b"later\n")
 
         tracer.conn.execute(
             "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
@@ -644,10 +670,9 @@ class TestDiffTask:
 # Unit — recent_audit_events
 # ---------------------------------------------------------------------------
 
+
 class TestRecentAuditEvents:
-    def _add_events(
-        self, tracer: contAInedTracer, session_id: str, n: int = 3
-    ) -> None:
+    def _add_events(self, tracer: contAInedTracer, session_id: str, n: int = 3) -> None:
         tracer.open_task(session_id, "task")
         for i in range(n):
             tracer.log_event(session_id, f"Tool{i}", {}, "success")
@@ -680,7 +705,7 @@ class TestRecentAuditEvents:
     def test_tree_scoped_includes_subtree(self, tracer: contAInedTracer) -> None:
         tracer.open_task("ROOT", "root")
         tracer.open_task("CHILD", "child", parent_session_id="ROOT")
-        tracer.log_event("ROOT",  "ToolRoot",  {}, "success")
+        tracer.log_event("ROOT", "ToolRoot", {}, "success")
         tracer.log_event("CHILD", "ToolChild", {}, "success")
         evs = tracer.recent_audit_events(session_id="ROOT", limit=10)
         tools = {e["tool"] for e in evs}
@@ -690,7 +715,10 @@ class TestRecentAuditEvents:
     def test_event_fields_populated(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.log_event(
-            "S1", "Bash", {"command": "echo hi"}, "success",
+            "S1",
+            "Bash",
+            {"command": "echo hi"},
+            "success",
             tool_response={"exit_code": 0, "stdout": "hi"},
         )
         ev = tracer.recent_audit_events(limit=1)[0]
@@ -705,6 +733,7 @@ class TestRecentAuditEvents:
 # Unit — GC
 # ---------------------------------------------------------------------------
 
+
 class TestGC:
     def _old_ms(self, days: int = 20) -> int:
         return int((time.time() - days * 86400) * 1000)
@@ -712,9 +741,7 @@ class TestGC:
     def _recent_ms(self) -> int:
         return int(time.time() * 1000)
 
-    def test_gc_removes_old_closed_snapshots(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_gc_removes_old_closed_snapshots(self, tracer: contAInedTracer) -> None:
         tracer.open_task("OLD", "old task")
         tracer.set_task_status("OLD", "closed")
         # Manually backdate ended_at and snapshot written_at
@@ -763,9 +790,7 @@ class TestGC:
         tracer.conn.commit()
 
         tracer.gc(keep_days=14)
-        blob_count = tracer.conn.execute(
-            "SELECT COUNT(*) FROM blobs"
-        ).fetchone()[0]
+        blob_count = tracer.conn.execute("SELECT COUNT(*) FROM blobs").fetchone()[0]
         assert blob_count == 0
 
     def test_gc_keeps_referenced_blobs(self, tracer: contAInedTracer) -> None:
@@ -779,11 +804,13 @@ class TestGC:
         shared_blob = tracer._store_blob(b"shared content")
         tracer.conn.execute(
             "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
-            "VALUES ('OLD', 'x.py', ?, ?)", (shared_blob, old_ms)
+            "VALUES ('OLD', 'x.py', ?, ?)",
+            (shared_blob, old_ms),
         )
         tracer.conn.execute(
             "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
-            "VALUES ('OPEN', 'x.py', ?, ?)", (shared_blob, self._recent_ms())
+            "VALUES ('OPEN', 'x.py', ?, ?)",
+            (shared_blob, self._recent_ms()),
         )
         tracer.conn.commit()
 
@@ -841,9 +868,7 @@ class TestGC:
 
         tracer.gc(keep_days=14)
         # With only 5 events total (< 10,000 keep floor), none should be deleted
-        count = tracer.conn.execute(
-            "SELECT COUNT(*) FROM audit_events"
-        ).fetchone()[0]
+        count = tracer.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
         assert count == 5
 
 
@@ -851,10 +876,9 @@ class TestGC:
 # Integration — single-agent task lifecycle
 # ---------------------------------------------------------------------------
 
+
 class TestSingleAgentIntegration:
-    def test_open_write_close(
-        self, tracer: contAInedTracer, tmp_file
-    ) -> None:
+    def test_open_write_close(self, tracer: contAInedTracer, tmp_file) -> None:
         """
         Simulate: runner opens task → hooks capture baseline + write →
         summarizer closes with summary.
@@ -876,9 +900,12 @@ class TestSingleAgentIntegration:
         summary = {"files": [str(p)]}
         tracer.set_task_status(session_id, "closed", summary=summary)
 
-        assert tracer.conn.execute(
-            "SELECT status FROM tasks WHERE session_id = ?", (session_id,)
-        ).fetchone()[0] == "closed"
+        assert (
+            tracer.conn.execute(
+                "SELECT status FROM tasks WHERE session_id = ?", (session_id,)
+            ).fetchone()[0]
+            == "closed"
+        )
 
     def test_diff_reflects_write(self, tracer: contAInedTracer, tmp_file) -> None:
         p = tmp_file("a.py", "before\n")
@@ -895,6 +922,7 @@ class TestSingleAgentIntegration:
 # Integration — sub-agent task
 # ---------------------------------------------------------------------------
 
+
 class TestSubAgentIntegration:
     def test_tree_diff_covers_all_files(
         self, tracer: contAInedTracer, tmp_file
@@ -903,14 +931,14 @@ class TestSubAgentIntegration:
         Simulate: SubagentStart → child writes → SubagentStop → root Stop.
         tree diff must include both root and child files.
         """
-        root_file  = tmp_file("root.py", "root_v0\n")
+        root_file = tmp_file("root.py", "root_v0\n")
         child_file = tmp_file("child.py", "child_v0\n")
 
-        root_sid  = "ROOT"
+        root_sid = "ROOT"
         child_sid = "CHILD"
 
         # SubagentStart → open child task
-        tracer.open_task(root_sid,  "root task")
+        tracer.open_task(root_sid, "root task")
         tracer.open_task(child_sid, "child task", parent_session_id=root_sid)
 
         # Pre/Post hooks for root
@@ -931,7 +959,7 @@ class TestSubAgentIntegration:
         assert str(root_file) in touched
         assert str(child_file) in touched
 
-        root_diff  = tracer.diff_task(root_sid, str(root_file))
+        root_diff = tracer.diff_task(root_sid, str(root_file))
         child_diff = tracer.diff_task(root_sid, str(child_file))
         assert "-root_v0" in root_diff
         assert "+root_v1" in root_diff
@@ -939,15 +967,13 @@ class TestSubAgentIntegration:
         assert "+child_v1" in child_diff
 
 
-
 # ---------------------------------------------------------------------------
 # Integration — concurrent baseline writes
 # ---------------------------------------------------------------------------
 
+
 class TestConcurrentBaselines:
-    def test_min_captured_at_wins(
-        self, tracer: contAInedTracer, tmp_file
-    ) -> None:
+    def test_min_captured_at_wins(self, tracer: contAInedTracer, tmp_file) -> None:
         """
         Two actor_ids capture a baseline for the same file.
         diff_task must use the one with the EARLIEST captured_at.
@@ -955,23 +981,25 @@ class TestConcurrentBaselines:
         p = tmp_file("shared.py", "original\n")
         fp = str(p)
 
-        tracer.open_task("ROOT",  "root")
+        tracer.open_task("ROOT", "root")
         tracer.open_task("AGENT", "agent", parent_session_id="ROOT")
 
         # Manually insert baselines with controlled timestamps
         early_ms = int(time.time() * 1000) - 10_000
-        late_ms  = int(time.time() * 1000)
+        late_ms = int(time.time() * 1000)
 
         early_hash = tracer._store_blob(b"first baseline\n")
-        late_hash  = tracer._store_blob(b"second baseline\n")
+        late_hash = tracer._store_blob(b"second baseline\n")
 
         tracer.conn.execute(
             "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
-            "VALUES ('ROOT', ?, ?, ?)", (fp, early_hash, early_ms)
+            "VALUES ('ROOT', ?, ?, ?)",
+            (fp, early_hash, early_ms),
         )
         tracer.conn.execute(
             "INSERT INTO baselines (session_id, file_path, pre_hash, captured_at) "
-            "VALUES ('AGENT', ?, ?, ?)", (fp, late_hash, late_ms)
+            "VALUES ('AGENT', ?, ?, ?)",
+            (fp, late_hash, late_ms),
         )
         tracer.conn.commit()
 
@@ -980,7 +1008,7 @@ class TestConcurrentBaselines:
         tracer.track_write("AGENT", fp, p.read_bytes())
 
         diff = tracer.diff_task("ROOT", fp)
-        assert "-first baseline" in diff   # earliest baseline used
+        assert "-first baseline" in diff  # earliest baseline used
         assert "+final" in diff
 
     def test_concurrent_capture_baseline_thread_safe(
@@ -1005,8 +1033,10 @@ class TestConcurrentBaselines:
 
         t1 = threading.Thread(target=worker, args=("T1",))
         t2 = threading.Thread(target=worker, args=("T2",))
-        t1.start(); t2.start()
-        t1.join();  t2.join()
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
 
         assert errors == [], f"Unexpected errors: {errors}"
 
@@ -1022,6 +1052,7 @@ class TestConcurrentBaselines:
 # ---------------------------------------------------------------------------
 # Integration — stale open task recovery
 # ---------------------------------------------------------------------------
+
 
 class TestStaleOpenTaskRecovery:
     """
@@ -1052,15 +1083,12 @@ class TestStaleOpenTaskRecovery:
         ).fetchone()[0]
         assert status == "open"
 
-    def test_stale_open_identified_by_age(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_stale_open_identified_by_age(self, tracer: contAInedTracer) -> None:
         self._stale_open(tracer, "STALE")
         threshold_secs = 3600
         cutoff_ms = int((time.time() - threshold_secs) * 1000)
         row = tracer.conn.execute(
-            "SELECT session_id FROM tasks "
-            "WHERE status = 'open' AND started_at < ?",
+            "SELECT session_id FROM tasks WHERE status = 'open' AND started_at < ?",
             (cutoff_ms,),
         ).fetchone()
         assert row is not None
@@ -1071,8 +1099,7 @@ class TestStaleOpenTaskRecovery:
         threshold_secs = 3600
         cutoff_ms = int((time.time() - threshold_secs) * 1000)
         row = tracer.conn.execute(
-            "SELECT session_id FROM tasks "
-            "WHERE status = 'open' AND started_at < ?",
+            "SELECT session_id FROM tasks WHERE status = 'open' AND started_at < ?",
             (cutoff_ms,),
         ).fetchone()
         assert row is None
@@ -1082,11 +1109,14 @@ class TestStaleOpenTaskRecovery:
 # Unit — contAInedTracer.get_open_root_tasks
 # ---------------------------------------------------------------------------
 
+
 class TestGetOpenRootTasks:
     """Unit tests for the ``get_open_root_tasks`` tracer method used by the
     REPL's session-resume feature."""
 
-    def _backdate(self, tracer: contAInedTracer, session_id: str, age_secs: int) -> None:
+    def _backdate(
+        self, tracer: contAInedTracer, session_id: str, age_secs: int
+    ) -> None:
         """Set started_at to *age_secs* seconds ago for *session_id*."""
         old_ms = int((time.time() - age_secs) * 1000)
         tracer.conn.execute(
@@ -1176,6 +1206,7 @@ class TestGetOpenRootTasks:
 # Integration — stale open task detection
 # ---------------------------------------------------------------------------
 
+
 class TestSessionResumeSignal:
     """
     Verifies get_open_root_tasks surfaces interrupted sessions correctly.
@@ -1184,7 +1215,7 @@ class TestSessionResumeSignal:
     def test_stale_open_session_id_is_retrievable(
         self, tracer: contAInedTracer
     ) -> None:
-        """A session left open after an interrupted run appears in get_open_root_tasks."""
+        """Interrupted session appears in get_open_root_tasks."""
         tracer.open_task("INTERRUPTED", "big refactor")
         old_ms = int((time.time() - 7200) * 1000)
         tracer.conn.execute(
@@ -1198,9 +1229,7 @@ class TestSessionResumeSignal:
         session_ids = [r["session_id"] for r in stale]
         assert "INTERRUPTED" in session_ids
 
-    def test_closed_task_not_in_open_root_tasks(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_closed_task_not_in_open_root_tasks(self, tracer: contAInedTracer) -> None:
         """Closed tasks must not appear in get_open_root_tasks."""
         tracer.open_task("DONE", "completed task")
         tracer.set_task_status("DONE", "closed")
@@ -1211,6 +1240,7 @@ class TestSessionResumeSignal:
 # ---------------------------------------------------------------------------
 # Integration — task creation
 # ---------------------------------------------------------------------------
+
 
 class TestTaskCreation:
     def test_new_session_open_task_row(self, tracer: contAInedTracer) -> None:
@@ -1239,6 +1269,7 @@ class TestTaskCreation:
 # ---------------------------------------------------------------------------
 # Unit — _extract_trace_unit edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestExtractTraceUnitEdgeCases:
     """Additional coverage for _extract_trace_unit branches not hit above."""
@@ -1301,13 +1332,9 @@ class TestExtractTraceUnitEdgeCases:
         unit = tracer._extract_trace_unit("WeirdTool", None, None)
         assert unit is None
 
-    def test_unknown_tool_truncates_long_values(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_unknown_tool_truncates_long_values(self, tracer: contAInedTracer) -> None:
         """Fallback values must be truncated to 200 chars."""
-        unit = tracer._extract_trace_unit(
-            "SomeTool", {"key": "v" * 500}, None
-        )
+        unit = tracer._extract_trace_unit("SomeTool", {"key": "v" * 500}, None)
         assert unit is not None
         assert len(unit["key"]) == 200
 
@@ -1320,6 +1347,7 @@ class TestExtractTraceUnitEdgeCases:
 # ---------------------------------------------------------------------------
 # Unit — task lifecycle edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestTaskLifecycleEdgeCases:
     def test_set_task_status_no_summary(self, tracer: contAInedTracer) -> None:
@@ -1347,9 +1375,7 @@ class TestTaskLifecycleEdgeCases:
         tracer.open_task("LONE", "lone task")
         assert tracer.get_child_sessions("LONE") == []
 
-    def test_get_child_sessions_unknown_parent(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_get_child_sessions_unknown_parent(self, tracer: contAInedTracer) -> None:
         """get_child_sessions on an unknown session_id returns empty list."""
         assert tracer.get_child_sessions("GHOST") == []
 
@@ -1362,9 +1388,11 @@ class TestTaskLifecycleEdgeCases:
         ).fetchone()
         assert row[0] == "ROOT"
 
+
 # ---------------------------------------------------------------------------
 # Unit — narrative persistence
 # ---------------------------------------------------------------------------
+
 
 class TestNarrative:
     def test_set_task_status_stores_narrative(self, tracer: contAInedTracer) -> None:
@@ -1402,7 +1430,7 @@ class TestNarrative:
         assert row[0] == "Final."
 
     def test_summary_preserved_on_second_close(self, tracer: contAInedTracer) -> None:
-        """A second set_task_status call without summary must not clear an existing one."""
+        """Second set_task_status without summary must not clear an existing one."""
         tracer.open_task("S1", "task")
         summary = {"file_changes": [], "action_log": []}
         tracer.set_task_status("S1", "closed", summary=summary)
@@ -1438,17 +1466,13 @@ class TestNarrative:
         t._migrate()
         t._migrate()
         # Column must be present.
-        cols = [
-            row[1]
-            for row in t.conn.execute("PRAGMA table_info(tasks)").fetchall()
-        ]
+        cols = [row[1] for row in t.conn.execute("PRAGMA table_info(tasks)").fetchall()]
         assert "narrative" in cols
 
     def test_narrative_column_present_in_schema(self, tracer: contAInedTracer) -> None:
         """tasks table must have a narrative column after init."""
         cols = [
-            row[1]
-            for row in tracer.conn.execute("PRAGMA table_info(tasks)").fetchall()
+            row[1] for row in tracer.conn.execute("PRAGMA table_info(tasks)").fetchall()
         ]
         assert "narrative" in cols
 
@@ -1457,6 +1481,7 @@ class TestNarrative:
 # Unit — extract_narrative_from_transcript
 # ---------------------------------------------------------------------------
 
+
 class TestExtractNarrativeFromTranscript:
     def test_returns_last_assistant_text(self, tmp_path: Path) -> None:
         """Returns the concatenated text of the last visible assistant message."""
@@ -1464,8 +1489,14 @@ class TestExtractNarrativeFromTranscript:
 
         transcript = tmp_path / "session.jsonl"
         entries = [
-            {"type": "user", "message": {"content": [{"type": "text", "text": "do it"}]}},
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}},
+            {
+                "type": "user",
+                "message": {"content": [{"type": "text", "text": "do it"}]},
+            },
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "Done."}]},
+            },
         ]
         transcript.write_text("\n".join(json.dumps(e) for e in entries))
         assert extract_narrative_from_transcript(str(transcript)) == "Done."
@@ -1476,8 +1507,15 @@ class TestExtractNarrativeFromTranscript:
 
         transcript = tmp_path / "session.jsonl"
         entries = [
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Real."}]}},
-            {"type": "assistant", "isMeta": True, "message": {"content": [{"type": "text", "text": "Meta."}]}},
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "Real."}]},
+            },
+            {
+                "type": "assistant",
+                "isMeta": True,
+                "message": {"content": [{"type": "text", "text": "Meta."}]},
+            },
         ]
         transcript.write_text("\n".join(json.dumps(e) for e in entries))
         assert extract_narrative_from_transcript(str(transcript)) == "Real."
@@ -1488,8 +1526,15 @@ class TestExtractNarrativeFromTranscript:
 
         transcript = tmp_path / "session.jsonl"
         entries = [
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": "Main."}]}},
-            {"type": "assistant", "isSidechain": True, "message": {"content": [{"type": "text", "text": "Side."}]}},
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": "Main."}]},
+            },
+            {
+                "type": "assistant",
+                "isSidechain": True,
+                "message": {"content": [{"type": "text", "text": "Side."}]},
+            },
         ]
         transcript.write_text("\n".join(json.dumps(e) for e in entries))
         assert extract_narrative_from_transcript(str(transcript)) == "Main."
@@ -1501,11 +1546,13 @@ class TestExtractNarrativeFromTranscript:
         transcript = tmp_path / "session.jsonl"
         entry = {
             "type": "assistant",
-            "message": {"content": [
-                {"type": "text", "text": "Part one."},
-                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
-                {"type": "text", "text": "Part two."},
-            ]},
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Part one."},
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}},
+                    {"type": "text", "text": "Part two."},
+                ]
+            },
         }
         transcript.write_text(json.dumps(entry))
         result = extract_narrative_from_transcript(str(transcript))
@@ -1529,13 +1576,17 @@ class TestExtractNarrativeFromTranscript:
     def test_returns_empty_for_assistant_with_no_text_blocks(
         self, tmp_path: Path
     ) -> None:
-        """Returns empty string if the last assistant message has only tool-use blocks."""
+        """Returns empty string when last assistant message has only tool-use blocks."""
         from contained.tracer import extract_narrative_from_transcript
 
         transcript = tmp_path / "session.jsonl"
         entry = {
             "type": "assistant",
-            "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]},
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}
+                ]
+            },
         }
         transcript.write_text(json.dumps(entry))
         assert extract_narrative_from_transcript(str(transcript)) == ""
@@ -1545,7 +1596,10 @@ class TestExtractNarrativeFromTranscript:
         from contained.tracer import extract_narrative_from_transcript
 
         transcript = tmp_path / "session.jsonl"
-        entry = {"type": "assistant", "message": {"content": [{"type": "text", "text": "Hi."}]}}
+        entry = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Hi."}]},
+        }
         transcript.write_text("\n\n" + json.dumps(entry) + "\n\n")
         assert extract_narrative_from_transcript(str(transcript)) == "Hi."
 
@@ -1555,6 +1609,7 @@ class TestExtractNarrativeFromTranscript:
 # ---------------------------------------------------------------------------
 # Unit — extract_session_narrative
 # ---------------------------------------------------------------------------
+
 
 class TestExtractSessionNarrative:
     """Tests for extract_session_narrative — the structured multi-turn extractor."""
@@ -1566,21 +1621,26 @@ class TestExtractSessionNarrative:
 
     def test_returns_empty_dict_for_missing_file(self, tmp_path: Path) -> None:
         from contained.tracer import extract_session_narrative
+
         assert extract_session_narrative(str(tmp_path / "missing.jsonl")) == {}
 
     def test_returns_empty_dict_when_no_content(self, tmp_path: Path) -> None:
         from contained.tracer import extract_session_narrative
+
         path = self._write(tmp_path, [{"type": "user", "message": {"content": []}}])
         assert extract_session_narrative(path) == {}
 
     def test_collects_thinking_excerpts(self, tmp_path: Path) -> None:
         from contained.tracer import extract_session_narrative
+
         entry = {
             "type": "assistant",
-            "message": {"content": [
-                {"type": "thinking", "thinking": "I should write a test."},
-                {"type": "text", "text": "Done."},
-            ]},
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "I should write a test."},
+                    {"type": "text", "text": "Done."},
+                ]
+            },
         }
         path = self._write(tmp_path, [entry])
         result = extract_session_narrative(path)
@@ -1588,12 +1648,19 @@ class TestExtractSessionNarrative:
 
     def test_collects_reasoning_steps_before_tool_use(self, tmp_path: Path) -> None:
         from contained.tracer import extract_session_narrative
+
         entry = {
             "type": "assistant",
-            "message": {"content": [
-                {"type": "text", "text": "Let me read the file."},
-                {"type": "tool_use", "name": "Read", "input": {"file_path": "x.py"}},
-            ]},
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Let me read the file."},
+                    {
+                        "type": "tool_use",
+                        "name": "Read",
+                        "input": {"file_path": "x.py"},
+                    },
+                ]
+            },
         }
         path = self._write(tmp_path, [entry])
         result = extract_session_narrative(path)
@@ -1605,6 +1672,7 @@ class TestExtractSessionNarrative:
     def test_closings_accumulates_across_turns(self, tmp_path: Path) -> None:
         """closings must contain one entry per turn, not just the last one."""
         from contained.tracer import extract_session_narrative
+
         turn1 = {
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": "Turn 1 done."}]},
@@ -1620,12 +1688,15 @@ class TestExtractSessionNarrative:
     def test_closings_excludes_messages_with_tool_use(self, tmp_path: Path) -> None:
         """Messages that contain tool_use blocks are not added to closings."""
         from contained.tracer import extract_session_narrative
+
         tool_msg = {
             "type": "assistant",
-            "message": {"content": [
-                {"type": "text", "text": "Running tool now."},
-                {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
-            ]},
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Running tool now."},
+                    {"type": "tool_use", "name": "Bash", "input": {"command": "ls"}},
+                ]
+            },
         }
         closing_msg = {
             "type": "assistant",
@@ -1637,16 +1708,19 @@ class TestExtractSessionNarrative:
 
     def test_skips_meta_and_sidechain_entries(self, tmp_path: Path) -> None:
         from contained.tracer import extract_session_narrative
+
         real = {
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": "Real."}]},
         }
         meta = {
-            "type": "assistant", "isMeta": True,
+            "type": "assistant",
+            "isMeta": True,
             "message": {"content": [{"type": "text", "text": "Meta."}]},
         }
         side = {
-            "type": "assistant", "isSidechain": True,
+            "type": "assistant",
+            "isSidechain": True,
             "message": {"content": [{"type": "text", "text": "Side."}]},
         }
         path = self._write(tmp_path, [real, meta, side])
@@ -1656,13 +1730,20 @@ class TestExtractSessionNarrative:
     def test_thinking_resets_pending_text(self, tmp_path: Path) -> None:
         """Text before a thinking block must not be attributed to the next tool call."""
         from contained.tracer import extract_session_narrative
+
         entry = {
             "type": "assistant",
-            "message": {"content": [
-                {"type": "text", "text": "Preamble."},
-                {"type": "thinking", "thinking": "Hmm."},
-                {"type": "tool_use", "name": "Write", "input": {"file_path": "a.py"}},
-            ]},
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Preamble."},
+                    {"type": "thinking", "thinking": "Hmm."},
+                    {
+                        "type": "tool_use",
+                        "name": "Write",
+                        "input": {"file_path": "a.py"},
+                    },
+                ]
+            },
         }
         path = self._write(tmp_path, [entry])
         result = extract_session_narrative(path)
@@ -1672,16 +1753,22 @@ class TestExtractSessionNarrative:
     def test_result_keys(self, tmp_path: Path) -> None:
         """Result dict always has exactly these three keys when non-empty."""
         from contained.tracer import extract_session_narrative
+
         entry = {
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": "Hi."}]},
         }
         path = self._write(tmp_path, [entry])
         result = extract_session_narrative(path)
-        assert set(result.keys()) == {"thinking_excerpts", "reasoning_steps", "closings"}
+        assert set(result.keys()) == {
+            "thinking_excerpts",
+            "reasoning_steps",
+            "closings",
+        }
 
 
 # ---------------------------------------------------------------------------
+
 
 class TestGCEdgeCases:
     def _old_ms(self, days: int = 20) -> int:
@@ -1704,9 +1791,7 @@ class TestGCEdgeCases:
         tracer.conn.commit()
 
         tracer.gc(keep_days=14)
-        count = tracer.conn.execute(
-            "SELECT COUNT(*) FROM baselines"
-        ).fetchone()[0]
+        count = tracer.conn.execute("SELECT COUNT(*) FROM baselines").fetchone()[0]
         assert count == 0
 
     def test_gc_protects_open_baselines(self, tracer: contAInedTracer) -> None:
@@ -1721,9 +1806,7 @@ class TestGCEdgeCases:
         tracer.conn.commit()
 
         tracer.gc(keep_days=14)
-        count = tracer.conn.execute(
-            "SELECT COUNT(*) FROM baselines"
-        ).fetchone()[0]
+        count = tracer.conn.execute("SELECT COUNT(*) FROM baselines").fetchone()[0]
         assert count == 1
 
     def test_gc_empty_db_is_safe(self, tracer: contAInedTracer) -> None:
@@ -1755,9 +1838,7 @@ class TestGCEdgeCases:
 
         tracer.gc(keep_days=14)
 
-        count = tracer.conn.execute(
-            "SELECT COUNT(*) FROM audit_events"
-        ).fetchone()[0]
+        count = tracer.conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
         # 10,000 most recent kept globally; 5 pruned
         assert count == 10_000
 
@@ -1781,9 +1862,7 @@ class TestGCEdgeCases:
         tracer.conn.commit()
 
         tracer.gc(keep_days=14)
-        count = tracer.conn.execute(
-            "SELECT COUNT(*) FROM snapshots"
-        ).fetchone()[0]
+        count = tracer.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
         assert count == 1  # child is in open root's subtree — protected
 
 
@@ -1791,17 +1870,14 @@ class TestGCEdgeCases:
 # Unit — diff_task edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestDiffTaskEdgeCases:
-    def test_unknown_root_returns_empty_string(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_unknown_root_returns_empty_string(self, tracer: contAInedTracer) -> None:
         """diff_task for a root that has no baseline should return ''."""
         diff = tracer.diff_task("GHOST", "any.py")
         assert diff == ""
 
-    def test_diff_includes_unified_diff_header(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_diff_includes_unified_diff_header(self, tracer: contAInedTracer) -> None:
         """The diff output must include the a/ b/ file headers."""
         tracer.open_task("S1", "task")
         fp = "myfile.py"
@@ -1822,6 +1898,7 @@ class TestDiffTaskEdgeCases:
 # ---------------------------------------------------------------------------
 # Unit — recent_audit_events edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestRecentAuditEventsEdgeCases:
     def test_empty_db_returns_empty_list(self, tracer: contAInedTracer) -> None:
@@ -1847,8 +1924,221 @@ class TestRecentAuditEventsEdgeCases:
         ev = tracer.recent_audit_events(limit=1)[0]
         assert ev["reason"] == "blocked by policy"
 
-    def test_event_input_stores_path_for_read_tools(self, tracer: contAInedTracer) -> None:
+    def test_event_input_stores_path_for_read_tools(
+        self, tracer: contAInedTracer
+    ) -> None:
         tracer.open_task("S1", "task")
         tracer.log_event("S1", "Grep", {"pattern": "foo"}, "success")
         ev = tracer.recent_audit_events(limit=1)[0]
         assert ev["input"] == {"file_path": "foo"}
+
+
+# ---------------------------------------------------------------------------
+# Unit — extract_tool_outputs_from_transcript
+# ---------------------------------------------------------------------------
+
+
+class TestExtractToolOutputs:
+    """Tests for extract_tool_outputs_from_transcript — JSONL pairing logic."""
+
+    def _write(self, tmp_path: Path, entries: list) -> str:
+        p = tmp_path / "session.jsonl"
+        p.write_text("\n".join(json.dumps(e) for e in entries))
+        return str(p)
+
+    def _tool_use(self, tid: str, name: str, inp: dict) -> dict:
+        return {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]
+            },
+        }
+
+    def _tool_result(self, tid: str, output: str, exit_code=None) -> dict:
+        block: dict = {"type": "tool_result", "tool_use_id": tid, "content": output}
+        if exit_code is not None:
+            block["exit_code"] = exit_code
+        return {"type": "user", "message": {"content": [block]}}
+
+    def test_returns_empty_for_missing_file(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        result = extract_tool_outputs_from_transcript(str(tmp_path / "missing.jsonl"))
+        assert result == []
+
+    def test_returns_empty_for_empty_transcript(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        path = self._write(tmp_path, [])
+        assert extract_tool_outputs_from_transcript(path) == []
+
+    def test_pairs_tool_use_with_tool_result(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        entries = [
+            self._tool_use("t1", "Read", {"file_path": "foo.py"}),
+            self._tool_result("t1", "line1\nline2"),
+        ]
+        path = self._write(tmp_path, entries)
+        results = extract_tool_outputs_from_transcript(path)
+        assert len(results) == 1
+        r = results[0]
+        assert r["tool_use_id"] == "t1"
+        assert r["tool_name"] == "Read"
+        assert r["input"] == {"file_path": "foo.py"}
+        assert r["output"] == "line1\nline2"
+
+    def test_exit_code_from_block_level(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        entries = [
+            self._tool_use("t1", "Bash", {"command": "ls"}),
+            self._tool_result("t1", "file.py", exit_code=0),
+        ]
+        path = self._write(tmp_path, entries)
+        results = extract_tool_outputs_from_transcript(path)
+        assert results[0]["exit_code"] == 0
+
+    def test_exit_code_from_within_content_list(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        # exit_code embedded inside a content list (not at block level)
+        result_entry = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [{"type": "text", "text": "output", "exit_code": 1}],
+                    }
+                ]
+            },
+        }
+        entries = [
+            self._tool_use("t1", "Bash", {"command": "false"}),
+            result_entry,
+        ]
+        path = self._write(tmp_path, entries)
+        results = extract_tool_outputs_from_transcript(path)
+        assert results[0]["exit_code"] == 1
+
+    def test_list_content_joined_as_text(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        result_entry = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": [
+                            {"type": "text", "text": "part1"},
+                            {"type": "text", "text": "part2"},
+                        ],
+                    }
+                ]
+            },
+        }
+        entries = [
+            self._tool_use("t1", "Read", {"file_path": "x.py"}),
+            result_entry,
+        ]
+        path = self._write(tmp_path, entries)
+        results = extract_tool_outputs_from_transcript(path)
+        assert results[0]["output"] == "part1\npart2"
+
+    def test_skips_meta_entries(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        entries = [
+            {
+                "type": "assistant",
+                "isMeta": True,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "t1",
+                            "name": "Read",
+                            "input": {},
+                        }
+                    ]
+                },
+            },
+            self._tool_result("t1", "ignored"),
+        ]
+        path = self._write(tmp_path, entries)
+        # Meta tool_use must not be paired — no results
+        results = extract_tool_outputs_from_transcript(path)
+        assert results == []
+
+    def test_skips_sidechain_entries(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        entries = [
+            {
+                "type": "assistant",
+                "isSidechain": True,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "t1",
+                            "name": "Bash",
+                            "input": {"command": "x"},
+                        }
+                    ]
+                },
+            },
+            self._tool_result("t1", "out"),
+        ]
+        path = self._write(tmp_path, entries)
+        assert extract_tool_outputs_from_transcript(path) == []
+
+    def test_unpaired_tool_use_not_in_results(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        entries = [self._tool_use("t1", "Read", {"file_path": "x.py"})]
+        # No matching tool_result
+        path = self._write(tmp_path, entries)
+        assert extract_tool_outputs_from_transcript(path) == []
+
+    def test_plain_text_user_message_ignored(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        entries = [
+            self._tool_use("t1", "Read", {"file_path": "x.py"}),
+            {"type": "user", "message": {"content": "plain user text"}},
+        ]
+        path = self._write(tmp_path, entries)
+        # Plain text user turn has no tool_result — t1 stays unpaired
+        assert extract_tool_outputs_from_transcript(path) == []
+
+    def test_multiple_tool_calls_in_sequence(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        entries = [
+            self._tool_use("t1", "Read", {"file_path": "a.py"}),
+            self._tool_result("t1", "content_a"),
+            self._tool_use("t2", "Bash", {"command": "ls"}),
+            self._tool_result("t2", "file_list", exit_code=0),
+        ]
+        path = self._write(tmp_path, entries)
+        results = extract_tool_outputs_from_transcript(path)
+        assert len(results) == 2
+        assert results[0]["tool_name"] == "Read"
+        assert results[1]["tool_name"] == "Bash"
+        assert results[1]["exit_code"] == 0
+
+    def test_result_has_none_exit_code_when_not_set(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        entries = [
+            self._tool_use("t1", "Read", {"file_path": "x.py"}),
+            self._tool_result("t1", "output"),
+        ]
+        path = self._write(tmp_path, entries)
+        results = extract_tool_outputs_from_transcript(path)
+        assert results[0]["exit_code"] is None

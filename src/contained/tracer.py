@@ -13,12 +13,12 @@ import difflib
 import hashlib
 import json
 import sqlite3
+import threading as _threading
 import time
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # Schema DDL
@@ -51,7 +51,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 
 -- Per-session file baseline.
--- Captured by tracer_pre.py before the first Write/Edit/MultiEdit to a file in a session.
+-- Captured by tracer_pre.py before the first Write/Edit/MultiEdit to a file.
 -- NULL pre_hash means the file did not exist before this session (new file).
 CREATE TABLE IF NOT EXISTS baselines (
     session_id  TEXT    NOT NULL REFERENCES tasks(session_id),
@@ -72,8 +72,10 @@ CREATE TABLE IF NOT EXISTS snapshots (
     metadata    TEXT                -- Optional JSON: pass number, notes, etc.
 );
 
-CREATE INDEX IF NOT EXISTS idx_snapshots_file    ON snapshots(file_path, written_at DESC);
-CREATE INDEX IF NOT EXISTS idx_snapshots_session ON snapshots(session_id, written_at DESC);
+CREATE INDEX IF NOT EXISTS idx_snapshots_file
+    ON snapshots(file_path, written_at DESC);
+CREATE INDEX IF NOT EXISTS idx_snapshots_session
+    ON snapshots(session_id, written_at DESC);
 
 -- Audit event log (replaces .contAIned/audit/pipeline.jsonl).
 -- One row per tool call (all tools, not just writes).
@@ -114,7 +116,11 @@ def extract_narrative_from_transcript(transcript_path: str) -> str:
     closing statement) use :func:`extract_session_narrative` instead.
     """
     try:
-        lines = Path(transcript_path).read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = (
+            Path(transcript_path)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+        )
     except OSError:
         return ""
 
@@ -168,7 +174,11 @@ def extract_tool_outputs_from_transcript(transcript_path: str) -> list[dict]:
     contains no paired tool calls.
     """
     try:
-        lines = Path(transcript_path).read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = (
+            Path(transcript_path)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+        )
     except OSError:
         return []
 
@@ -201,7 +211,7 @@ def extract_tool_outputs_from_transcript(transcript_path: str) -> list[dict]:
                     if tid:
                         pending[tid] = {
                             "tool_name": block.get("name") or "",
-                            "input":     block.get("input") or {},
+                            "input": block.get("input") or {},
                         }
 
         # ── Match tool_result entries (appear in user turns) ───────────────
@@ -219,13 +229,14 @@ def extract_tool_outputs_from_transcript(transcript_path: str) -> list[dict]:
                 if not tid or tid not in pending:
                     continue
 
-                pend    = pending.pop(tid)
-                raw     = block.get("content") or ""
+                pend = pending.pop(tid)
+                raw = block.get("content") or ""
 
                 # Normalise output to a plain string
                 if isinstance(raw, list):
                     output = "\n".join(
-                        b.get("text", "") for b in raw
+                        b.get("text", "")
+                        for b in raw
                         if isinstance(b, dict) and b.get("type") == "text"
                     )
                 else:
@@ -239,13 +250,15 @@ def extract_tool_outputs_from_transcript(transcript_path: str) -> list[dict]:
                             exit_code = b["exit_code"]
                             break
 
-                results.append({
-                    "tool_use_id": tid,
-                    "tool_name":   pend["tool_name"],
-                    "input":       pend["input"],
-                    "output":      output,
-                    "exit_code":   exit_code,
-                })
+                results.append(
+                    {
+                        "tool_use_id": tid,
+                        "tool_name": pend["tool_name"],
+                        "input": pend["input"],
+                        "output": output,
+                        "exit_code": exit_code,
+                    }
+                )
 
     return results
 
@@ -274,13 +287,17 @@ def extract_session_narrative(transcript_path: str) -> dict:
     in ``tasks.narrative`` so it is queryable via ``json_extract()``.
     """
     try:
-        lines = Path(transcript_path).read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = (
+            Path(transcript_path)
+            .read_text(encoding="utf-8", errors="replace")
+            .splitlines()
+        )
     except OSError:
         return {}
 
     thinking_excerpts: list[str] = []
-    reasoning_steps:   list[dict] = []
-    closings:          list[str]  = []
+    reasoning_steps: list[dict] = []
+    closings: list[str] = []
 
     for raw_line in lines:
         raw_line = raw_line.strip()
@@ -302,8 +319,7 @@ def extract_session_narrative(transcript_path: str) -> dict:
             continue
 
         has_tool_use = any(
-            isinstance(b, dict) and b.get("type") == "tool_use"
-            for b in content
+            isinstance(b, dict) and b.get("type") == "tool_use" for b in content
         )
 
         pending_text: list[str] = []
@@ -326,15 +342,18 @@ def extract_session_narrative(transcript_path: str) -> dict:
             elif btype == "tool_use":
                 # Flush accumulated text as a reasoning step for this tool call
                 if pending_text:
-                    reasoning_steps.append({
-                        "before_tool": block.get("name") or "",
-                        "tool_input": {
-                            k: (str(v)[:200] if v is not None else None)
-                            for k, v in (block.get("input") or {}).items()
-                            if k in ("command", "file_path", "description", "prompt")
-                        },
-                        "rationale": " ".join(pending_text),
-                    })
+                    reasoning_steps.append(
+                        {
+                            "before_tool": block.get("name") or "",
+                            "tool_input": {
+                                k: (str(v)[:200] if v is not None else None)
+                                for k, v in (block.get("input") or {}).items()
+                                if k
+                                in ("command", "file_path", "description", "prompt")
+                            },
+                            "rationale": " ".join(pending_text),
+                        }
+                    )
                 pending_text = []
 
         # Messages with no tool_use are narrative text; collect all of them across turns
@@ -353,12 +372,10 @@ def extract_session_narrative(transcript_path: str) -> dict:
 
     return {
         "thinking_excerpts": thinking_excerpts,
-        "reasoning_steps":   reasoning_steps,
-        "closings":          closings,
+        "reasoning_steps": reasoning_steps,
+        "closings": closings,
     }
 
-
-import threading as _threading
 
 # Per-db-path lock that serialises schema initialisation within a process.
 # Concurrent hook subprocesses each have their own Python interpreter so this
@@ -869,9 +886,7 @@ class contAInedTracer:
 
         # Decode "after" lines.
         after_lines = (
-            zlib.decompress(final_row[0])
-            .decode("utf-8", errors="replace")
-            .splitlines()
+            zlib.decompress(final_row[0]).decode("utf-8", errors="replace").splitlines()
         )
 
         return "\n".join(
@@ -970,9 +985,7 @@ class contAInedTracer:
             ).fetchall()
         }
 
-        placeholders = (
-            ",".join("?" * len(protected)) if protected else "'__none__'"
-        )
+        placeholders = ",".join("?" * len(protected)) if protected else "'__none__'"
         protected_list = list(protected)
 
         with self.conn:

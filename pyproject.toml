@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "A contAIned coding agent CLI — based on Claude Code"
 requires-python = ">=3.13"
 dependencies = [
-    "click>=8.0",
-    "pyyaml>=6.0",
-    "rich>=13.0",
+    "click==8.3.1",
+    "pyyaml==6.0.3",
+    "rich==14.3.3",
 ]
 
 [project.scripts]
@@ -19,15 +19,37 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/contained"]
 
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
 [tool.ruff]
 target-version = "py313"
+exclude = [".contAIned", ".claude"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 
+[tool.pyright]
+pythonVersion = "3.13"
+extraPaths = ["/usr/local/lib/python3.13/site-packages"]
+
+[tool.ruff.lint.per-file-ignores]
+# templates.py embeds generated Python code in triple-quoted strings; long
+# lines there are template content, not source code to be formatted.
+"src/contained/templates.py" = ["E501"]
+
+[project.optional-dependencies]
+dev = [
+    "pyright==1.1.408",
+    "pytest==9.0.2",
+    "pytest-cov==7.0.0",
+    "ruff==0.15.7",
+]
+
 [dependency-groups]
 dev = [
-    "pyright>=1.1.408",
-    "pytest>=9.0.2",
-    "pytest-cov>=7.0.0",
+    "pyright==1.1.408",
+    "pytest==9.0.2",
+    "pytest-cov==7.0.0",
+    "ruff==0.15.7",
 ]
