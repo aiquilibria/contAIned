@@ -2,13 +2,16 @@
 slash init — scaffold a slash agent workspace in the current directory.
 
 What it does:
-  1. Runs an interactive wizard to choose a runtime (local or Docker)
+  1. Builds the slash Docker image and creates required network/volume
   2. Initialises a git repo at the workspace root if one does not exist yet
   3. Creates the .slash/ control-plane directory tree
   4. Creates the .claude/ SDK config directory with settings.json
   5. Writes CLAUDE.md with agent operating instructions
   6. Creates or updates .gitignore with appropriate entries
   7. Reports what was created and what was skipped (idempotent)
+
+Docker is the only supported runtime.  The agent always runs inside the
+slash container; SLASH_FORCE_LOCAL=1 is reserved for the in-container process.
 
 Use `slash update` to refresh hook files after upgrading.
 User-editable files (policy manifest only) are never overwritten.
@@ -41,6 +44,7 @@ from slash.templates import (
     SUMMARIZER_HOOK,
     TRACER_POST_HOOK,
     TRACER_PRE_HOOK,
+    USER_PROMPT_SUBMIT_HOOK,
 )
 
 console = Console()
@@ -191,6 +195,7 @@ def _managed_files(target: Path) -> list[tuple[Path, str, bool]]:
         (target / ".slash" / "hooks" / "subagent_stop.py",    SUBAGENT_STOP_HOOK,   True),
         (target / ".slash" / "hooks" / "summarizer.py",       SUMMARIZER_HOOK,      True),
         (target / ".slash" / "hooks" / "qa.py",               QA_HOOK,              True),
+        (target / ".slash" / "hooks" / "user_prompt_submit.py", USER_PROMPT_SUBMIT_HOOK, True),
         (target / ".claude" / "settings.json",                settings,             False),
         (target / "CLAUDE.md",                                CLAUDE_MD,            False),
     ]
@@ -480,7 +485,7 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
 
     Pass ``rebuild=True`` (``--rebuild`` on the CLI) to force a Docker image
     rebuild even when the image's version label already matches the installed
-    slash version.  Has no effect in local mode.
+    slash version.
     """
     target = target.resolve()
     console.print(f"\n[bold]slash init[/bold] — [dim]{target}[/dim]\n")
@@ -489,52 +494,40 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
     manifest_old = target / ".slash" / "policy" / "manifest.yaml"
     already_init = manifest_new.exists() or manifest_old.exists()
 
-    # ── Phase 1: Runtime selection ────────────────────────────────────────────
+    # Docker is the only supported runtime.
+    docker_config = dict(_DEFAULT_DOCKER_CONFIG)
+
     if already_init and not force:
         console.print("[dim]Workspace already initialised — refreshing managed files.[/dim]\n")
-        runtime_mode    = "local"
-        docker_config   = None
-        # Wizard skipped; existing manifest is preserved.
+        # Preserve existing manifest; just refresh hooks and check docker image.
         manifest_content: str | None = None
+        try:
+            _docker_setup(docker_config, target, rebuild=rebuild)
+        except RuntimeError as exc:
+            console.print(f"\n[yellow]Warning:[/yellow] Docker image check failed: {exc}\n")
     else:
         if already_init and force:
             console.print("[yellow]Re-running setup wizard (--force). Your current configuration will be replaced.[/yellow]\n")
-        console.print("Welcome to slash. Let's configure this workspace.\n")
-        console.print("? How should slash run in this workspace?")
-        console.print("    [bold]local[/bold]   — no isolation, uses existing hook-based policy")
-        console.print("    [bold]docker[/bold]  — kernel-enforced filesystem isolation (recommended)\n")
+        console.print("Welcome to slash.\n")
+        console.print(
+            f"  Docker configuration:\n"
+            f"    image:   [bold]{docker_config['image']}[/bold]"
+            f"  (built from slash runtime Dockerfile)\n"
+            f"    memory:  {docker_config['memory']}  |  "
+            f"cpus: {docker_config['cpus']}  |  "
+            f"network: {docker_config['network']}\n"
+        )
+        try:
+            _docker_setup(docker_config, target, rebuild=rebuild)
+        except RuntimeError as exc:
+            console.print(f"\n[red]✗[/red] Docker setup failed: {exc}")
+            raise SystemExit(1)
 
-        runtime_mode = click.prompt(
-            "  Runtime",
-            type=click.Choice(["local", "docker"], case_sensitive=False),
-            default="docker",
-        ).lower()
-
-        # ── Phase 2: Docker configuration (Docker mode only) ─────────────────
-        docker_config = None
-        if runtime_mode == "docker":
-            docker_config = dict(_DEFAULT_DOCKER_CONFIG)
-            console.print(
-                f"\n  Using fixed Docker configuration:\n"
-                f"    image:   [bold]{docker_config['image']}[/bold]"
-                f"  (built from slash runtime Dockerfile)\n"
-                f"    memory:  {docker_config['memory']}  |  "
-                f"cpus: {docker_config['cpus']}  |  "
-                f"network: {docker_config['network']}\n"
-            )
-            try:
-                _docker_setup(docker_config, target, rebuild=rebuild)
-            except RuntimeError as exc:
-                console.print(f"\n[red]✗[/red] Docker setup failed: {exc}")
-                raise SystemExit(1)
-
-        # ── Phase 3: Manifest options ─────────────────────────────────────────
         console.print()
         console.print("  [dim]Audit logging:          always on[/dim]")
         console.print("  [dim]git push / --force:     requires escalation[/dim]")
         console.print("  [dim].slash/ protection:     always enforced[/dim]")
-        if runtime_mode == "docker":
-            console.print("  [dim]Workspace boundary:     always blocked (Docker enforced)[/dim]")
+        console.print("  [dim]Workspace boundary:     always blocked (Docker enforced)[/dim]")
         console.print()
 
         # ── QA checks ────────────────────────────────────────────────────────
@@ -578,7 +571,7 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
         console.print()
 
         manifest_content = _build_manifest(
-            runtime_mode=runtime_mode,
+            runtime_mode="docker",
             docker_config=docker_config,
             model=model,
             verbosity=verbosity,
@@ -628,10 +621,7 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
 
     _print_table(results)
 
-    if runtime_mode == "docker":
-        console.print(f"\n[bold]Workspace initialised.[/bold] [dim]runtime: docker ({docker_config['image']})[/dim]")  # type: ignore[index]
-    else:
-        console.print("\n[bold]Workspace initialised.[/bold]")
+    console.print(f"\n[bold]Workspace initialised.[/bold] [dim]runtime: docker ({docker_config['image']})[/dim]")
 
     console.print("  slash run \"<your task here>\"  # For one-time tasks")
     console.print("  slash  # For REPL\n")

@@ -5,6 +5,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nodejs npm git curl bash ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Install the Claude Code CLI using the official native installer.
+# The script installs to /root/.local/bin (mode 700 dir — inaccessible to
+# non-root users via symlink).  Copy the binary to /usr/local/bin instead
+# so the non-root agent user can execute it without PATH gymnastics.
+RUN curl -fsSL https://claude.ai/install.sh | bash \
+    && cp /root/.local/bin/claude /usr/local/bin/claude \
+    && chmod 755 /usr/local/bin/claude
+
 # Install uv for fast Python package management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
@@ -24,6 +32,14 @@ RUN if getent group $HOST_GID >/dev/null 2>&1; then \
         groupadd -g $HOST_GID agent \
         && useradd -m -u $HOST_UID -g $HOST_GID -s /bin/bash agent; \
     fi
+
+# Give the agent user a ~/.local/bin that contains the claude binary so the
+# Claude Code CLI's native-install self-check passes without printing warnings.
+RUN mkdir -p /home/agent/.local/bin \
+    && ln -s /usr/local/bin/claude /home/agent/.local/bin/claude \
+    && chown -R agent /home/agent/.local
+
+ENV PATH="/home/agent/.local/bin:$PATH"
 
 USER agent
 WORKDIR /workspace

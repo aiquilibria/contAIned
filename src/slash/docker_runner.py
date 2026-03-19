@@ -1,13 +1,12 @@
 """
 slash Docker runtime — executes slash commands inside an isolated container.
 
-When ``runtime.mode`` in ``.slash/manifest.yaml`` is ``docker``, both
-``slash run`` and ``slash repl`` delegate here instead of running the agent
-in-process.  The container receives only the workspace bind-mount; the rest
-of the host filesystem is invisible.
+When ``runtime.mode`` in ``.slash/manifest.yaml`` is ``docker``, ``slash repl``
+delegates here instead of running the agent in-process.  The container receives
+only the workspace bind-mount; the rest of the host filesystem is invisible.
 
-This module is an implementation detail of the ``run`` and ``repl`` commands
-and is not part of the public API.
+This module is an implementation detail of the ``repl`` command and is not
+part of the public API.
 """
 from __future__ import annotations
 
@@ -58,6 +57,7 @@ def _parse_env_file(env_file: Path) -> dict[str, str]:
         result[key] = value
     return result
 
+
 # Common Docker executable locations when not in PATH
 _DOCKER_SEARCH_PATHS = [
     "/usr/local/bin/docker",
@@ -94,8 +94,8 @@ def _find_docker() -> str:
 
 class DockerRunner:
     """
-    Wraps ``docker run`` to execute ``slash run`` or ``slash repl`` inside a
-    container configured from the ``runtime.docker`` block of the manifest.
+    Wraps ``docker run`` to execute ``slash repl`` inside a container
+    configured from the ``runtime.docker`` block of the manifest.
 
     Parameters
     ----------
@@ -114,8 +114,8 @@ class DockerRunner:
 
     def _base_args(self) -> list[str]:
         """
-        Return the ``docker run`` arguments that are common to both ``run``
-        and ``repl``, excluding the ``-i``/``-it`` flag and the sub-command.
+        Return the ``docker run`` arguments common to all sub-commands,
+        excluding the ``-it`` TTY flag and the sub-command itself.
         """
         docker_bin = _find_docker()
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -125,15 +125,30 @@ class DockerRunner:
         network = self.config.get("network", "slash-net")
         memory = self.config.get("memory", "2g")
         cpus = str(self.config.get("cpus", 2))
+        # Mount the host ~/.claude directory AND ~/.claude.json so Claude Code
+        # credentials and configuration persist across container runs.
+        # Claude Code splits its state across two separate paths:
+        #   ~/.claude/       — sessions, credentials, backups
+        #   ~/.claude.json   — main config (model prefs, auth tokens, etc.)
+        # Both are created on the host if absent so that a first-time
+        # in-container login writes back to the host automatically.
+        host_claude_dir  = Path.home() / ".claude"
+        host_claude_json = Path.home() / ".claude.json"
+        host_claude_dir.mkdir(exist_ok=True)
+        if not host_claude_json.exists():
+            host_claude_json.touch()  # Docker needs a file, not a directory
+
         args = [
             docker_bin, "run", "--rm",
             "--name", name,
             "--volume", f"{self.workspace}:/workspace",
+            "--volume", f"{host_claude_dir}:/home/agent/.claude",
+            "--volume", f"{host_claude_json}:/home/agent/.claude.json",
             "--volume", f"{config_volume}:/home/agent/.config/agent",
             "--env", f"ANTHROPIC_API_KEY={api_key}",
             # Prevent the in-container slash process from re-entering docker
             # mode when it reads the workspace manifest.  Without this flag
-            # slash repl/run inside the container would read the host manifest
+            # slash repl inside the container would read the host manifest
             # (mode: docker), call _find_docker(), fail to find docker inside
             # the container, and crash with "Docker executable not found".
             "--env", "SLASH_FORCE_LOCAL=1",
@@ -160,24 +175,6 @@ class DockerRunner:
         return args
 
     # ── public interface ──────────────────────────────────────────────────────
-
-    def run_run(self, task: str, verbosity: str | None = None) -> None:
-        """
-        Execute ``slash run <task>`` inside a Docker container and block until
-        it completes.  Exits with the container's exit code.
-        """
-        args = self._base_args()
-        # Insert -i (attach stdin) before the image name
-        image = self.config.get("image", "slash:latest")
-        idx = args.index(image)
-        args.insert(idx, "-i")
-
-        args += ["run", task]
-        if verbosity:
-            args += ["--verbosity", verbosity]
-
-        result = subprocess.run(args)
-        sys.exit(result.returncode)
 
     def run_repl(self, verbosity: str | None = None) -> None:
         """

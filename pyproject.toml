@@ -1,12 +1,10 @@
 [project]
 name = "slash"
 version = "0.1.0"
-description = "A slash coding agent CLI built on the Claude Agent SDK"
+description = "A slash coding agent CLI — PTY proxy around the native claude interactive session"
 requires-python = ">=3.13"
 dependencies = [
-    "claude-agent-sdk",
     "click>=8.0",
-    "prompt-toolkit>=3.0",
     "pyyaml>=6.0",
     "rich>=13.0",
 ]

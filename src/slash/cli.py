@@ -2,13 +2,13 @@
 slash — a slash coding agent CLI.
 
 Commands:
-  slash init          Initialise a workspace in the current directory
-  slash update        Refresh managed hook files from latest templates
-  slash run <task>    Run the agent on a task
-  slash repl          Start an interactive REPL session
-  slash status        Show a summary of recent audit events
-  slash review        Review tasks awaiting operator sign-off
-  slash gc            Prune old task data from tracer.db
+  slash init      Initialise a workspace in the current directory
+  slash update    Refresh managed hook files from latest templates
+  slash           Start an interactive REPL session (default when no subcommand given)
+  slash status    Show a summary of recent audit events
+  slash review    Review tasks awaiting operator sign-off
+  slash gc        Prune old task data from tracer.db
+  slash db        Run a SQL query against the tracer database
 """
 import json
 from pathlib import Path
@@ -114,34 +114,6 @@ def update(dir: str | None) -> None:
     from slash.init import run_update
     root = Path(dir) if dir else _find_root()
     run_update(root)
-
-
-# ── run ───────────────────────────────────────────────────────────────────────
-
-@main.command()
-@click.argument("task")
-@click.option(
-    "--dir", "-d",
-    default=None,
-    type=click.Path(file_okay=False, exists=True, resolve_path=True),
-    help="Workspace root (default: auto-detected from cwd)",
-)
-def run(task: str, dir: str | None) -> None:
-    """
-    Run the agent on a TASK.
-
-    All tool calls are governed by the hooks in .slash/hooks/ and the policy
-    in .slash/manifest.yaml.  In Docker mode, filesystem isolation is also
-    enforced by the container runtime (kernel namespaces + bind mounts).
-
-    \b
-    Examples:
-      slash run "Add docstrings to all functions in utils.py"
-      slash run "Write unit tests for the auth module"
-    """
-    from slash.runner import run_task
-    root = Path(dir) if dir else _find_root()
-    run_task(task, root)
 
 
 # ── status ────────────────────────────────────────────────────────────────────
@@ -546,16 +518,20 @@ def repl(dir: str | None, verbosity: str | None) -> None:
 
     \b
     Built-in commands (handled locally, never sent to the agent):
-      /new      Start a fresh session
+      /new      Start a fresh claude session
       /status   Show recent audit-log entries
-      /help     Show the full command list
-      /clear    Clear the terminal
+      /review   Review pending tasks
+      /db       Query the tracer database
+      /sh       Run a shell command
+      /update   Refresh hook files from latest templates
       /exit     Quit  (alias: /quit, Ctrl-D)
+
+    All other input — including claude's own built-in commands like /help,
+    /compact, /clear — is forwarded directly to the native claude REPL.
 
     \b
     Examples:
       slash repl
-      slash repl --verbosity concise
     """
     from slash.repl import start_repl
     root = Path(dir) if dir else _find_root()

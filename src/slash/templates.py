@@ -95,6 +95,16 @@ SETTINGS_JSON = """\
           }}
         ]
       }}
+    ],
+    "UserPromptSubmit": [
+      {{
+        "hooks": [
+          {{
+            "type": "command",
+            "command": "python3 .slash/hooks/user_prompt_submit.py"
+          }}
+        ]
+      }}
     ]
   }}
 }}
@@ -117,11 +127,10 @@ POLICY_MANIFEST = """\
 # control-plane protection is hardcoded and not configurable.
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
-# Set by `slash init`. Do not edit by hand once slash init has written this.
-#   mode: local   — hook-based policy only (default)
-#   mode: docker  — kernel-enforced filesystem isolation + hook policy
+# Docker is the only supported runtime mode.
+# Set by `slash init`. Do not edit the mode or docker block by hand.
 runtime:
-  mode: local
+  mode: docker
   docker:
     image: slash:latest
     memory: 2g
@@ -1460,27 +1469,12 @@ summary = {
 
 narrative = ""
 try:
-    from claude_agent_sdk import get_session_messages  # noqa: PLC0415
-    _messages = get_session_messages(session_id, directory=cwd)
-    for _msg in reversed(_messages):
-        if getattr(_msg, "type", None) != "assistant":
-            continue
-        _message = getattr(_msg, "message", None) or {}
-        _content = (_message.get("content") if isinstance(_message, dict) else getattr(_message, "content", [])) or []
-        _texts = []
-        for _block in _content:
-            if isinstance(_block, dict) and _block.get("type") == "text":
-                _text = (_block.get("text") or "").strip()
-                if _text:
-                    _texts.append(_text)
-            elif hasattr(_block, "type") and _block.type == "text":
-                _text = (getattr(_block, "text", "") or "").strip()
-                if _text:
-                    _texts.append(_text)
-        _candidate = "\\n\\n".join(_texts).strip()
-        if _candidate:
-            narrative = _candidate
-            break
+    import urllib.parse as _urlparse
+    _project_key = _urlparse.quote(str(Path(cwd).resolve()), safe="")
+    _transcript  = Path.home() / ".claude" / "projects" / _project_key / f"{session_id}.jsonl"
+    if _transcript.exists():
+        from slash.tracer import extract_narrative_from_transcript  # noqa: PLC0415
+        narrative = extract_narrative_from_transcript(str(_transcript)) or ""
 except Exception:
     pass
 
@@ -1652,7 +1646,7 @@ if not non_interactive and raw_input:
     sys.exit(0)
 
 # ── Approve (blank line or CI default) ────────────────────────────────────────
-print("  Approved — task closed.", file=_tty_w, flush=True)
+    print("  Approved — task closed.", file=_tty_w, flush=True)
 if _tty_w is not sys.stderr:
     _tty_w.close()
 try:
@@ -1660,4 +1654,176 @@ try:
 except Exception:
     pass
 sys.exit(0)
+'''
+
+USER_PROMPT_SUBMIT_HOOK = '''\
+#!/usr/bin/env python3
+"""
+UserPromptSubmit hook — intercepts hash commands before Claude processes them.
+
+Commands handled here (output-only, non-interactive):
+  #db [SQL]   — query tracer.db
+  #status     — tail recent audit log
+  #sh <cmd>   — run a shell command
+  #update     — refresh hook files from latest templates
+
+Commands NOT handled here (remain in PTY proxy or need process control):
+  /review     — interactive approval UI  (PTY proxy)
+  /new        — restart claude session   (PTY proxy)
+  /exit /quit — terminate claude         (PTY proxy)
+
+On match: output is printed to /dev/tty, hook exits 2 to block Claude.
+On miss:  exit 0 — Claude\'s own /help, /compact, /clear, etc. pass through.
+"""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+try:
+    event = json.load(sys.stdin)
+except (json.JSONDecodeError, EOFError):
+    sys.exit(0)
+
+prompt     = (event.get("prompt") or "").strip()
+cwd        = event.get("cwd", ".")
+session_id = event.get("session_id")
+agent_id   = event.get("agent_id")
+
+# ── Register root session on first prompt (idempotent) ────────────────────────
+if session_id and not agent_id and not prompt.startswith("#"):
+    db_path = Path(cwd) / ".slash" / "tracer.db"
+    if db_path.exists():
+        try:
+            from slash.tracer import SlashTracer  # noqa: PLC0415
+            SlashTracer(str(db_path)).open_task(session_id, prompt)
+        except Exception:
+            pass
+
+if not prompt.startswith("#"):
+    sys.exit(0)
+
+parts    = prompt.split(None, 1)
+cmd_word = parts[0].lower()
+args     = parts[1].strip() if len(parts) > 1 else ""
+
+_HOOK_COMMANDS = frozenset({"#db", "#status", "#sh", "#update"})
+
+if cmd_word not in _HOOK_COMMANDS:
+    sys.exit(0)  # not a known hash command — pass through to Claude
+
+# ── Open /dev/tty for output ──────────────────────────────────────────────────
+try:
+    _tty = open("/dev/tty", "w")
+except OSError:
+    _tty = sys.stderr
+
+try:
+    from rich.console import Console as _Con
+    con = _Con(file=_tty, highlight=False)
+except Exception:
+    con = None
+
+
+def _p(text="", **kw):
+    if con:
+        con.print(text, **kw)
+    else:
+        print(text, file=_tty)
+
+
+# ── #db ───────────────────────────────────────────────────────────────────────
+if cmd_word == "#db":
+    import sqlite3 as _sl
+    db_path = Path(cwd) / ".slash" / "tracer.db"
+    if not db_path.exists():
+        _p("[red]No tracer.db found.[/red] Run [bold]slash init[/bold] first.")
+    else:
+        query = args or (
+            "SELECT session_id, status, "
+            "datetime(started_at/1000,\'unixepoch\') AS started, "
+            "substr(prompt,1,60) AS prompt "
+            "FROM tasks WHERE parent_session_id IS NULL "
+            "ORDER BY started_at DESC LIMIT 10"
+        )
+        conn = _sl.connect(str(db_path))
+        conn.row_factory = _sl.Row
+        try:
+            rows = conn.execute(query).fetchall()
+        except _sl.Error as exc:
+            _p(f"[red]SQL error:[/red] {exc}")
+            rows = []
+        finally:
+            conn.close()
+        if rows and con:
+            from rich.table import Table as _Table
+            table = _Table(show_header=True, header_style="bold cyan", box=None)
+            for col in rows[0].keys():
+                table.add_column(col)
+            for row in rows:
+                table.add_row(*[str(v) if v is not None else "" for v in row])
+            con.print(table)
+        elif rows:
+            for row in rows:
+                print(dict(row), file=_tty)
+        else:
+            _p("[dim]No rows.[/dim]")
+
+# ── #status ───────────────────────────────────────────────────────────────────
+elif cmd_word == "#status":
+    import sqlite3 as _sl
+    db_path = Path(cwd) / ".slash" / "tracer.db"
+    if not db_path.exists():
+        _p("[red]No tracer.db found.[/red] Run [bold]slash init[/bold] first.")
+    else:
+        conn = _sl.connect(str(db_path))
+        conn.row_factory = _sl.Row
+        try:
+            rows = conn.execute(
+                "SELECT ts, substr(session_id,1,8) AS session, tool, outcome "
+                "FROM audit_events ORDER BY ts DESC LIMIT 20"
+            ).fetchall()
+        except _sl.Error:
+            rows = []
+        finally:
+            conn.close()
+        if rows and con:
+            from rich.table import Table as _Table
+            table = _Table(
+                show_header=True, header_style="bold cyan", box=None,
+                title="Audit log — last 20 entries (newest first)",
+            )
+            for col in rows[0].keys():
+                table.add_column(col)
+            for row in rows:
+                table.add_row(*[str(v) if v is not None else "" for v in row])
+            con.print(table)
+        elif rows:
+            for row in rows:
+                print(dict(row), file=_tty)
+        else:
+            _p("[dim]No audit events yet.[/dim]")
+
+# ── #sh ───────────────────────────────────────────────────────────────────────
+elif cmd_word == "#sh":
+    if not args:
+        _p("Usage: #sh <command>")
+    else:
+        subprocess.run(args, shell=True, stdout=_tty, stderr=_tty)
+
+# ── #update ───────────────────────────────────────────────────────────────────
+elif cmd_word == "#update":
+    try:
+        from slash.init import run_update
+        run_update(Path(cwd))
+    except Exception as e:
+        _p(f"[red]Update failed:[/red] {e}")
+
+_p()
+if _tty is not sys.stderr:
+    _tty.close()
+
+# Block Claude from processing the command as a regular prompt.
+print(f"[slash] {cmd_word} handled locally.", file=sys.stderr)
+sys.exit(2)
 '''
