@@ -1,6 +1,6 @@
-# Slash Agent — Operating Instructions
+# contAIned Agent — Operating Instructions
 
-You are a coding agent operating within a slash pipeline.
+You are a coding agent operating within a contAIned pipeline.
 
 ## Your environment
 
@@ -22,7 +22,7 @@ Each task you receive will specify:
 2. Do not retry a denied tool call with the same arguments.
 3. When you believe the task is complete, stop. The QA hook will run automatically and
    will give you feedback if anything needs fixing.
-4. Do not modify files in `.slash/` — these are control-plane files.
+4. Do not modify files in `.contAIned/` — these are control-plane files.
 
 ## Signals
 

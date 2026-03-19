@@ -1,15 +1,60 @@
-# slash
+# contAIned
 
 A coding agent CLI built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview).
 
 The agent operates within a defined workspace inside an isolated Docker container. All tool calls are audited. Policy is enforced by hook scripts before every tool call — the operator never needs to approve individual actions.
 
+## Why contAIned?
+
+Two existing primitives handle adjacent problems but leave a critical gap:
+
+### Claude Code's `/sandbox`
+
+Claude Code ships a built-in `/sandbox` feature that uses OS-level isolation (Seatbelt on macOS, bubblewrap on Linux) to constrain Bash subprocesses — blocking writes to sensitive paths, restricting outbound network access, and so on. It is useful, and contAIned can run alongside it.
+
+What it does not cover: Claude's own SDK tool calls — `Write`, `Edit`, `Read`, `Glob`, `Grep` — are mediated entirely within the Claude Code process. They never cross the OS process boundary that `/sandbox` watches. A policy that says "deny writes to `.contAIned/`" in the sandbox has no effect on a `Write` tool call; only a `PreToolUse` hook does.
+
+Beyond the coverage gap, `/sandbox` has no concept of:
+- An audit log of what the agent did and why
+- A task lifecycle with human review before changes are accepted
+- Quality gates that block the agent from declaring success until checks pass
+- Live, per-project policy that an operator can update mid-session
+
+### Docker AI Sandboxes
+
+[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) run agents inside lightweight microVMs with private Docker daemons, providing strong host-system isolation. The isolation guarantee is real and valuable.
+
+The design philosophy is explicitly "YOLO mode by default — agents work without asking permission." It solves the question *"can the agent damage my host?"* and answers no. It does not try to answer *"what did the agent actually do, was it correct, and did a human sign off on it?"*
+
+Additional constraints:
+- MicroVM-based sandboxes require **macOS or Windows** (Linux users fall back to legacy container mode — the same isolation Docker has always provided).
+- No per-tool-call policy hooks, no audit log, no operator review workflow, no QA gates.
+
+### The gap both leave open
+
+Neither primitive addresses the governance layer: *intercepting, logging, and selectively blocking individual agent tool calls, recording a content-addressed diff of every change, enforcing quality criteria before the agent can declare a task done, and requiring operator sign-off before work is accepted.*
+
+contAIned fills that gap:
+
+| Capability | `/sandbox` | Docker Sandbox | **contAIned** |
+|---|:---:|:---:|:---:|
+| Isolates agent from host filesystem | ◑ (subprocess only) | ✓ (microVM) | ✓ (Docker container) |
+| Covers SDK tool calls (`Write`, `Edit`, `Read`) | ✗ | ✗ | ✓ (PreToolUse hooks) |
+| Append-only audit log of every tool call | ✗ | ✗ | ✓ |
+| Content-addressed diff store per task | ✗ | ✗ | ✓ |
+| Operator review before changes are accepted | ✗ | ✗ | ✓ |
+| QA gate blocks agent from finishing prematurely | ✗ | ✗ | ✓ |
+| Live policy without container rebuild | ✗ | ✗ | ✓ |
+| Works on Linux in CI/CD | ✓ | ✗ (MicroVM) | ✓ |
+
+contAIned and `/sandbox` are complementary, not competing. Enabling both means subprocess writes are blocked at the OS level *and* SDK tool calls are blocked at the hook level — two independent enforcement layers from two different trust boundaries.
+
 ## Install
 
 ```bash
-uv add slash
+uv add contAIned
 # or
-pip install slash
+pip install contAIned
 ```
 
 ## Quickstart
@@ -18,21 +63,21 @@ pip install slash
 # 1. Go to your project
 cd my-project
 
-# 2. Initialise the slash workspace (builds the Docker image, wires hooks)
-slash init
+# 2. Initialise the contAIned workspace (builds the Docker image, wires hooks)
+contAIned init
 
 # 3. Start a session
-slash
+contAIned
 ```
 
 ## Commands
 
-### `slash`
+### `contAIned`
 
-Starts an interactive Claude Code session inside the slash container.
+Starts an interactive Claude Code session inside the contAIned container.
 
 ```bash
-slash
+contAIned
 ```
 
 Claude Code runs as a direct child process with your terminal inherited — all I/O passes through unmodified. The agent has access to your project workspace (bind-mounted at `/workspace`) and nothing else.
@@ -54,15 +99,15 @@ Any other input is forwarded verbatim to the agent.
 
 ---
 
-### `slash init [DIRECTORY]`
+### `contAIned init [DIRECTORY]`
 
-Scaffolds the slash workspace in the target directory (default: current directory).
+Scaffolds the contAIned workspace in the target directory (default: current directory).
 
 ```bash
-slash init              # initialise in current directory
-slash init ./myrepo     # initialise in a specific directory
-slash init --force      # re-run setup wizard (reconfigure model, docker, etc.)
-slash init --rebuild    # force-rebuild the Docker image without re-running wizard
+contAIned init              # initialise in current directory
+contAIned init ./myrepo     # initialise in a specific directory
+contAIned init --force      # re-run setup wizard (reconfigure model, docker, etc.)
+contAIned init --rebuild    # force-rebuild the Docker image without re-running wizard
 ```
 
 Runs an interactive wizard:
@@ -73,7 +118,7 @@ Runs an interactive wizard:
 Creates:
 
 ```
-.slash/
+.contAIned/
   hooks/
     restrict_reads.py    ← PreToolUse: read path enforcement
     restrict_writes.py   ← PreToolUse: write path enforcement
@@ -90,7 +135,7 @@ Creates:
 CLAUDE.md                ← agent operating instructions
 ```
 
-Re-running `slash init` without `--force` refreshes hook files from the latest bundled templates and syncs any new manifest keys, without overwriting your policy values.
+Re-running `contAIned init` without `--force` refreshes hook files from the latest bundled templates and syncs any new manifest keys, without overwriting your policy values.
 
 ---
 
@@ -155,26 +200,22 @@ the agent receives feedback and keeps working.
 
 ### Defense-in-depth with Claude Code's sandbox
 
-Claude Code has a built-in `/sandbox` feature that uses OS-level isolation (Seatbelt on macOS, bubblewrap on Linux) to restrict what Bash subprocesses can read or write. You can enable it alongside slash for an extra layer of protection.
+As explained in [Why contAIned?](#why-contained), Claude Code's `/sandbox` covers OS-level subprocess isolation while contAIned's PreToolUse hooks cover SDK tool calls — they protect different trust boundaries and work best together.
 
-Add a `sandbox` block to `.claude/settings.json`:
+To enable both, add a `sandbox` block to `.claude/settings.json`:
 
 ```json
 {
   "sandbox": {
     "enabled": true,
     "filesystem": {
-      "denyWrite": [".slash"]
+      "denyWrite": [".contAIned"]
     }
   }
 }
 ```
 
-**What this adds:** prevents any Bash subprocess (shell scripts, Python files executed via Bash, build tools, etc.) from writing to the `.slash/` control-plane directory at the OS level.
-
-**What it does not replace:** the sandbox only constrains processes that cross the OS process boundary. Claude's own `Write` and `Edit` tool calls are SDK-mediated and never cross that boundary — they are invisible to the sandbox. Slash's PreToolUse hooks (`restrict_writes.py`, `restrict_reads.py`, `restrict_bash.py`) remain the authoritative gate for those calls.
-
-In short: sandbox covers subprocess writes; slash hooks cover SDK tool calls. Enabling both means a compromised subprocess and a misbehaving tool call each face an independent enforcement layer.
+This prevents any Bash subprocess (shell scripts, Python executed via Bash, build tools, etc.) from writing to the `.contAIned/` control-plane directory at the OS level — a second line of defence behind the PreToolUse hook that already enforces this for `Write`/`Edit` calls.
 
 ### Tracer
 
@@ -184,9 +225,9 @@ In short: sandbox covers subprocess writes; slash hooks cover SDK tool calls. En
 
 ## Customising policy
 
-Edit `.slash/manifest.yaml` to adjust what the agent can do, or use `#update <dotpath>=<value>` from within a session. Manifest changes are live — hooks read the manifest on every tool call.
+Edit `.contAIned/manifest.yaml` to adjust what the agent can do, or use `#update <dotpath>=<value>` from within a session. Manifest changes are live — hooks read the manifest on every tool call.
 
-Edit `.slash/hooks/qa.py` to add project-specific quality checks (linting, tests, etc.). Hook file changes require a container rebuild (`slash init --rebuild`).
+Edit `.contAIned/hooks/qa.py` to add project-specific quality checks (linting, tests, etc.). Hook file changes require a container rebuild (`contAIned init --rebuild`).
 
 Edit `.claude/settings.json` to add or remove allow/deny rules.
 
@@ -196,7 +237,7 @@ Edit `.claude/settings.json` to add or remove allow/deny rules.
 
 ### Garbage collection (`tracer.db`)
 
-`tracer.db` grows without bound. The old `slash gc` CLI command has been removed along with all other subcommands; there is currently no way to trigger GC from within a session.
+`tracer.db` grows without bound. The old `contAIned gc` CLI command has been removed along with all other subcommands; there is currently no way to trigger GC from within a session.
 
 **Pending:** implement `#gc [--keep-days N]` as a hash command in the `UserPromptSubmit` hook. Until then, the database can be pruned manually:
 

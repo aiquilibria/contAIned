@@ -1,7 +1,7 @@
 [project]
-name = "slash"
+name = "contained"
 version = "0.1.0"
-description = "A slash coding agent CLI — PTY proxy around the native claude interactive session"
+description = "A contAIned coding agent CLI — based on Claude Code"
 requires-python = ">=3.13"
 dependencies = [
     "click>=8.0",
@@ -10,14 +10,14 @@ dependencies = [
 ]
 
 [project.scripts]
-slash = "slash.cli:main"
+contained = "contained.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/slash"]
+packages = ["src/contained"]
 
 [tool.ruff]
 target-version = "py313"

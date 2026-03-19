@@ -20,9 +20,9 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 # Install uv for fast Python package management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Install slash from the distributed package
-COPY . /opt/slash
-RUN uv pip install --system --python python3.13 --no-cache --break-system-packages /opt/slash
+# Install contAIned from the distributed package
+COPY . /opt/contAIned
+RUN uv pip install --system --python python3.13 --no-cache --break-system-packages /opt/contAIned
 
 # Create a non-root user whose UID/GID matches the host operator.
 # The GID may already exist in the base image (e.g., macOS staff group is 20,
@@ -52,4 +52,4 @@ RUN git config --global --add safe.directory /workspace
 
 WORKDIR /workspace
 
-ENTRYPOINT ["slash"]
+ENTRYPOINT ["contained"]

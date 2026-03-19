@@ -1,23 +1,23 @@
 """
-slash init — scaffold a slash agent workspace in the current directory.
+contAIned init — scaffold a contAIned agent workspace in the current directory.
 
 What it does:
-  1. Builds the slash Docker image and creates required network/volume
+  1. Builds the contAIned Docker image and creates required network/volume
   2. Initialises a git repo at the workspace root if one does not exist yet
-  3. Creates the .slash/ control-plane directory tree
+  3. Creates the .contAIned/ control-plane directory tree
   4. Creates the .claude/ SDK config directory with settings.json
   5. Writes CLAUDE.md with agent operating instructions
   6. Creates or updates .gitignore with appropriate entries
   7. Reports what was created and what was skipped (idempotent)
 
 Docker is the only supported runtime.  The agent always runs inside the
-slash container; SLASH_FORCE_LOCAL=1 is reserved for the in-container process.
+contAIned container; contAIned_FORCE_LOCAL=1 is reserved for the in-container process.
 
-Use `slash update` to refresh hook files after upgrading.
+Use `contAIned update` to refresh hook files after upgrading.
 User-editable files (policy manifest only) are never overwritten.
 
-Manifest location: .slash/manifest.yaml  (new)
-  Legacy path     : .slash/policy/manifest.yaml  (supported via compat shim)
+Manifest location: .contAIned/manifest.yaml  (new)
+  Legacy path     : .contAIned/policy/manifest.yaml  (supported via compat shim)
 """
 import os
 import stat
@@ -28,7 +28,7 @@ import click
 from rich.console import Console
 from rich.table import Table
 
-from slash.templates import (
+from contained.templates import (
     AUDIT_HOOK,
     CLAUDE_MD,
     GITIGNORE_BLOCK,
@@ -51,11 +51,11 @@ from slash.templates import (
 console = Console()
 
 _DEFAULT_DOCKER_CONFIG: dict = {
-    "image": "slash:latest",
+    "image": "contained:latest",
     "memory": "2g",
     "cpus": 2,
-    "network": "slash-net",
-    "agent_config_volume": "slash-agent-config",
+    "network": "contAIned-net",
+    "agent_config_volume": "contAIned-agent-config",
 }
 
 
@@ -144,17 +144,17 @@ def _touch(path: Path) -> str:
 
 def _update_gitignore(repo_root: Path) -> str:
     """
-    Create or update .gitignore with slash-specific ignore patterns.
+    Create or update .gitignore with contAIned-specific ignore patterns.
 
     - No file          → create a full starter .gitignore from GITIGNORE_TEMPLATE.
-    - File exists, .slash/ already excluded → "already configured" (no-op).
-    - File exists with old partial block    → upgrade in-place (.slash/audit/ → .slash/).
-    - File exists, no slash section         → append GITIGNORE_BLOCK.
+    - File exists, .contAIned/ already excluded → "already configured" (no-op).
+    - File exists with old partial block    → upgrade in-place (.contAIned/audit/ → .contAIned/).
+    - File exists, no contAIned section         → append GITIGNORE_BLOCK.
 
     Returns "created", "updated", or "already configured".
     """
     gitignore = repo_root / ".gitignore"
-    marker = "# slash —"  # unique marker for the slash section
+    marker = "# contAIned —"  # unique marker for the contAIned section
 
     if not gitignore.exists():
         gitignore.write_text(GITIGNORE_TEMPLATE)
@@ -162,17 +162,17 @@ def _update_gitignore(repo_root: Path) -> str:
 
     existing = gitignore.read_text()
 
-    # Already fully covered — .slash/ (with or without trailing slash) as own line.
-    if any(line.strip() in (".slash/", ".slash") for line in existing.splitlines()):
+    # Already fully covered — .contAIned/ (with or without trailing contAIned) as own line.
+    if any(line.strip() in (".contAIned/", ".contAIned") for line in existing.splitlines()):
         return "already configured"
 
     if marker in existing:
-        # Old block present but only covers .slash/audit/ — upgrade it.
-        updated = existing.replace(".slash/audit/", ".slash/")
+        # Old block present but only covers .contAIned/audit/ — upgrade it.
+        updated = existing.replace(".contAIned/audit/", ".contAIned/")
         gitignore.write_text(updated)
         return "updated"
 
-    # No slash section at all — append.
+    # No contAIned section at all — append.
     with gitignore.open("a") as f:
         f.write(GITIGNORE_BLOCK)
     return "updated"
@@ -180,23 +180,23 @@ def _update_gitignore(repo_root: Path) -> str:
 
 # ── Shared scaffolding ────────────────────────────────────────────────────────
 
-# Files managed by slash (safe to overwrite on update)
+# Files managed by contAIned (safe to overwrite on update)
 # Each entry: (path_factory, content, executable)
 def _managed_files(target: Path) -> list[tuple[Path, str, bool]]:
     settings = SETTINGS_JSON.format(workspace=str(target.resolve()))
     return [
-        (target / ".slash" / "hooks" / "_policy.py",          POLICY_LOADER_HOOK,   False),
-        (target / ".slash" / "hooks" / "restrict_reads.py",   RESTRICT_READS_HOOK,  True),
-        (target / ".slash" / "hooks" / "restrict_writes.py",  RESTRICT_WRITES_HOOK, True),
-        (target / ".slash" / "hooks" / "restrict_bash.py",    RESTRICT_BASH_HOOK,   True),
-        (target / ".slash" / "hooks" / "audit.py",            AUDIT_HOOK,           True),
-        (target / ".slash" / "hooks" / "tracer_pre.py",       TRACER_PRE_HOOK,      True),
-        (target / ".slash" / "hooks" / "tracer_post.py",      TRACER_POST_HOOK,     True),
-        (target / ".slash" / "hooks" / "subagent_start.py",   SUBAGENT_START_HOOK,  True),
-        (target / ".slash" / "hooks" / "subagent_stop.py",    SUBAGENT_STOP_HOOK,   True),
-        (target / ".slash" / "hooks" / "summarizer.py",       SUMMARIZER_HOOK,      True),
-        (target / ".slash" / "hooks" / "qa.py",               QA_HOOK,              True),
-        (target / ".slash" / "hooks" / "user_prompt_submit.py", USER_PROMPT_SUBMIT_HOOK, True),
+        (target / ".contAIned" / "hooks" / "_policy.py",          POLICY_LOADER_HOOK,   False),
+        (target / ".contAIned" / "hooks" / "restrict_reads.py",   RESTRICT_READS_HOOK,  True),
+        (target / ".contAIned" / "hooks" / "restrict_writes.py",  RESTRICT_WRITES_HOOK, True),
+        (target / ".contAIned" / "hooks" / "restrict_bash.py",    RESTRICT_BASH_HOOK,   True),
+        (target / ".contAIned" / "hooks" / "audit.py",            AUDIT_HOOK,           True),
+        (target / ".contAIned" / "hooks" / "tracer_pre.py",       TRACER_PRE_HOOK,      True),
+        (target / ".contAIned" / "hooks" / "tracer_post.py",      TRACER_POST_HOOK,     True),
+        (target / ".contAIned" / "hooks" / "subagent_start.py",   SUBAGENT_START_HOOK,  True),
+        (target / ".contAIned" / "hooks" / "subagent_stop.py",    SUBAGENT_STOP_HOOK,   True),
+        (target / ".contAIned" / "hooks" / "summarizer.py",       SUMMARIZER_HOOK,      True),
+        (target / ".contAIned" / "hooks" / "qa.py",               QA_HOOK,              True),
+        (target / ".contAIned" / "hooks" / "user_prompt_submit.py", USER_PROMPT_SUBMIT_HOOK, True),
         (target / ".claude" / "settings.json",                settings,             False),
         (target / ".claude" / "statusline.py",               STATUSLINE_PY,        True),
         (target / "CLAUDE.md",                                CLAUDE_MD,            False),
@@ -257,7 +257,7 @@ def _sync_manifest(path: Path, template_content: str) -> str:
 # Directory markers
 def _markers(target: Path) -> list[Path]:
     return [
-        target / ".slash" / "audit" / ".gitkeep",
+        target / ".contAIned" / "audit" / ".gitkeep",
     ]
 
 
@@ -283,11 +283,11 @@ def _print_table(results: list[tuple[str, str]]) -> None:
 
 # ── Docker setup ──────────────────────────────────────────────────────────────
 
-def _slash_version() -> str:
-    """Return the installed slash package version, or 'unknown' if undetectable."""
+def _contAIned_version() -> str:
+    """Return the installed contAIned package version, or 'unknown' if undetectable."""
     try:
         import importlib.metadata
-        return importlib.metadata.version("slash")
+        return importlib.metadata.version("contAIned")
     except Exception:
         return "unknown"
 
@@ -295,21 +295,21 @@ def _slash_version() -> str:
 def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> None:
     """
     Perform Docker infrastructure setup for a workspace:
-      1. Build (or rebuild) the ``slash:latest`` image from the bundled Dockerfile.
-         The image is stamped with a ``slash.version`` label.  If the image already
-         exists *and* its label matches the currently installed slash version, the
+      1. Build (or rebuild) the ``contained:latest`` image from the bundled Dockerfile.
+         The image is stamped with a ``contAIned.version`` label.  If the image already
+         exists *and* its label matches the currently installed contAIned version, the
          build is skipped.  A version mismatch (e.g. after ``pip install --upgrade
-         slash``) triggers an automatic rebuild so the container always runs the
-         same slash code as the host.
+         contAIned``) triggers an automatic rebuild so the container always runs the
+         same contAIned code as the host.
          Pass ``rebuild=True`` to force a full rebuild regardless of the version label
          (equivalent to ``docker build --no-cache`` in intent, though the layer cache
          is still used to keep the build fast).
-      2. Create the ``slash-agent-config`` named volume.
-      3. Create the ``slash-net`` bridge network.
+      2. Create the ``contAIned-agent-config`` named volume.
+      3. Create the ``contAIned-net`` bridge network.
 
     Raises ``RuntimeError`` on any failure (including Docker not found).
     """
-    from slash.docker_runner import _find_docker
+    from contained.docker_runner import _find_docker
 
     # Locate docker executable (raises FileNotFoundError with helpful message)
     try:
@@ -317,16 +317,16 @@ def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> No
     except FileNotFoundError as exc:
         raise RuntimeError(str(exc)) from exc
 
-    import slash  # used to locate the bundled Dockerfile
+    import contained  # used to locate the bundled Dockerfile
 
-    slash_pkg = Path(slash.__file__).parent
-    dockerfile = slash_pkg / "runtime" / "Dockerfile"
+    contAIned_pkg = Path(contained.__file__).parent
+    dockerfile = contAIned_pkg / "runtime" / "Dockerfile"
     # The build context must be the project root (where pyproject.toml lives)
-    project_root = slash_pkg.parent.parent
+    project_root = contAIned_pkg.parent.parent
 
     # 1. Build image — skip only when image exists AND its version label matches
     image = config["image"]
-    current_version = _slash_version()
+    current_version = _contAIned_version()
 
     needs_build = True
     if rebuild:
@@ -336,7 +336,7 @@ def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> No
     else:
         inspect = subprocess.run(
             [docker_bin, "image", "inspect",
-             "--format", "{{index .Config.Labels \"slash.version\"}}",
+             "--format", "{{index .Config.Labels \"contAIned.version\"}}",
              image],
             capture_output=True,
             text=True,
@@ -363,7 +363,7 @@ def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> No
                 docker_bin, "build",
                 "--build-arg", f"HOST_UID={os.getuid()}",
                 "--build-arg", f"HOST_GID={os.getgid()}",
-                "--label", f"slash.version={current_version}",
+                "--label", f"contAIned.version={current_version}",
                 "-t", image,
                 "-f", str(dockerfile),
                 str(project_root),
@@ -466,13 +466,13 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
 
     Pass ``rebuild=True`` (``--rebuild`` on the CLI) to force a Docker image
     rebuild even when the image's version label already matches the installed
-    slash version.
+    contAIned version.
     """
     target = target.resolve()
-    console.print(f"\n[bold]slash init[/bold] — [dim]{target}[/dim]\n")
+    console.print(f"\n[bold]contAIned init[/bold] — [dim]{target}[/dim]\n")
 
-    manifest_new = target / ".slash" / "manifest.yaml"
-    manifest_old = target / ".slash" / "policy" / "manifest.yaml"
+    manifest_new = target / ".contAIned" / "manifest.yaml"
+    manifest_old = target / ".contAIned" / "policy" / "manifest.yaml"
     already_init = manifest_new.exists() or manifest_old.exists()
 
     # Docker is the only supported runtime.
@@ -489,11 +489,11 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
     else:
         if already_init and force:
             console.print("[yellow]Re-running setup wizard (--force). Your current configuration will be replaced.[/yellow]\n")
-        console.print("Welcome to slash.\n")
+        console.print("Welcome to contAIned.\n")
         console.print(
             f"  Docker configuration:\n"
             f"    image:   [bold]{docker_config['image']}[/bold]"
-            f"  (built from slash runtime Dockerfile)\n"
+            f"  (built from contained runtime Dockerfile)\n"
             f"    memory:  {docker_config['memory']}  |  "
             f"cpus: {docker_config['cpus']}  |  "
             f"network: {docker_config['network']}\n"
@@ -507,7 +507,7 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
         console.print()
         console.print("  [dim]Audit logging:      always on[/dim]")
         console.print("  [dim]git push / --force: requires escalation[/dim]")
-        console.print("  [dim].slash/ protection: always enforced[/dim]")
+        console.print("  [dim].contAIned/ protection: always enforced[/dim]")
         console.print()
 
         # ── QA checks ────────────────────────────────────────────────────────
@@ -548,7 +548,7 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
     git_root = _git_root(target)
 
     # ── Managed files (hooks, settings, CLAUDE.md) ────────────────────────────
-    # Overwrite on re-runs so that slash init refreshes hooks to the latest
+    # Overwrite on re-runs so that contAIned init refreshes hooks to the latest
     # bundled templates.  On first-time init the files don't exist yet, so
     # overwrite=False and overwrite=True are equivalent.
     for path, content, executable in _managed_files(target):
@@ -560,17 +560,17 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
     if manifest_content is not None:
         # First-time init or --force: write wizard-generated manifest
         status = _write_file(manifest_new, manifest_content, overwrite=force)
-        results.append((".slash/manifest.yaml", status))
+        results.append((".contAIned/manifest.yaml", status))
     elif manifest_old.exists() and not manifest_new.exists():
         # Migrate old path → new path, preserving content
         manifest_new.parent.mkdir(parents=True, exist_ok=True)
         manifest_new.write_text(manifest_old.read_text())
-        results.append((".slash/manifest.yaml", "migrated"))
+        results.append((".contAIned/manifest.yaml", "migrated"))
     else:
-        # Sync any new template keys introduced in this slash version,
+        # Sync any new template keys introduced in this contAIned version,
         # preserving all user-configured values.
-        from slash.templates import POLICY_MANIFEST
-        results.append((".slash/manifest.yaml", _sync_manifest(manifest_new, POLICY_MANIFEST)))
+        from contained.templates import POLICY_MANIFEST
+        results.append((".contAIned/manifest.yaml", _sync_manifest(manifest_new, POLICY_MANIFEST)))
 
     # ── Directory markers ─────────────────────────────────────────────────────
     for path in _markers(target):
@@ -584,7 +584,7 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
 
     console.print(f"\n[bold]Workspace initialised.[/bold] [dim]runtime: docker ({docker_config['image']})[/dim]")
 
-    console.print("  slash run \"<your task here>\"  # For one-time tasks")
-    console.print("  slash  # For REPL\n")
+    console.print("  contAIned run \"<your task here>\"  # For one-time tasks")
+    console.print("  contAIned  # For REPL\n")
 
 

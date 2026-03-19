@@ -1,7 +1,7 @@
 """
-slash Docker runtime — executes slash commands inside an isolated container.
+contAIned Docker runtime — executes contAIned commands inside an isolated container.
 
-When ``slash`` is invoked, it delegates here to run the agent inside an
+When ``contAIned`` is invoked, it delegates here to run the agent inside an
 isolated Docker container.  The container receives only the workspace
 bind-mount; the rest of the host filesystem is invisible.
 
@@ -94,13 +94,13 @@ def _find_docker() -> str:
 
 class DockerRunner:
     """
-    Wraps ``docker run`` to execute ``slash`` inside a container
+    Wraps ``docker run`` to execute ``contAIned`` inside a container
     configured from the ``runtime.docker`` block of the manifest.
 
     Parameters
     ----------
     docker_config:
-        The ``runtime.docker`` dict from ``.slash/manifest.yaml``.
+        The ``runtime.docker`` dict from ``.contAIned/manifest.yaml``.
     workspace:
         Absolute path to the workspace root (bound to ``/workspace`` inside
         the container).
@@ -119,10 +119,10 @@ class DockerRunner:
         """
         docker_bin = _find_docker()
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        name = f"slash-{self.workspace.name}-{os.getpid()}"
-        image = self.config.get("image", "slash:latest")
-        config_volume = self.config.get("agent_config_volume", "slash-agent-config")
-        network = self.config.get("network", "slash-net")
+        name = f"contAIned-{self.workspace.name}-{os.getpid()}"
+        image = self.config.get("image", "contained:latest")
+        config_volume = self.config.get("agent_config_volume", "contAIned-agent-config")
+        network = self.config.get("network", "contAIned-net")
         memory = self.config.get("memory", "2g")
         cpus = str(self.config.get("cpus", 2))
         # Mount the host ~/.claude directory AND ~/.claude.json so Claude Code
@@ -146,12 +146,12 @@ class DockerRunner:
             "--volume", f"{host_claude_json}:/home/agent/.claude.json",
             "--volume", f"{config_volume}:/home/agent/.config/agent",
             "--env", f"ANTHROPIC_API_KEY={api_key}",
-            # Prevent the in-container slash process from re-entering docker
+            # Prevent the in-container contAIned process from re-entering docker
             # mode when it reads the workspace manifest.  Without this flag
-            # slash repl inside the container would read the host manifest
+            # contAIned repl inside the container would read the host manifest
             # (mode: docker), call _find_docker(), fail to find docker inside
             # the container, and crash with "Docker executable not found".
-            "--env", "SLASH_FORCE_LOCAL=1",
+            "--env", "contAIned_FORCE_LOCAL=1",
         ]
         # Inject workspace .env file if present so project secrets are
         # available inside the container without being baked into the image.
@@ -178,12 +178,12 @@ class DockerRunner:
 
     def run_repl(self) -> None:
         """
-        Execute ``slash`` inside a Docker container with an interactive TTY
+        Execute ``contAIned`` inside a Docker container with an interactive TTY
         and block until the session ends.  Exits with the container's exit code.
         """
         args = self._base_args()
         # Insert -it (interactive TTY) before the image name
-        image = self.config.get("image", "slash:latest")
+        image = self.config.get("image", "contained:latest")
         idx = args.index(image)
         args.insert(idx, "-it")
 

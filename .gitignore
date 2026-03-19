@@ -22,9 +22,10 @@ build/
 # ── Node ──────────────────────────────────────────────────────────────────────
 node_modules/
 
-# ── slash — control plane ─────────────────────────────────────────────────────
-# The .slash/ directory contains hooks, policy, and audit logs managed by slash.
+# ── contAIned — control plane ─────────────────────────────────────────────────────
+# The .contAIned/ directory contains hooks, policy, and audit logs managed by contAIned.
 # Keep it out of version control.
+.contAIned/
 .slash/
 docs/*
 .claude/*

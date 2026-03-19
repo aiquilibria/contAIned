@@ -1,9 +1,9 @@
 """
-SlashTracer — continuous write tracking and task review.
+contAInedTracer — continuous write tracking and task review.
 
-Implements the core DB and write-capture API described in docs/slash-trace.md.
+Implements the core DB and write-capture API described in docs/contAIned-trace.md.
 
-Phase 1: SlashTracer class with full schema, blob store, baselines, snapshots,
+Phase 1: contAInedTracer class with full schema, blob store, baselines, snapshots,
 audit events, task lifecycle, tree diffing, and GC.
 """
 
@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS blobs (
 );
 
 -- Task / session registry.
--- One row per slash run invocation, REPL session, or sub-agent session.
+-- One row per contAIned run invocation, REPL session, or sub-agent session.
 -- NOTE: 'abandoned' status is deprecated — no new rows are written with that
 -- status.  Existing 'abandoned' rows are retained for historical record only.
 -- The normal review flow now uses only: open|pending_review|closed.
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
 CREATE INDEX IF NOT EXISTS idx_snapshots_file    ON snapshots(file_path, written_at DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshots_session ON snapshots(session_id, written_at DESC);
 
--- Audit event log (replaces .slash/audit/pipeline.jsonl).
+-- Audit event log (replaces .contAIned/audit/pipeline.jsonl).
 -- One row per tool call (all tools, not just writes).
 CREATE TABLE IF NOT EXISTS audit_events (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -377,11 +377,11 @@ def _get_init_lock(db_path: str) -> _threading.Lock:
         return _INIT_LOCKS[db_path]
 
 
-class SlashTracer:
+class contAInedTracer:
     """
     Core write-tracking and task-review engine.
 
-    Instantiate once per process with the path to `.slash/tracer.db`.
+    Instantiate once per process with the path to `.contAIned/tracer.db`.
     The database is created (with WAL mode) if it does not exist.
     All public methods are safe to call from concurrent hook subprocesses:
     SQLite WAL serialises writers; INSERT OR IGNORE guards idempotent paths.
