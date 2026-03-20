@@ -116,11 +116,7 @@ def extract_narrative_from_transcript(transcript_path: str) -> str:
     closing statement) use :func:`extract_session_narrative` instead.
     """
     try:
-        lines = (
-            Path(transcript_path)
-            .read_text(encoding="utf-8", errors="replace")
-            .splitlines()
-        )
+        lines = Path(transcript_path).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return ""
 
@@ -174,11 +170,7 @@ def extract_tool_outputs_from_transcript(transcript_path: str) -> list[dict]:
     contains no paired tool calls.
     """
     try:
-        lines = (
-            Path(transcript_path)
-            .read_text(encoding="utf-8", errors="replace")
-            .splitlines()
-        )
+        lines = Path(transcript_path).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
 
@@ -287,11 +279,7 @@ def extract_session_narrative(transcript_path: str) -> dict:
     in ``tasks.narrative`` so it is queryable via ``json_extract()``.
     """
     try:
-        lines = (
-            Path(transcript_path)
-            .read_text(encoding="utf-8", errors="replace")
-            .splitlines()
-        )
+        lines = Path(transcript_path).read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return {}
 
@@ -318,9 +306,7 @@ def extract_session_narrative(transcript_path: str) -> dict:
         if not isinstance(content, list):
             continue
 
-        has_tool_use = any(
-            isinstance(b, dict) and b.get("type") == "tool_use" for b in content
-        )
+        has_tool_use = any(isinstance(b, dict) and b.get("type") == "tool_use" for b in content)
 
         pending_text: list[str] = []
         for block in content:
@@ -348,8 +334,7 @@ def extract_session_narrative(transcript_path: str) -> dict:
                             "tool_input": {
                                 k: (str(v)[:200] if v is not None else None)
                                 for k, v in (block.get("input") or {}).items()
-                                if k
-                                in ("command", "file_path", "description", "prompt")
+                                if k in ("command", "file_path", "description", "prompt")
                             },
                             "rationale": " ".join(pending_text),
                         }
@@ -481,9 +466,7 @@ class contAInedTracer:
 
     def _retrieve_blob(self, blob_hash: str) -> bytes:
         """Return decompressed content for *blob_hash*. Raises KeyError if missing."""
-        row = self.conn.execute(
-            "SELECT content FROM blobs WHERE hash = ?", (blob_hash,)
-        ).fetchone()
+        row = self.conn.execute("SELECT content FROM blobs WHERE hash = ?", (blob_hash,)).fetchone()
         if row is None:
             raise KeyError(f"Blob not found: {blob_hash}")
         return zlib.decompress(row[0])
@@ -885,9 +868,7 @@ class contAInedTracer:
             before_lines = []  # new file
 
         # Decode "after" lines.
-        after_lines = (
-            zlib.decompress(final_row[0]).decode("utf-8", errors="replace").splitlines()
-        )
+        after_lines = zlib.decompress(final_row[0]).decode("utf-8", errors="replace").splitlines()
 
         return "\n".join(
             difflib.unified_diff(

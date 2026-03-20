@@ -236,7 +236,10 @@ class DockerRunner:
             return None
 
         docker_bin = _find_docker()
-        domains: list[str] = egress.get("allowed_domains", ["api.anthropic.com"])
+        domains: list[str] = egress.get(
+            "allowed_domains",
+            ["api.anthropic.com", "code.claude.com", "docs.anthropic.com"],
+        )
         image = self.config.get("image", "contained:latest")
         network = self.config.get("network", "contAIned-net")
         name = self._proxy_name()

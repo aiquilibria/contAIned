@@ -27,6 +27,22 @@ RUN uv pip install --system --python python3.13 --no-cache --break-system-packag
 # Create a non-root user whose UID/GID matches the host operator.
 # The GID may already exist in the base image (e.g., macOS staff group is 20,
 # which conflicts with Debian's dialout group), so we reuse it if present.
+# Bake managed policy settings into the image.
+# managed-settings.json registers enforcement hooks at the highest-precedence
+# settings level — Claude Code blocks all user-defined hooks when this file is
+# present, eliminating the circular self-protection problem.
+RUN mkdir -p /etc/claude-code /etc/contained
+COPY src/contained/runtime/managed-settings.json /etc/claude-code/managed-settings.json
+COPY src/contained/runtime/statusline.py /etc/contained/statusline.py
+
+# Optional: bake the operator manifest into the image so hooks read policy
+# parameters from /etc/contained/manifest.yaml rather than the workspace.
+# Pass base64-encoded YAML via --build-arg MANIFEST_CONTENT=<b64>.
+ARG MANIFEST_CONTENT=""
+RUN if [ -n "$MANIFEST_CONTENT" ]; then \
+        echo "$MANIFEST_CONTENT" | base64 -d > /etc/contained/manifest.yaml; \
+    fi
+
 ARG HOST_UID=1000
 ARG HOST_GID=1000
 RUN if getent group $HOST_GID >/dev/null 2>&1; then \

@@ -24,6 +24,7 @@ pythonpath = ["src"]
 
 [tool.ruff]
 target-version = "py313"
+line-length = 100
 exclude = [".contAIned", ".claude"]
 
 [tool.ruff.lint]

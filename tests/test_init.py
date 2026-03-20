@@ -367,16 +367,10 @@ class TestManagedFiles:
         assert len(policy) == 1
         assert policy[0][2] is False
 
-    def test_settings_json_not_executable(self, tmp_path):
+    def test_settings_json_not_present(self, tmp_path):
         entries = _managed_files(tmp_path)
         settings = [e for e in entries if "settings.json" in str(e[0])]
-        assert len(settings) == 1
-        assert settings[0][2] is False
-
-    def test_settings_json_contains_workspace_path(self, tmp_path):
-        entries = _managed_files(tmp_path)
-        settings = next(e for e in entries if "settings.json" in str(e[0]))
-        assert str(tmp_path.resolve()) in settings[1]
+        assert len(settings) == 0
 
     def test_claude_md_present(self, tmp_path):
         entries = _managed_files(tmp_path)

@@ -118,9 +118,9 @@ class TestBlobStore:
         h1 = tracer._store_blob(content)
         h2 = tracer._store_blob(content)
         assert h1 == h2
-        count = tracer.conn.execute(
-            "SELECT COUNT(*) FROM blobs WHERE hash = ?", (h1,)
-        ).fetchone()[0]
+        count = tracer.conn.execute("SELECT COUNT(*) FROM blobs WHERE hash = ?", (h1,)).fetchone()[
+            0
+        ]
         assert count == 1
 
     def test_missing_blob_raises_key_error(self, tracer: contAInedTracer) -> None:
@@ -130,9 +130,7 @@ class TestBlobStore:
     def test_content_is_zlib_compressed(self, tracer: contAInedTracer) -> None:
         content = b"compressible" * 100
         h = tracer._store_blob(content)
-        row = tracer.conn.execute(
-            "SELECT content FROM blobs WHERE hash = ?", (h,)
-        ).fetchone()
+        row = tracer.conn.execute("SELECT content FROM blobs WHERE hash = ?", (h,)).fetchone()
         # raw stored bytes must be decompressible and round-trip
         assert zlib.decompress(row[0]) == content
 
@@ -148,9 +146,7 @@ class TestBlobStore:
 
 
 class TestCaptureBaseline:
-    def test_new_file_returns_none(
-        self, tracer: contAInedTracer, tmp_path: Path
-    ) -> None:
+    def test_new_file_returns_none(self, tracer: contAInedTracer, tmp_path: Path) -> None:
         nonexistent = str(tmp_path / "new.txt")
         tracer.open_task("S1", "task")
         result = tracer.capture_baseline("S1", nonexistent)
@@ -168,18 +164,14 @@ class TestCaptureBaseline:
         assert row is not None
         assert row[0] is None
 
-    def test_existing_file_returns_hash(
-        self, tracer: contAInedTracer, tmp_file
-    ) -> None:
+    def test_existing_file_returns_hash(self, tracer: contAInedTracer, tmp_file) -> None:
         p = tmp_file("foo.txt", "original content\n")
         tracer.open_task("S1", "task")
         h = tracer.capture_baseline("S1", str(p))
         assert h is not None
         assert len(h) == 64  # SHA-256 hex
 
-    def test_idempotent_second_call_ignored(
-        self, tracer: contAInedTracer, tmp_file
-    ) -> None:
+    def test_idempotent_second_call_ignored(self, tracer: contAInedTracer, tmp_file) -> None:
         p = tmp_file("foo.txt", "v1\n")
         tracer.open_task("S1", "task")
         h1 = tracer.capture_baseline("S1", str(p))
@@ -198,9 +190,7 @@ class TestCaptureBaseline:
         ).fetchone()[0]
         assert stored_hash == h1
 
-    def test_different_sessions_independent(
-        self, tracer: contAInedTracer, tmp_file
-    ) -> None:
+    def test_different_sessions_independent(self, tracer: contAInedTracer, tmp_file) -> None:
         p = tmp_file("foo.txt", "v1\n")
         tracer.open_task("S1", "task")
         tracer.open_task("S2", "task")
@@ -243,9 +233,7 @@ class TestTrackWrite:
         count = tracer.conn.execute("SELECT COUNT(*) FROM snapshots").fetchone()[0]
         assert count == 3
 
-    def test_identical_content_deduplicates_blobs(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_identical_content_deduplicates_blobs(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.track_write("S1", "a.py", b"same")
         tracer.track_write("S1", "b.py", b"same")
@@ -360,9 +348,7 @@ class TestLogEvent:
         ev = self._events(tracer)[0]
         assert len(ev["input"]["prompt_head"]) == 200
 
-    def test_unknown_tool_fallback_first_five_keys(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_unknown_tool_fallback_first_five_keys(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         inp = {f"k{i}": f"v{i}" for i in range(8)}
         tracer.log_event("S1", "SomeTool", inp, "success")
@@ -382,9 +368,7 @@ class TestLogEvent:
         assert ev["outcome"] == "denied"
         assert ev["reason"] == "restricted path"
 
-    def test_log_event_never_raises_on_bad_session(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_log_event_never_raises_on_bad_session(self, tracer: contAInedTracer) -> None:
         """log_event must not raise even for an unknown session_id."""
         tracer.log_event("UNKNOWN_SESSION", "Write", {}, "success")
 
@@ -437,9 +421,7 @@ class TestActorIdResolution:
 class TestTaskLifecycle:
     def test_open_task_creates_row(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "do something")
-        row = tracer.conn.execute(
-            "SELECT status FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT status FROM tasks WHERE session_id = 'S1'").fetchone()
         assert row is not None
         assert row[0] == "open"
 
@@ -447,9 +429,7 @@ class TestTaskLifecycle:
         """Calling open_task again must not overwrite the original prompt."""
         tracer.open_task("S1", "prompt v1")
         tracer.open_task("S1", "prompt v2")
-        row = tracer.conn.execute(
-            "SELECT prompt FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT prompt FROM tasks WHERE session_id = 'S1'").fetchone()
         assert row[0] == "prompt v1"
 
     def test_open_task_reopens_closed_task(self, tracer: contAInedTracer) -> None:
@@ -457,26 +437,20 @@ class TestTaskLifecycle:
         tracer.open_task("S1", "task")
         tracer.set_task_status("S1", "closed")
         tracer.open_task("S1", "follow-up prompt")  # second turn
-        row = tracer.conn.execute(
-            "SELECT status FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT status FROM tasks WHERE session_id = 'S1'").fetchone()
         assert row[0] == "open"
 
     def test_set_task_status_transitions(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.set_task_status("S1", "closed")
-        row = tracer.conn.execute(
-            "SELECT status FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT status FROM tasks WHERE session_id = 'S1'").fetchone()
         assert row[0] == "closed"
 
     def test_set_task_status_stores_summary(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         summary = {"files": ["a.py"], "diff": "---"}
         tracer.set_task_status("S1", "closed", summary=summary)
-        row = tracer.conn.execute(
-            "SELECT summary FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT summary FROM tasks WHERE session_id = 'S1'").fetchone()
         assert json.loads(row[0]) == summary
 
     def test_get_child_sessions(self, tracer: contAInedTracer) -> None:
@@ -746,9 +720,7 @@ class TestGC:
         tracer.set_task_status("OLD", "closed")
         # Manually backdate ended_at and snapshot written_at
         old_ms = self._old_ms()
-        tracer.conn.execute(
-            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,)
-        )
+        tracer.conn.execute("UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,))
         tracer.conn.execute(
             "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
             "VALUES ('OLD', 'x.py', ?, ?)",
@@ -778,9 +750,7 @@ class TestGC:
         tracer.open_task("OLD", "task")
         tracer.set_task_status("OLD", "closed")
         old_ms = self._old_ms()
-        tracer.conn.execute(
-            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,)
-        )
+        tracer.conn.execute("UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,))
         blob_hash = tracer._store_blob(b"orphan content")
         tracer.conn.execute(
             "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
@@ -798,9 +768,7 @@ class TestGC:
         tracer.set_task_status("OLD", "closed")
         tracer.open_task("OPEN", "open")
         old_ms = self._old_ms()
-        tracer.conn.execute(
-            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,)
-        )
+        tracer.conn.execute("UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,))
         shared_blob = tracer._store_blob(b"shared content")
         tracer.conn.execute(
             "INSERT INTO snapshots (session_id, file_path, blob_hash, written_at) "
@@ -825,9 +793,7 @@ class TestGC:
         tracer.open_task("OLD", "old")
         tracer.set_task_status("OLD", "closed")
         old_ms = self._old_ms()
-        tracer.conn.execute(
-            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,)
-        )
+        tracer.conn.execute("UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,))
         tracer.conn.commit()
 
         tracer.gc(keep_days=14)
@@ -847,9 +813,7 @@ class TestGC:
         ).fetchone()
         assert row is not None  # too recent to prune
 
-    def test_gc_preserves_10k_most_recent_audit_events(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_gc_preserves_10k_most_recent_audit_events(self, tracer: contAInedTracer) -> None:
         """
         Even if a session is old and prunable, the 10,000 most-recent events
         must not be deleted (global keep guarantee).
@@ -859,9 +823,7 @@ class TestGC:
         tracer.open_task("OLD", "old")
         tracer.set_task_status("OLD", "closed")
         old_ms = self._old_ms()
-        tracer.conn.execute(
-            "UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,)
-        )
+        tracer.conn.execute("UPDATE tasks SET ended_at = ? WHERE session_id = 'OLD'", (old_ms,))
         # Insert 5 audit events referencing the old session
         for i in range(5):
             tracer.log_event("OLD", f"T{i}", {}, "success")
@@ -924,9 +886,7 @@ class TestSingleAgentIntegration:
 
 
 class TestSubAgentIntegration:
-    def test_tree_diff_covers_all_files(
-        self, tracer: contAInedTracer, tmp_file
-    ) -> None:
+    def test_tree_diff_covers_all_files(self, tracer: contAInedTracer, tmp_file) -> None:
         """
         Simulate: SubagentStart → child writes → SubagentStop → root Stop.
         tree diff must include both root and child files.
@@ -1011,9 +971,7 @@ class TestConcurrentBaselines:
         assert "-first baseline" in diff  # earliest baseline used
         assert "+final" in diff
 
-    def test_concurrent_capture_baseline_thread_safe(
-        self, db_path: str, tmp_file
-    ) -> None:
+    def test_concurrent_capture_baseline_thread_safe(self, db_path: str, tmp_file) -> None:
         """
         Spawn two threads each opening a separate tracer connection and
         concurrently calling capture_baseline on the same file.
@@ -1042,9 +1000,7 @@ class TestConcurrentBaselines:
 
         # Both rows must exist
         t = contAInedTracer(db_path)
-        rows = t.conn.execute(
-            "SELECT session_id FROM baselines ORDER BY session_id"
-        ).fetchall()
+        rows = t.conn.execute("SELECT session_id FROM baselines ORDER BY session_id").fetchall()
         session_ids = {r[0] for r in rows}
         assert {"T1", "T2"} <= session_ids
 
@@ -1071,9 +1027,7 @@ class TestStaleOpenTaskRecovery:
         )
         tracer.conn.commit()
 
-    def test_stale_open_task_remains_open_without_action(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_stale_open_task_remains_open_without_action(self, tracer: contAInedTracer) -> None:
         """Stale open tasks are surfaced for information only; no status change
         occurs automatically — the operator takes explicit action.
         """
@@ -1114,9 +1068,7 @@ class TestGetOpenRootTasks:
     """Unit tests for the ``get_open_root_tasks`` tracer method used by the
     REPL's session-resume feature."""
 
-    def _backdate(
-        self, tracer: contAInedTracer, session_id: str, age_secs: int
-    ) -> None:
+    def _backdate(self, tracer: contAInedTracer, session_id: str, age_secs: int) -> None:
         """Set started_at to *age_secs* seconds ago for *session_id*."""
         old_ms = int((time.time() - age_secs) * 1000)
         tracer.conn.execute(
@@ -1212,9 +1164,7 @@ class TestSessionResumeSignal:
     Verifies get_open_root_tasks surfaces interrupted sessions correctly.
     """
 
-    def test_stale_open_session_id_is_retrievable(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_stale_open_session_id_is_retrievable(self, tracer: contAInedTracer) -> None:
         """Interrupted session appears in get_open_root_tasks."""
         tracer.open_task("INTERRUPTED", "big refactor")
         old_ms = int((time.time() - 7200) * 1000)
@@ -1247,9 +1197,9 @@ class TestTaskCreation:
         """Each new task creates a fresh open task row."""
         for i, sid in enumerate(("SID1", "SID2", "SID3")):
             tracer.open_task(sid, f"user message {i}")
-        count = tracer.conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status = 'open'"
-        ).fetchone()[0]
+        count = tracer.conn.execute("SELECT COUNT(*) FROM tasks WHERE status = 'open'").fetchone()[
+            0
+        ]
         assert count == 3
 
     def test_closed_tasks_queryable(self, tracer: contAInedTracer) -> None:
@@ -1318,16 +1268,12 @@ class TestExtractTraceUnitEdgeCases:
         )
         assert unit["agent_type"] == "Plan"
 
-    def test_unknown_tool_empty_input_returns_none(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_unknown_tool_empty_input_returns_none(self, tracer: contAInedTracer) -> None:
         """Fallback with an empty input dict should return None (no keys to store)."""
         unit = tracer._extract_trace_unit("WeirdTool", {}, None)
         assert unit is None
 
-    def test_unknown_tool_none_input_returns_none(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_unknown_tool_none_input_returns_none(self, tracer: contAInedTracer) -> None:
         """Fallback with None input should return None without raising."""
         unit = tracer._extract_trace_unit("WeirdTool", None, None)
         assert unit is None
@@ -1354,9 +1300,7 @@ class TestTaskLifecycleEdgeCases:
         """set_task_status without summary leaves summary as NULL."""
         tracer.open_task("S1", "task")
         tracer.set_task_status("S1", "closed")
-        row = tracer.conn.execute(
-            "SELECT summary FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT summary FROM tasks WHERE session_id = 'S1'").fetchone()
         assert row[0] is None
 
     def test_set_task_status_sets_ended_at(self, tracer: contAInedTracer) -> None:
@@ -1399,9 +1343,7 @@ class TestNarrative:
         """narrative is persisted when passed to set_task_status."""
         tracer.open_task("S1", "task")
         tracer.set_task_status("S1", "closed", narrative="I fixed the bug.")
-        row = tracer.conn.execute(
-            "SELECT narrative FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT narrative FROM tasks WHERE session_id = 'S1'").fetchone()
         assert row[0] == "I fixed the bug."
 
     def test_set_task_status_narrative_none_preserves_existing(
@@ -1412,21 +1354,15 @@ class TestNarrative:
         tracer.set_task_status("S1", "closed", narrative="First narrative.")
         # Second call without narrative — existing value must survive.
         tracer.set_task_status("S1", "closed")
-        row = tracer.conn.execute(
-            "SELECT narrative FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT narrative FROM tasks WHERE session_id = 'S1'").fetchone()
         assert row[0] == "First narrative."
 
-    def test_set_task_status_narrative_can_be_overwritten(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_set_task_status_narrative_can_be_overwritten(self, tracer: contAInedTracer) -> None:
         """Passing an explicit narrative overwrites the previous value."""
         tracer.open_task("S1", "task")
         tracer.set_task_status("S1", "closed", narrative="Draft.")
         tracer.set_task_status("S1", "closed", narrative="Final.")
-        row = tracer.conn.execute(
-            "SELECT narrative FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT narrative FROM tasks WHERE session_id = 'S1'").fetchone()
         assert row[0] == "Final."
 
     def test_summary_preserved_on_second_close(self, tracer: contAInedTracer) -> None:
@@ -1435,9 +1371,7 @@ class TestNarrative:
         summary = {"file_changes": [], "action_log": []}
         tracer.set_task_status("S1", "closed", summary=summary)
         tracer.set_task_status("S1", "closed")
-        row = tracer.conn.execute(
-            "SELECT summary FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT summary FROM tasks WHERE session_id = 'S1'").fetchone()
         assert json.loads(row[0]) == summary
 
     def test_narrative_queryable_on_closed_task(self, tracer: contAInedTracer) -> None:
@@ -1454,9 +1388,7 @@ class TestNarrative:
         """narrative is NULL when not set at close."""
         tracer.open_task("S1", "task")
         tracer.set_task_status("S1", "closed")
-        row = tracer.conn.execute(
-            "SELECT narrative FROM tasks WHERE session_id = 'S1'"
-        ).fetchone()
+        row = tracer.conn.execute("SELECT narrative FROM tasks WHERE session_id = 'S1'").fetchone()
         assert row[0] is None
 
     def test_migrate_adds_column_to_existing_db(self, db_path: str) -> None:
@@ -1471,9 +1403,7 @@ class TestNarrative:
 
     def test_narrative_column_present_in_schema(self, tracer: contAInedTracer) -> None:
         """tasks table must have a narrative column after init."""
-        cols = [
-            row[1] for row in tracer.conn.execute("PRAGMA table_info(tasks)").fetchall()
-        ]
+        cols = [row[1] for row in tracer.conn.execute("PRAGMA table_info(tasks)").fetchall()]
         assert "narrative" in cols
 
 
@@ -1573,20 +1503,14 @@ class TestExtractNarrativeFromTranscript:
         transcript.write_text(json.dumps({"type": "user", "message": {"content": []}}))
         assert extract_narrative_from_transcript(str(transcript)) == ""
 
-    def test_returns_empty_for_assistant_with_no_text_blocks(
-        self, tmp_path: Path
-    ) -> None:
+    def test_returns_empty_for_assistant_with_no_text_blocks(self, tmp_path: Path) -> None:
         """Returns empty string when last assistant message has only tool-use blocks."""
         from contained.tracer import extract_narrative_from_transcript
 
         transcript = tmp_path / "session.jsonl"
         entry = {
             "type": "assistant",
-            "message": {
-                "content": [
-                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}
-                ]
-            },
+            "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]},
         }
         transcript.write_text(json.dumps(entry))
         assert extract_narrative_from_transcript(str(transcript)) == ""
@@ -1813,9 +1737,7 @@ class TestGCEdgeCases:
         """gc on an empty database must not raise."""
         tracer.gc(keep_days=14)  # must not raise
 
-    def test_gc_removes_old_audit_events_beyond_10k(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_gc_removes_old_audit_events_beyond_10k(self, tracer: contAInedTracer) -> None:
         """Audit events beyond the 10,000 keep-floor must be pruned for old sessions."""
         tracer.open_task("OLD", "old")
         tracer.set_task_status("OLD", "closed")
@@ -1916,17 +1838,13 @@ class TestRecentAuditEventsEdgeCases:
         evs = tracer.recent_audit_events()
         assert len(evs) == 20
 
-    def test_event_reason_field_populated_on_denial(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_event_reason_field_populated_on_denial(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.log_event("S1", "Bash", {}, "denied", reason="blocked by policy")
         ev = tracer.recent_audit_events(limit=1)[0]
         assert ev["reason"] == "blocked by policy"
 
-    def test_event_input_stores_path_for_read_tools(
-        self, tracer: contAInedTracer
-    ) -> None:
+    def test_event_input_stores_path_for_read_tools(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         tracer.log_event("S1", "Grep", {"pattern": "foo"}, "success")
         ev = tracer.recent_audit_events(limit=1)[0]
@@ -1949,9 +1867,7 @@ class TestExtractToolOutputs:
     def _tool_use(self, tid: str, name: str, inp: dict) -> dict:
         return {
             "type": "assistant",
-            "message": {
-                "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]
-            },
+            "message": {"content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]},
         }
 
     def _tool_result(self, tid: str, output: str, exit_code=None) -> dict:

@@ -1,9 +1,9 @@
-# cont[AI✦]ned
+# <span style="color: #64CE91">cont[</span><span style="color: #BD3F39">AI✦</span><span style="color: #64CE91">]ned</span>
 ## take back control of your agent!
 
 A coding agent CLI built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview).
 
-The agent operates within a defined workspace inside an isolated Docker container. All tool calls are audited. Policy is enforced by hook scripts before every tool call — the operator never needs to approve individual actions.
+The agent operates within a defined workspace inside an isolated Docker container. All tool calls are audited. Policy is baked into the container image at build time and enforced by hook scripts before every tool call — the agent cannot change the rules it operates under. High-risk actions (such as git mutations) can be configured to escalate to the operator for explicit approval rather than being allowed or blocked outright.
 
 ## Contents
 
@@ -42,7 +42,7 @@ Beyond the coverage gap, `/sandbox` has no concept of:
 - An audit log of what the agent did and why
 - A task lifecycle with human review before changes are accepted
 - Quality gates that block the agent from declaring success until checks pass
-- Live, per-project policy that an operator can update mid-session
+- Operator-controlled policy that the agent itself cannot modify
 
 ### Docker AI Sandboxes
 
@@ -70,7 +70,7 @@ contAIned fills that gap:
 | Content-addressed diff store per task | ✗ | ✗ | ✓ |
 | Operator review before changes are accepted | ✗ | ✗ | ✓ |
 | QA gate blocks agent from finishing prematurely | ✗ | ✗ | ✓ |
-| Live policy without container rebuild | ✗ | ✗ | ✓ |
+| Policy baked into image; tamper-proof at runtime | ✗ | ✗ | ✓ |
 | Egress filtering — outbound network allowlist | ✗ | ✗ | ◑ (proxy sidecar; prevents accidental exfiltration) |
 | Works on Linux in CI/CD | ✓ | ✗ (MicroVM) | ✓ |
 
@@ -118,8 +118,7 @@ Claude Code runs as a direct child process with your terminal inherited — all 
 | `#db` | Query `tracer.db` — last 10 tasks |
 | `#db <SQL>` | Run arbitrary SQL against `tracer.db` |
 | `#status` | Show last 20 audit-log entries |
-| `#update` | Display the current manifest (YAML) |
-| `#update <dotpath>=<value>` | Set a manifest value live (e.g. `#update policy.qa.lint=false`) |
+| `#policy` | Show the effective policy manifest (read-only) |
 
 Any other input is forwarded verbatim to the agent.
 
@@ -130,18 +129,18 @@ Any other input is forwarded verbatim to the agent.
 Scaffolds the contAIned workspace in the target directory (default: current directory).
 
 ```bash
-contAIned init              # initialize in current directory
-contAIned init ./myrepo     # initialize in a specific directory
-contAIned init --force      # re-run setup wizard (reconfigure model, docker, etc.)
-contAIned init --rebuild    # force-rebuild the Docker image without re-running wizard
+contAIned init                         # initialize with interactive wizard
+contAIned init ./myrepo                # initialize in a specific directory
+contAIned init --force                 # re-run setup wizard (reconfigure model, docker, etc.)
+contAIned init --rebuild               # force-rebuild the Docker image without re-running wizard
+contAIned init --manifest policy.yaml  # non-interactive: bake a pre-written manifest into the image
 ```
 
-Runs an interactive wizard:
+Runs an interactive wizard to collect Docker and policy settings, then bakes those settings into the Docker image. Pass `--manifest` to skip the wizard and bake a pre-written `manifest.yaml` directly — suitable for CI/CD pipelines or reproducible team setups.
 
-1. **Docker configuration** — image name, network, resource limits.
-2. **Policy options** — audit logging, git-mutation policy, rate limiting, default model.
+**Policy is enforced at the image layer.** Hook registration and sandbox rules live in `/etc/claude-code/managed-settings.json`, which is copied into the Docker image at build time. Claude Code treats this file as operator-managed policy: hooks registered there cannot be overridden or removed by the agent at runtime. The operator manifest is baked into `/etc/contained/manifest.yaml` inside the image; hooks read policy parameters from that path exclusively.
 
-Creates:
+Creates (in the workspace):
 
 ```
 .contAIned/
@@ -151,17 +150,24 @@ Creates:
     restrict_bash.py     ← PreToolUse: bash command restrictions
     audit.py             ← PostToolUse: append-only audit log
     qa.py                ← Stop: quality gate
-  manifest.yaml          ← docker + policy + agent settings
+  manifest.yaml          ← source of truth; baked into the image at build time
   tracer.db              ← SQLite task + diff store (gitignored)
   audit/                 ← audit log (gitignored)
-
-.claude/
-  settings.json          ← Claude Code hook wiring + permission rules
 
 CLAUDE.md                ← agent operating instructions
 ```
 
-Re-running `contAIned init` without `--force` refreshes hook files from the latest bundled templates and syncs any new manifest keys, without overwriting your policy values.
+Baked into the Docker image (not in the workspace):
+
+```
+/etc/claude-code/
+  managed-settings.json  ← hook registration + sandbox rules (highest-precedence settings level)
+/etc/contained/
+  manifest.yaml          ← policy parameters read by hooks at runtime
+  statusline.py          ← status bar script
+```
+
+Re-running `contAIned init` without `--force` refreshes hook files to the latest bundled templates without touching your manifest. Use `--rebuild` or `--manifest` to rebuild the image.
 
 ---
 
@@ -200,18 +206,19 @@ The agent runs inside a Docker container. The workspace is bind-mounted at `/wor
 
 ### Governance
 
-Three hook layers evaluate every tool call:
+Every tool call passes through three layers, all registered in the image-layer managed settings and therefore unmodifiable by the agent:
 
 ```
 Tool call
     │
     ├── PreToolUse hook (restrict_writes.py / restrict_reads.py / restrict_bash.py)
-    │     Path-based enforcement — deny access outside the workspace
+    │     Path-based enforcement — deny access outside the workspace;
+    │     block writes to control-plane files (.contAIned/, managed-settings.json)
     │
-    ├── Deny rules (settings.json)
+    ├── Deny rules (managed-settings.json)
     │     Pattern-based — rm -rf, sudo, curl, git push, etc.
     │
-    ├── Allow rules (settings.json)
+    ├── Allow rules (managed-settings.json)
     │     Pattern-based — Read, Glob, Grep, safe Bash patterns
     │
     └── canUseTool callback
@@ -226,20 +233,20 @@ the agent receives feedback and keeps working.
 
 As explained in [Why contAIned?](#why-contained), Claude Code's `/sandbox` covers OS-level subprocess isolation while contAIned's PreToolUse hooks cover SDK tool calls — they protect different trust boundaries and work best together.
 
-To enable both, add a `sandbox` block to `.claude/settings.json`:
+contAIned enables both automatically. The `managed-settings.json` baked into the image includes a `sandbox` block:
 
 ```json
 {
   "sandbox": {
     "enabled": true,
     "filesystem": {
-      "denyWrite": [".contAIned"]
+      "denyWrite": [".contAIned", ".claude/settings.json"]
     }
   }
 }
 ```
 
-This prevents any Bash subprocess (shell scripts, Python executed via Bash, build tools, etc.) from writing to the `.contAIned/` control-plane directory at the OS level — a second line of defense behind the PreToolUse hook that already enforces this for `Write`/`Edit` calls.
+This prevents any Bash subprocess (shell scripts, Python executed via Bash, build tools, etc.) from writing to the `.contAIned/` control-plane directory or the Claude Code settings file at the OS level — a second enforcement layer behind the PreToolUse hooks that already block these writes at the SDK level. No manual configuration is required.
 
 ### Egress filtering
 
@@ -247,7 +254,7 @@ An agent session has multiple channels for sending data out of the workspace: Cl
 
 contAIned addresses this with a filtering proxy sidecar. When `policy.egress.enabled` is `true` in `manifest.yaml`, a second container running `contained.proxy` starts alongside the agent on the same Docker network. The agent container receives `HTTP_PROXY` and `HTTPS_PROXY` pointing at the proxy. All outbound HTTP and HTTPS traffic — including `WebFetch`, Bash network tools, and agent-written scripts that honor the proxy environment variables — is checked against a domain allowlist. Anything not on the list gets a `403 Forbidden`.
 
-Enable it and set the allowlist in `.contAIned/manifest.yaml`:
+Enable it and set the allowlist in `.contAIned/manifest.yaml`, then rebuild the image:
 
 ```yaml
 policy:
@@ -255,16 +262,16 @@ policy:
     enabled: true
     allowed_domains:
       - api.anthropic.com    # required — Anthropic API
+      - code.claude.com      # Claude Code telemetry / auth
+      - docs.anthropic.com   # documentation lookups
       # - pypi.org           # add project-specific domains as needed
 ```
 
-Or live from within a session:
-
-```
-#update policy.egress.enabled=true
+```bash
+contAIned init --rebuild
 ```
 
-The proxy sidecar starts and stops automatically with each session — no container rebuild needed.
+The proxy sidecar starts and stops automatically with each session.
 
 **Design intent — accidental exfiltration.** The proxy works by injecting `HTTP_PROXY` and `HTTPS_PROXY` into the agent container. This covers the common cases: `WebFetch` calls, Bash network tools, and agent-written scripts that use standard HTTP libraries. It is designed to prevent the agent from accidentally sending data outside the workspace — not to stop an agent that is actively trying to circumvent it. A malicious agent could bypass the proxy by opening raw sockets that ignore the env vars. Addressing that requires kernel-level enforcement; see [Known gaps](#known-gaps) below.
 
@@ -276,11 +283,20 @@ The proxy sidecar starts and stops automatically with each session — no contai
 
 ## Customizing policy
 
-Edit `.contAIned/manifest.yaml` to adjust what the agent can do, or use `#update <dotpath>=<value>` from within a session. Manifest changes are live — hooks read the manifest on every tool call.
+Policy is baked into the Docker image at build time. To change it, edit `.contAIned/manifest.yaml` and rebuild:
 
-Edit `.claude/settings.json` to add or remove allow/deny rules.
+```bash
+contAIned init --rebuild                  # rebuild with existing manifest
+contAIned init --manifest policy.yaml     # rebuild with a new manifest
+```
 
-> **Do not edit hook files directly.** Files under `.contAIned/hooks/` are generated from internal templates. Running `contAIned init` (with or without `--rebuild`) will overwrite them, silently discarding any local changes. Policy customisation belongs in `manifest.yaml`; structural hook changes should be raised as feature requests.
+Use `#policy` from within a session to view the effective policy (read-only).
+
+The image is automatically rebuilt when the manifest hash changes — running `contAIned init` after editing `manifest.yaml` will detect the change and trigger a rebuild without needing `--rebuild` explicitly.
+
+**Image tagging — design note.** The built image is always tagged `contained:latest` (or the name configured in `manifest.yaml`). The manifest hash and package version are stored as image labels and used only to decide whether a rebuild is needed. An alternative design would use content-addressed tags (`contained:<hash>`) derived from the manifest and Dockerfile content, making each configuration immutable and allowing multiple manifests to coexist as separate images. The current approach was chosen for simplicity: there is one well-known tag to reference and old images are automatically replaced rather than accumulated. The trade-off is that two sessions with different manifests cannot run simultaneously against distinct images — a rebuild overwrites the shared tag.
+
+> **Do not edit hook files directly.** Files under `.contAIned/hooks/` are generated from internal templates and will be overwritten by `contAIned init`. Hook registration, sandbox rules, and permission patterns are managed by `/etc/claude-code/managed-settings.json` baked into the Docker image — they cannot be overridden at runtime. Policy customisation belongs in `manifest.yaml`; structural hook changes should be raised as feature requests.
 
 ---
 

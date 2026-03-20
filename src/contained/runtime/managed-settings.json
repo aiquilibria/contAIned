@@ -1,0 +1,117 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(/workspace/**)",
+      "Glob(/workspace/**)",
+      "Grep(/workspace/**)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Glob|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/restrict_reads.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/restrict_writes.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/tracer_pre.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/restrict_bash.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/tracer_post.py"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/audit.py"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/subagent_start.py"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/subagent_stop.py"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/summarizer.py"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/user_prompt_submit.py"
+          }
+        ]
+      }
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "filesystem": {
+      "denyWrite": [
+        ".contAIned",
+        ".claude/settings.json"
+      ]
+    }
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "python3 /etc/contained/statusline.py"
+  }
+}

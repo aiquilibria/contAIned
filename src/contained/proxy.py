@@ -164,9 +164,7 @@ def main(allowed_domains: list[str]) -> None:
     server.listen(128)
     while True:
         conn, _ = server.accept()
-        threading.Thread(
-            target=_handle, args=(conn, allowed_domains), daemon=True
-        ).start()
+        threading.Thread(target=_handle, args=(conn, allowed_domains), daemon=True).start()
 
 
 if __name__ == "__main__":

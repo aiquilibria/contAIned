@@ -5,7 +5,7 @@ What it does:
   1. Builds the contAIned Docker image and creates required network/volume
   2. Initialises a git repo at the workspace root if one does not exist yet
   3. Creates the .contAIned/ control-plane directory tree
-  4. Creates the .claude/ SDK config directory with settings.json
+  4. Creates the .claude/ directory with statusline.py
   5. Writes CLAUDE.md with agent operating instructions
   6. Creates or updates .gitignore with appropriate entries
   7. Reports what was created and what was skipped (idempotent)
@@ -39,8 +39,6 @@ from contained.templates import (
     RESTRICT_BASH_HOOK,
     RESTRICT_READS_HOOK,
     RESTRICT_WRITES_HOOK,
-    SETTINGS_JSON,
-    STATUSLINE_PY,
     SUBAGENT_START_HOOK,
     SUBAGENT_STOP_HOOK,
     SUMMARIZER_HOOK,
@@ -166,9 +164,7 @@ def _update_gitignore(repo_root: Path) -> str:
     existing = gitignore.read_text()
 
     # Already fully covered — .contAIned/ (with or without trailing slash) as own line.
-    if any(
-        line.strip() in (".contAIned/", ".contAIned") for line in existing.splitlines()
-    ):
+    if any(line.strip() in (".contAIned/", ".contAIned") for line in existing.splitlines()):
         return "already configured"
 
     if marker in existing:
@@ -189,7 +185,6 @@ def _update_gitignore(repo_root: Path) -> str:
 # Files managed by contAIned (safe to overwrite on update)
 # Each entry: (path_factory, content, executable)
 def _managed_files(target: Path) -> list[tuple[Path, str, bool]]:
-    settings = SETTINGS_JSON.format(workspace=str(target.resolve()))
     return [
         (target / ".contAIned" / "hooks" / "_policy.py", POLICY_LOADER_HOOK, False),
         (
@@ -227,8 +222,6 @@ def _managed_files(target: Path) -> list[tuple[Path, str, bool]]:
             USER_PROMPT_SUBMIT_HOOK,
             True,
         ),
-        (target / ".claude" / "settings.json", settings, False),
-        (target / ".claude" / "statusline.py", STATUSLINE_PY, True),
         (target / "CLAUDE.md", CLAUDE_MD, False),
     ]
 
@@ -324,7 +317,13 @@ def _contAIned_version() -> str:
         return "unknown"
 
 
-def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> None:
+def _docker_setup(
+    config: dict,
+    workspace: Path,
+    *,
+    rebuild: bool = False,
+    manifest_content: str | None = None,
+) -> None:
     """
     Perform Docker infrastructure setup for a workspace:
       1. Build (or rebuild) the ``contained:latest`` image from the bundled Dockerfile.
@@ -336,6 +335,9 @@ def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> No
          Pass ``rebuild=True`` to force a full rebuild regardless of the version label
          (equivalent to ``docker build --no-cache`` in intent, though the layer cache
          is still used to keep the build fast).
+         Pass ``manifest_content`` (raw YAML string) to bake the operator manifest into
+         the image as ``/etc/contained/manifest.yaml``.  When present, hooks read policy
+         parameters from the image rather than the workspace.
       2. Create the ``contAIned-agent-config`` named volume.
       3. Create the ``contAIned-net`` bridge network.
 
@@ -356,7 +358,13 @@ def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> No
     # The build context must be the project root (where pyproject.toml lives)
     project_root = contAIned_pkg.parent.parent
 
-    # 1. Build image — skip only when image exists AND its version label matches
+    # 1. Build image — skip only when image exists, version label matches, and manifest hash matches
+    import base64
+    import hashlib
+
+    manifest_hash = hashlib.sha256((manifest_content or "").encode()).hexdigest()[:16]
+    manifest_b64 = base64.b64encode((manifest_content or "").encode()).decode()
+
     image = config["image"]
     current_version = _contAIned_version()
 
@@ -364,52 +372,55 @@ def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> No
     if rebuild:
         console.print(f"  Image [bold]{image}[/bold] — forced rebuild requested.")
     else:
+        _label_fmt = (
+            '{{index .Config.Labels "contAIned.version"}}'
+            '|{{index .Config.Labels "contAIned.manifest_hash"}}'
+        )
         inspect = subprocess.run(
-            [
-                docker_bin,
-                "image",
-                "inspect",
-                "--format",
-                '{{index .Config.Labels "contAIned.version"}}',
-                image,
-            ],
+            [docker_bin, "image", "inspect", "--format", _label_fmt, image],
             capture_output=True,
             text=True,
         )
         if inspect.returncode == 0:
-            image_version = inspect.stdout.strip()
-            if image_version == current_version:
+            parts = inspect.stdout.strip().split("|", 1)
+            image_version = parts[0]
+            image_manifest_hash = parts[1] if len(parts) > 1 else ""
+            if image_version == current_version and image_manifest_hash == manifest_hash:
                 console.print(
                     f"  Image [bold]{image}[/bold] is up to date "
                     f"([dim]{current_version}[/dim]) — skipping build."
                 )
                 needs_build = False
             else:
-                label_display = image_version if image_version else "unlabelled"
-                console.print(
-                    f"  Image [bold]{image}[/bold] is stale "
-                    f"([dim]{label_display}[/dim] → [dim]{current_version}[/dim])"
-                    " — rebuilding."
-                )
+                if image_version != current_version:
+                    label_display = image_version if image_version else "unlabelled"
+                    console.print(
+                        f"  Image [bold]{image}[/bold] is stale "
+                        f"([dim]{label_display}[/dim] → [dim]{current_version}[/dim])"
+                        " — rebuilding."
+                    )
+                else:
+                    console.print(f"  Image [bold]{image}[/bold] policy has changed — rebuilding.")
 
     if needs_build:
         console.print(f"  Building image [bold]{image}[/bold] …", end="")
+        build_cmd = [
+            docker_bin,
+            "build",
+            "--build-arg",
+            f"HOST_UID={os.getuid()}",
+            "--build-arg",
+            f"HOST_GID={os.getgid()}",
+            "--label",
+            f"contAIned.version={current_version}",
+            "--label",
+            f"contAIned.manifest_hash={manifest_hash}",
+            "--build-arg",
+            f"MANIFEST_CONTENT={manifest_b64}",
+        ]
+        build_cmd += ["-t", image, "-f", str(dockerfile), str(project_root)]
         result = subprocess.run(
-            [
-                docker_bin,
-                "build",
-                "--build-arg",
-                f"HOST_UID={os.getuid()}",
-                "--build-arg",
-                f"HOST_GID={os.getgid()}",
-                "--label",
-                f"contAIned.version={current_version}",
-                "-t",
-                image,
-                "-f",
-                str(dockerfile),
-                str(project_root),
-            ],
+            build_cmd,
             capture_output=True,
             text=True,
         )
@@ -439,6 +450,69 @@ def _docker_setup(config: dict, workspace: Path, *, rebuild: bool = False) -> No
     if result.returncode != 0 and "already exists" not in result.stderr:
         raise RuntimeError(f"docker network create {net}: {result.stderr.strip()}")
     console.print(f"  Network [bold]{net}[/bold] ready.")
+
+
+# ── Policy wizard ─────────────────────────────────────────────────────────────
+
+
+def _run_wizard(docker_config: dict) -> str:
+    """Run the interactive policy wizard and return manifest YAML."""
+    console.print("  Docker configuration:")
+    console.print(
+        f"    image:   [bold]{docker_config['image']}[/bold]"
+        f"  (built from contained runtime Dockerfile)"
+    )
+    console.print(
+        f"    memory:  {docker_config['memory']}  |  "
+        f"cpus: {docker_config['cpus']}  |  "
+        f"network: {docker_config['network']}\n"
+    )
+    console.print("  [dim]Audit logging:      always on[/dim]")
+    console.print("  [dim]git push / --force: requires escalation[/dim]")
+    console.print("  [dim].contAIned/ protection: always enforced[/dim]")
+    console.print()
+
+    # ── QA checks ────────────────────────────────────────────────────────────
+    console.print("? QA checks (enabled by default — press Enter to keep):")
+    qa_syntax = click.confirm("    syntax  (py_compile)", default=True)
+    qa_lint = click.confirm("    lint    (ruff check)", default=True)
+    qa_format = click.confirm("    format  (ruff format --check)", default=True)
+    qa_type = click.confirm("    type    (pyright)", default=True)
+    console.print()
+
+    qa_choices = {
+        "syntax": qa_syntax,
+        "lint": qa_lint,
+        "format": qa_format,
+        "type": qa_type,
+    }
+
+    # ── Model ─────────────────────────────────────────────────────────────────
+    model = click.prompt("? Default model", default="claude-sonnet-4-6")
+    console.print()
+
+    # ── Egress ────────────────────────────────────────────────────────────────
+    egress_enabled = click.confirm(
+        "? Enable outbound network egress policy"
+        " (api.anthropic.com, code.claude.com, docs.anthropic.com always allowed)",
+        default=True,
+    )
+    egress_extra_domains: list[str] = []
+    if egress_enabled:
+        raw = click.prompt(
+            "  Additional allowed domains (comma-separated, or Enter to skip)",
+            default="",
+        )
+        egress_extra_domains = [d.strip() for d in raw.split(",") if d.strip()]
+    console.print()
+
+    return _build_manifest(
+        docker_config=docker_config,
+        model=model,
+        qa_choices=qa_choices,
+        egress_enabled=egress_enabled,
+        egress_extra_domains=egress_extra_domains,
+    )
 
 
 # ── Manifest builder ──────────────────────────────────────────────────────────
@@ -481,7 +555,8 @@ def _build_manifest(
             "audit": {"enabled": True},
             "egress": {
                 "enabled": egress_enabled,
-                "allowed_domains": ["api.anthropic.com"] + (egress_extra_domains or []),
+                "allowed_domains": ["api.anthropic.com", "code.claude.com", "docs.anthropic.com"]
+                + (egress_extra_domains or []),
             },
             "qa": qa,
         },
@@ -499,26 +574,33 @@ def _build_manifest(
             "agent_config_volume": docker_config["agent_config_volume"],
         }
 
-    return yaml.dump(
-        manifest, default_flow_style=False, sort_keys=False, allow_unicode=True
-    )
+    return yaml.dump(manifest, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
 # ── init ──────────────────────────────────────────────────────────────────────
 
 
-def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> None:
+def run_init(
+    target: Path,
+    *,
+    force: bool = False,
+    rebuild: bool = False,
+    manifest_path: Path | None = None,
+) -> None:
     """
     Interactive first-time workspace setup.
 
-    Runs the Phase 1 / 2 / 3 wizard on first initialisation.  If the manifest
-    already exists the wizard is skipped and managed files are refreshed —
-    unless ``force=True``, which re-runs the full wizard (useful for switching
-    from local to docker mode or vice versa).
+    Runs the setup wizard on first initialisation.  If the manifest already
+    exists the wizard is skipped and managed files are refreshed — unless
+    ``force=True``, which re-runs the full wizard.
 
-    Pass ``rebuild=True`` (``--rebuild`` on the CLI) to force a Docker image
-    rebuild even when the image's version label already matches the installed
-    contAIned version.
+    Pass ``manifest_path`` to skip the wizard entirely and use a pre-authored
+    manifest file.  The manifest is baked into the Docker image as
+    ``/etc/contained/manifest.yaml`` so hooks read policy from the image rather
+    than from the workspace.  Suitable for CI/CD and reproducible builds.
+
+    Pass ``rebuild=True`` to force a Docker image rebuild even when the image's
+    version label already matches the installed contAIned version.
     """
     target = target.resolve()
     console.print(f"\n[bold]contAIned init[/bold] — [dim]{target}[/dim]\n")
@@ -530,18 +612,56 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
     # Docker is the only supported runtime.
     docker_config = dict(_DEFAULT_DOCKER_CONFIG)
 
-    if already_init and not force:
-        console.print(
-            "[dim]Workspace already initialised — refreshing managed files.[/dim]\n"
-        )
-        # Preserve existing manifest; just refresh hooks and check docker image.
-        manifest_content: str | None = None
+    if manifest_path is not None:
+        # ── Non-interactive: use provided manifest ─────────────────────────────
+        if not manifest_path.exists():
+            console.print(f"[red]✗[/red] Manifest not found: {manifest_path}")
+            raise SystemExit(1)
         try:
-            _docker_setup(docker_config, target, rebuild=rebuild)
+            import yaml as _yaml
+
+            raw = manifest_path.read_text()
+            _yaml.safe_load(raw)  # validate
+            manifest_content: str | None = raw
+        except Exception as exc:
+            console.print(f"[red]✗[/red] Invalid manifest: {exc}")
+            raise SystemExit(1)
+        # Update docker_config from the provided manifest
+        try:
+            import yaml as _yaml
+
+            parsed = _yaml.safe_load(manifest_content) or {}
+            if "runtime" in parsed and "docker" in parsed["runtime"]:
+                docker_config.update(parsed["runtime"]["docker"])
+        except Exception:
+            pass
+        console.print(f"  Using manifest: [dim]{manifest_path}[/dim]")
+        try:
+            _docker_setup(docker_config, target, rebuild=True, manifest_content=manifest_content)
         except RuntimeError as exc:
+            console.print(f"\n[red]✗[/red] Docker setup failed: {exc}")
+            raise SystemExit(1)
+
+    elif already_init and not force:
+        console.print("[dim]Workspace already initialised — refreshing managed files.[/dim]\n")
+        # Re-bake the existing manifest into the image so it stays in sync.
+        existing = manifest_new if manifest_new.exists() else manifest_old
+        try:
+            manifest_content: str | None = existing.read_text()
+        except OSError:
+            manifest_content = None
+        if manifest_content is None:
             console.print(
-                f"\n[yellow]Warning:[/yellow] Docker image check failed: {exc}\n"
+                "[yellow]Warning:[/yellow] No manifest found at .contAIned/manifest.yaml.\n"
+                "A policy manifest is required — running the setup wizard now.\n"
             )
+            manifest_content = _run_wizard(docker_config)
+        try:
+            _docker_setup(docker_config, target, rebuild=rebuild, manifest_content=manifest_content)
+        except RuntimeError as exc:
+            console.print(f"\n[red]✗[/red] Docker setup failed: {exc}\n")
+            raise SystemExit(1)
+
     else:
         if already_init and force:
             console.print(
@@ -549,67 +669,13 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
                 "Your current configuration will be replaced.[/yellow]\n"
             )
         console.print("Welcome to contAIned.\n")
-        console.print(
-            f"  Docker configuration:\n"
-            f"    image:   [bold]{docker_config['image']}[/bold]"
-            f"  (built from contained runtime Dockerfile)\n"
-            f"    memory:  {docker_config['memory']}  |  "
-            f"cpus: {docker_config['cpus']}  |  "
-            f"network: {docker_config['network']}\n"
-        )
+        manifest_content = _run_wizard(docker_config)
+
         try:
-            _docker_setup(docker_config, target, rebuild=rebuild)
+            _docker_setup(docker_config, target, rebuild=rebuild, manifest_content=manifest_content)
         except RuntimeError as exc:
             console.print(f"\n[red]✗[/red] Docker setup failed: {exc}")
             raise SystemExit(1)
-
-        console.print()
-        console.print("  [dim]Audit logging:      always on[/dim]")
-        console.print("  [dim]git push / --force: requires escalation[/dim]")
-        console.print("  [dim].contAIned/ protection: always enforced[/dim]")
-        console.print()
-
-        # ── QA checks ────────────────────────────────────────────────────────
-        console.print("? QA checks (enabled by default — press Enter to keep):")
-        qa_syntax = click.confirm("    syntax  (py_compile)", default=True)
-        qa_lint = click.confirm("    lint    (ruff check)", default=True)
-        qa_format = click.confirm("    format  (ruff format --check)", default=True)
-        qa_type = click.confirm("    type    (pyright)", default=True)
-        console.print()
-
-        qa_choices = {
-            "syntax": qa_syntax,
-            "lint": qa_lint,
-            "format": qa_format,
-            "type": qa_type,
-        }
-
-        # ── Model ─────────────────────────────────────────────────────────────
-        model = click.prompt("? Default model", default="claude-sonnet-4-6")
-        console.print()
-
-        # ── Egress ────────────────────────────────────────────────────────────
-        egress_enabled = click.confirm(
-            "? Enable outbound network egress policy"
-            " (api.anthropic.com always allowed)",
-            default=True,
-        )
-        egress_extra_domains: list[str] = []
-        if egress_enabled:
-            raw = click.prompt(
-                "  Additional allowed domains (comma-separated, or Enter to skip)",
-                default="",
-            )
-            egress_extra_domains = [d.strip() for d in raw.split(",") if d.strip()]
-        console.print()
-
-        manifest_content = _build_manifest(
-            docker_config=docker_config,
-            model=model,
-            qa_choices=qa_choices,
-            egress_enabled=egress_enabled,
-            egress_extra_domains=egress_extra_domains,
-        )
 
     results: list[tuple[str, str]] = []
 
@@ -629,9 +695,7 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
     # overwrite=False and overwrite=True are equivalent.
     for path, content, executable in _managed_files(target):
         rel = path.relative_to(target)
-        status = _write_file(
-            path, content, executable=executable, overwrite=already_init
-        )
+        status = _write_file(path, content, executable=executable, overwrite=already_init)
         results.append((str(rel), status))
 
     # ── Manifest ──────────────────────────────────────────────────────────────
@@ -645,13 +709,9 @@ def run_init(target: Path, *, force: bool = False, rebuild: bool = False) -> Non
         manifest_new.write_text(manifest_old.read_text())
         results.append((".contAIned/manifest.yaml", "migrated"))
     else:
-        # Sync any new template keys introduced in this contAIned version,
-        # preserving all user-configured values.
-        from contained.templates import POLICY_MANIFEST
-
-        results.append(
-            (".contAIned/manifest.yaml", _sync_manifest(manifest_new, POLICY_MANIFEST))
-        )
+        # manifest_new exists but manifest_content is None only in degenerate cases;
+        # all normal paths set manifest_content before reaching here.
+        results.append((".contAIned/manifest.yaml", "exists"))
 
     # ── Directory markers ─────────────────────────────────────────────────────
     for path in _markers(target):

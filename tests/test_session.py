@@ -25,9 +25,7 @@ class TestLoadManifest:
     def test_loads_new_path(self, tmp_path):
         manifest_dir = tmp_path / ".contAIned"
         manifest_dir.mkdir()
-        (manifest_dir / "manifest.yaml").write_text(
-            "agent:\n  model: claude-opus-4-6\n"
-        )
+        (manifest_dir / "manifest.yaml").write_text("agent:\n  model: claude-opus-4-6\n")
         result = _load_manifest(tmp_path)
         assert result["agent"]["model"] == "claude-opus-4-6"
 
@@ -76,9 +74,7 @@ class TestLoadModelConfig:
     def test_returns_model_string(self, tmp_path):
         manifest_dir = tmp_path / ".contAIned"
         manifest_dir.mkdir()
-        (manifest_dir / "manifest.yaml").write_text(
-            "agent:\n  model: claude-sonnet-4-6\n"
-        )
+        (manifest_dir / "manifest.yaml").write_text("agent:\n  model: claude-sonnet-4-6\n")
         assert _load_model_config(tmp_path) == "claude-sonnet-4-6"
 
     def test_returns_none_when_no_manifest(self, tmp_path):
@@ -87,9 +83,7 @@ class TestLoadModelConfig:
     def test_returns_none_when_agent_section_missing(self, tmp_path):
         manifest_dir = tmp_path / ".contAIned"
         manifest_dir.mkdir()
-        (manifest_dir / "manifest.yaml").write_text(
-            "policy:\n  egress:\n    enabled: true\n"
-        )
+        (manifest_dir / "manifest.yaml").write_text("policy:\n  egress:\n    enabled: true\n")
         assert _load_model_config(tmp_path) is None
 
     def test_returns_none_when_model_key_missing(self, tmp_path):

@@ -60,22 +60,41 @@ def main(ctx: click.Context) -> None:
     default=False,
     help="Force a full Docker image rebuild even if the image is already up to date.",
 )
-def init(directory: str, force: bool, rebuild: bool) -> None:
+@click.option(
+    "--manifest",
+    "manifest_path",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False, readable=True, resolve_path=True),
+    help=(
+        "Path to a manifest.yaml to bake into the Docker image. "
+        "Skips the interactive wizard. Suitable for CI/CD pipelines."
+    ),
+)
+def init(directory: str, force: bool, rebuild: bool, manifest_path: str | None) -> None:
     """
     Initialise a contAIned workspace.
 
     Scaffolds .contAIned/, .claude/, and CLAUDE.md in DIRECTORY (default: current
     directory).  Re-running refreshes hook files and syncs the manifest.
 
+    The manifest is baked into the Docker image so policy is enforced at the
+    highest-precedence settings level and cannot be overridden at runtime.
+
     \b
     Examples:
-      contAIned init            # initialise in current directory
-      contAIned init ./myrepo   # initialise in a specific directory
-      contAIned init --force    # re-run setup wizard (reconfigure model, docker, etc.)
-      contAIned init --rebuild  # force-rebuild the Docker image
+      contAIned init                         # initialise with interactive wizard
+      contAIned init ./myrepo                # initialise in a specific directory
+      contAIned init --manifest policy.yaml  # non-interactive, bake provided manifest
+      contAIned init --force                 # re-run setup wizard (reconfigure)
+      contAIned init --rebuild               # force-rebuild the Docker image
     """
     from contained.init import run_init
     from contained.session import _print_splash
 
     _print_splash()
-    run_init(Path(directory), force=force, rebuild=rebuild)
+    run_init(
+        Path(directory),
+        force=force,
+        rebuild=rebuild,
+        manifest_path=Path(manifest_path) if manifest_path else None,
+    )

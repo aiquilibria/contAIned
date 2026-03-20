@@ -102,9 +102,7 @@ def _get_tracer(root: Path):
 def _print_runtime_banner(root: Path) -> None:
     """Print a short runtime info line when starting a session."""
     manifest = _load_manifest(root)
-    image = (
-        manifest.get("runtime", {}).get("docker", {}).get("image", "contained:latest")
-    )
+    image = manifest.get("runtime", {}).get("docker", {}).get("image", "contained:latest")
     console.print(f"[dim][contAIned] runtime: docker ({image})[/dim]")
     console.print(f"[dim][contAIned] workspace: {root}[/dim]\n")
 
@@ -131,9 +129,7 @@ def start_repl(root: Path) -> None:
         from contained.docker_runner import DockerRunner
 
         _print_runtime_banner(root)
-        DockerRunner(
-            runtime.get("docker", {}), root, policy=manifest.get("policy", {})
-        ).run_repl()
+        DockerRunner(runtime.get("docker", {}), root, policy=manifest.get("policy", {})).run_repl()
         return
 
     missing = _check_initialised(root)

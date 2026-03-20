@@ -120,117 +120,6 @@ SETTINGS_JSON = """\
 }}
 """
 
-STATUSLINE_PY = '''\
-#!/usr/bin/env python3
-"""
-contAIned status line — git branch, diff stat, session cost, context %.
-
-Installed by `contAIned init` to .claude/statusline.py and wired into
-Claude Code via the statusLine setting in .claude/settings.json.
-Claude Code pipes a JSON object on stdin on every update; this script
-reads it and prints a single formatted line to stdout.
-"""
-import json
-import subprocess
-import sys
-
-# ── ANSI helpers ─────────────────────────────────────────────────────────────
-_RESET  = "\\033[0m"
-_GREEN  = "\\033[32m"
-_RED    = "\\033[31m"
-
-# Foreground colours
-_FG_BLACK = "\\033[30m"
-_FG_WHITE = "\\033[97m"
-
-# Background colours
-_BG_WHITE  = "\\033[107m"
-_BG_GREEN  = "\\033[42m"
-_BG_ORANGE = "\\033[43m"   # standard yellow — renders as amber/orange
-_BG_RED    = "\\033[41m"
-
-
-def _git(cwd: str, *args: str) -> str:
-    """Run a git command in *cwd*; return stdout or empty string on error."""
-    try:
-        return subprocess.check_output(
-            ["git", "-C", cwd, *args],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except Exception:
-        return ""
-
-
-def main() -> None:
-    try:
-        data = json.load(sys.stdin)
-    except Exception:
-        return
-
-    contained_part = f"{_GREEN} [{_RESET}{_RED}✦{_RESET}{_GREEN}]{_RESET}"
-
-    cwd = data.get("cwd") or ""
-
-    # ── Git branch + uncommitted diff stat ───────────────────────────────────
-    git_part = ""
-    if cwd and _git(cwd, "rev-parse", "--git-dir"):
-        branch = _git(cwd, "branch", "--show-current") or _git(
-            cwd, "rev-parse", "--short", "HEAD"
-        )
-        shortstat = _git(cwd, "diff", "--shortstat", "HEAD")
-        ins = del_ = 0
-        for token in shortstat.split(","):
-            token = token.strip()
-            if "insertion" in token:
-                ins = int(token.split()[0])
-            elif "deletion" in token:
-                del_ = int(token.split()[0])
-
-        # Branch badge: nerd-font branch icon + name on white bg / black fg
-        branch_badge = f"{_BG_WHITE}{_FG_BLACK} ⎇ {branch} {_RESET}"
-        git_part = branch_badge
-
-        if ins or del_:
-            ins_str = f"{_GREEN}+{ins}{_RESET}"
-            del_str = f"{_RED}-{del_}{_RESET}"
-            git_part += f"  {ins_str} {del_str}"
-
-    # ── Session cost ─────────────────────────────────────────────────────────
-    cost_part = ""
-    cost = (data.get("cost") or {}).get("total_cost_usd")
-    if cost is not None:
-        cost_part = f"${cost:.4f}"
-
-    # ── Context window usage ─────────────────────────────────────────────────
-    ctx_part = ""
-    ctx = (data.get("context_window") or {}).get("used_percentage")
-    if ctx is not None:
-        if ctx <= 50:
-            bg, fg = _BG_GREEN, _FG_BLACK
-        elif ctx <= 80:
-            bg, fg = _BG_ORANGE, _FG_BLACK
-        else:
-            bg, fg = _BG_RED, _FG_WHITE
-        ctx_part = f"{bg}{fg} ctx {ctx}% {_RESET}"
-
-    # ── Session ID ────────────────────────────────────────────────────────────
-    session_part = ""
-    session_id = data.get("session_id") or ""
-    if session_id:
-        session_part = session_id[:8]
-
-    parts = [
-        p for p in (contained_part, git_part, cost_part, ctx_part, session_part) if p
-    ]
-    if parts:
-        print("  │  ".join(parts))
-
-
-if __name__ == "__main__":
-    main()
-'''
-
 POLICY_MANIFEST = """\
 # contAIned policy manifest
 #
@@ -290,6 +179,8 @@ policy:
     enabled: false
     allowed_domains:
       - api.anthropic.com    # required — Anthropic API
+      - code.claude.com      # Claude Code telemetry / auth
+      - docs.anthropic.com   # documentation lookups
 
   # ── Audit logging ─────────────────────────────────────────────────────────────
   # Always enabled — cannot be disabled.
@@ -334,14 +225,13 @@ POLICY_LOADER_HOOK = '''\
 #!/usr/bin/env python3
 """Shared policy loader for contAIned hooks.
 
-Reads the policy: and runtime: sections from .contAIned/manifest.yaml and merges
-them with built-in defaults so that every key is always present.  If the
-manifest cannot be read for any reason the defaults are returned unchanged —
-hooks degrade gracefully to the original hardcoded behaviour.
+Reads the policy: section from /etc/contained/manifest.yaml (baked into the
+container image by contAIned init) and merges it with built-in defaults so
+that every key is always present.  If the manifest cannot be read the defaults
+are returned unchanged — hooks degrade gracefully to the hardcoded behaviour.
 
 Manifest location:
-  Primary:   .contAIned/manifest.yaml          (new path, written by contAIned init)
-  Fallback:  .contAIned/policy/manifest.yaml   (legacy path — compatibility shim)
+  /etc/contained/manifest.yaml  — baked into the image by contAIned init
 
 Action values: "block" | "allow" | "escalate"
   block    — deny the operation; hook exits 2 with a reason on stderr
@@ -391,27 +281,15 @@ def _deep_merge(base, override):
     return result
 
 
-def _find_manifest(cwd="."):
-    """Return the manifest Path, preferring the new location with fallback."""
-    root = Path(cwd)
-    new_path = root / ".contAIned" / "manifest.yaml"
-    if new_path.exists():
-        return new_path
-    old_path = root / ".contAIned" / "policy" / "manifest.yaml"
-    if old_path.exists():
-        return old_path
-    return new_path  # return new path even if missing — caller handles FileNotFoundError
-
-
 def load_policy(cwd="."):
-    """Return the fully-merged policy dict for the project rooted at *cwd*.
+    """Return the fully-merged policy dict.
 
     Always succeeds: if the manifest is unreadable the built-in defaults
     are returned so hooks continue to enforce the current behaviour.
     """
     try:
         import yaml
-        manifest_path = _find_manifest(cwd)
+        manifest_path = Path("/etc/contained/manifest.yaml")
         with manifest_path.open() as fh:
             manifest = yaml.safe_load(fh) or {}
         return _deep_merge(_DEFAULTS, manifest.get("policy", {}))
@@ -426,9 +304,10 @@ RESTRICT_WRITES_HOOK = '''\
 """
 PreToolUse hook — restricts Write, Edit, MultiEdit.
 
-Two checks in order:
+Checks in order:
   1. Control-plane protection  — .contAIned/ writes are ALWAYS denied (not configurable)
-  2. Secret file               — driven by policy.secrets.writes
+  2. Settings protection       — .claude/settings.json is ALWAYS denied (not configurable)
+  3. Secret file               — driven by policy.secrets.writes
 
 Workspace boundary is enforced by the Docker container at the kernel level.
 
@@ -536,6 +415,17 @@ try:
     sys.exit(2)
 except ValueError:
     pass  # not inside .contAIned/ — continue
+
+# ── Check 2: .claude/settings.json — Claude Code hook registration file ───────
+claude_settings = (project_root / ".claude" / "settings.json").resolve()
+if resolved == claude_settings:
+    log_denial(event, target, f"write to Claude Code settings file: {target}")
+    print(
+        f"Write denied: \\'{target}\\' is the Claude Code settings file.\\n"
+        "Hook registration is managed by contAIned and must not be edited directly.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 # ── Check 3: secret file ───────────────────────────────────────────────────────
 if is_secret_file(str(resolved)):
@@ -1712,8 +1602,7 @@ UserPromptSubmit hook — pre-processes hash commands and injects data for Claud
 Commands handled here:
   #db [SQL]              — query tracer.db
   #status                — tail recent audit log
-  #update                — show current manifest policy
-  #update <path>=<value> — set a manifest key by dot-path (e.g. policy.qa.lint=false)
+  #policy                — show effective policy (read-only view of /etc/contained/manifest.yaml)
   #review                — list recent completed tasks
   #review <n>            — show narrative + diff summary for task n
 
@@ -1751,7 +1640,7 @@ parts    = prompt.split(None, 1)
 cmd_word = parts[0].lower()
 args     = parts[1].strip() if len(parts) > 1 else ""
 
-_HOOK_COMMANDS = frozenset({"#db", "#status", "#update", "#review"})
+_HOOK_COMMANDS = frozenset({"#db", "#status", "#policy", "#review"})
 
 if cmd_word not in _HOOK_COMMANDS:
     sys.exit(0)  # not a known hash command — pass through to Claude
@@ -1826,83 +1715,27 @@ elif cmd_word == "#status":
             _lines.append("No audit events found.")
         _instruction = "Present this audit log clearly, highlighting any denied operations or patterns worth noting."
 
-# ── #update ───────────────────────────────────────────────────────────────────
-elif cmd_word == "#update":
+# ── #policy ───────────────────────────────────────────────────────────────────
+elif cmd_word == "#policy":
     import yaml as _yaml
-    _manifest_path = Path(cwd) / ".contAIned" / "manifest.yaml"
+    _manifest_path = Path("/etc/contained/manifest.yaml")
 
     if not _manifest_path.exists():
-        _lines.append("Error: No manifest.yaml found. Run `contAIned init` first.")
-        _instruction = "Inform the user that the manifest does not exist yet."
-    elif not args:
-        _manifest_text = _manifest_path.read_text()
-        _lines.append("Current manifest.yaml:")
-        _lines.append("")
-        _lines.append(_manifest_text)
-        _instruction = "Present this policy manifest clearly to the user, formatting the YAML readably and briefly explaining the key settings."
+        _lines.append("Error: No policy manifest found at /etc/contained/manifest.yaml.")
+        _lines.append("The container image may not have been built with a manifest baked in.")
+        _lines.append("Rebuild with: contAIned init --manifest policy.yaml")
+        _instruction = "Inform the user that no baked-in policy manifest was found and explain how to rebuild the image."
     else:
-        if "=" in args:
-            _dotpath, _, _raw_val = args.partition("=")
-        elif ": " in args:
-            _dotpath, _, _raw_val = args.partition(": ")
-        else:
-            _lines.append("Usage error: #update <path>=<value>")
-            _lines.append("Example: #update policy.qa.lint=false")
-            _lines.append("Run #update with no arguments to see all available paths.")
-            _dotpath = None
-            _instruction = "Explain the correct usage of #update to the user."
-
-        if _dotpath is not None:
-            _dotpath = _dotpath.strip()
-            _raw_val = _raw_val.strip()
-
-            if _raw_val.lower() == "true":
-                _val = True
-            elif _raw_val.lower() == "false":
-                _val = False
-            else:
-                try:
-                    _val = int(_raw_val)
-                except ValueError:
-                    try:
-                        _val = float(_raw_val)
-                    except ValueError:
-                        _val = _raw_val
-
-            try:
-                _data = _yaml.safe_load(_manifest_path.read_text()) or {}
-            except Exception as _e:
-                _data = None
-                _lines.append(f"Error: Could not parse manifest.yaml: {_e}")
-                _instruction = "Inform the user of the manifest parse error."
-
-            if _data is not None:
-                _keys = _dotpath.split(".")
-                _node = _data
-                _ok   = True
-                for _k in _keys[:-1]:
-                    if not isinstance(_node, dict) or _k not in _node:
-                        _ok = False
-                        break
-                    _node = _node[_k]
-
-                _final = _keys[-1]
-                if not _ok or not isinstance(_node, dict) or _final not in _node:
-                    _lines.append(f"Unknown path: {_dotpath}")
-                    _lines.append("Run #update with no arguments to see all available paths.")
-                    _instruction = "Inform the user the dotpath was not found and suggest they run #update to see available settings."
-                else:
-                    _old = _node[_final]
-                    _node[_final] = _val
-                    _manifest_path.write_text(
-                        _yaml.dump(_data, default_flow_style=False, sort_keys=False, allow_unicode=True)
-                    )
-                    _lines.append(f"Updated: {_dotpath}")
-                    _lines.append(f"  Old value: {_old!r}")
-                    _lines.append(f"  New value: {_val!r}")
-                    if _dotpath.startswith("runtime.docker."):
-                        _lines.append("  Note: Docker resource changes take effect on container restart.")
-                    _instruction = "Confirm this manifest update to the user clearly and concisely."
+        try:
+            _manifest_text = _manifest_path.read_text()
+            _lines.append("Effective policy (/etc/contained/manifest.yaml — read-only):")
+            _lines.append("")
+            _lines.append(_manifest_text)
+            _lines.append("To change policy, rebuild the image: contAIned init --manifest policy.yaml")
+            _instruction = "Present this policy manifest clearly to the user, formatting the YAML readably and briefly explaining the key settings. Note it is read-only and changes require a container rebuild."
+        except Exception as _e:
+            _lines.append(f"Error: Could not read manifest: {_e}")
+            _instruction = "Inform the user of the manifest read error."
 
 # ── #review ───────────────────────────────────────────────────────────────────
 elif cmd_word == "#review":
