@@ -73,7 +73,6 @@ def _check_initialised(root: Path) -> list[str]:
         root / ".contAIned" / "hooks" / "restrict_writes.py",
         root / ".contAIned" / "hooks" / "audit.py",
         root / ".contAIned" / "hooks" / "qa.py",
-        root / ".claude" / "settings.json",
     ]
     missing = [str(p.relative_to(root)) for p in required if not p.exists()]
 

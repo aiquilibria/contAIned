@@ -113,5 +113,9 @@
   "statusLine": {
     "type": "command",
     "command": "python3 /etc/contained/statusline.py"
+  },
+  "attribution": {
+    "commit": "Generated with Claude Code on cont[AI✦]ned",
+    "pr": "Generated with Claude Code on cont[AI✦]ned"
   }
 }

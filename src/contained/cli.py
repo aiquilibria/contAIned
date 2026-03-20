@@ -31,9 +31,12 @@ def _find_root() -> Path:
 def main(ctx: click.Context) -> None:
     """contAIned — a contAIned coding agent CLI."""
     if ctx.invoked_subcommand is None:
+        import os
+
         from contained.session import _print_splash, start_repl
 
-        _print_splash()
+        if os.environ.get("contAIned_FORCE_LOCAL") != "1":
+            _print_splash()
         start_repl(_find_root())
 
 

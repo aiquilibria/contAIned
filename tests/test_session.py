@@ -110,9 +110,6 @@ class TestCheckInitialised:
         (hooks / "restrict_writes.py").touch()
         (hooks / "audit.py").touch()
         (hooks / "qa.py").touch()
-        claude = root / ".claude"
-        claude.mkdir()
-        (claude / "settings.json").touch()
         (root / ".contAIned" / "manifest.yaml").touch()
 
     def test_returns_empty_when_fully_initialised(self, tmp_path):
@@ -126,12 +123,6 @@ class TestCheckInitialised:
         missing = _check_initialised(tmp_path)
         assert ".contAIned/hooks/restrict_writes.py" in missing
         assert ".contAIned/hooks/qa.py" in missing
-
-    def test_returns_missing_settings_json(self, tmp_path):
-        self._scaffold(tmp_path)
-        (tmp_path / ".claude" / "settings.json").unlink()
-        missing = _check_initialised(tmp_path)
-        assert ".claude/settings.json" in missing
 
     def test_accepts_legacy_manifest_path(self, tmp_path):
         """Legacy manifest at .contAIned/policy/manifest.yaml should satisfy check."""
@@ -152,7 +143,7 @@ class TestCheckInitialised:
 
     def test_returns_all_missing_on_empty_directory(self, tmp_path):
         missing = _check_initialised(tmp_path)
-        assert len(missing) == 5  # 3 hooks + settings.json + manifest
+        assert len(missing) == 4  # 3 hooks + manifest
 
     def test_missing_paths_are_relative_to_root(self, tmp_path):
         missing = _check_initialised(tmp_path)
