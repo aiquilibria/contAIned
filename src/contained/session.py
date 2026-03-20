@@ -34,7 +34,7 @@ console = Console()
 def _print_splash() -> None:
     """Print the contAIned logo and tagline."""
     console.print(
-        "\n[bold green]cont\\[[/bold green][bold red]AI✦[/bold red]"
+        "\n[bold green]cont\\[[/bold green][bold red]AI[/bold red]"
         "[bold green]]ned[/bold green]"
         "  [dim]take back control of your agent![/dim]\n"
     )

@@ -1,5 +1,5 @@
-# <span style="color: #64CE91">cont[</span><span style="color: #BD3F39">AI✦</span><span style="color: #64CE91">]ned</span>
-## take back control of your agent!
+# <span style="color: #64CE91">cont[</span><span style="color: #BD3F39">AI</span><span style="color: #64CE91">]ned</span>
+## <span style="color: #64CE91">[</span><span style="color: #BD3F39">✦</span><span style="color: #64CE91">] </span><span style="color: gray">take back control of your agent!</span>
 
 A coding agent CLI built on [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview).
 

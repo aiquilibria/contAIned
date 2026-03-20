@@ -179,6 +179,42 @@ def _update_gitignore(repo_root: Path) -> str:
     return "updated"
 
 
+# ── settings.json migration ───────────────────────────────────────────────────
+
+
+def _migrate_settings_json(target: Path) -> str:
+    """
+    Retire .claude/settings.json — all its content is owned by managed-settings.json.
+
+    managed-settings.json is baked into the Docker image and covers hook
+    registration, sandbox rules, permissions, statusLine, and attribution.
+    Claude Code merges hooks from all settings levels, so any "hooks" key in
+    .claude/settings.json causes every hook to fire twice.  The remaining keys
+    (permissions, sandbox, statusLine) are redundant with managed-settings and
+    serve no purpose since Claude Code always runs inside the container.
+
+    If .claude/settings.json (or .claude/settings.local.json) exists:
+      - Rename it to .claude/settings.json.bak.<timestamp> (non-destructive)
+      - Write nothing in its place
+      - Return "migrated"
+
+    If neither file exists: no-op.
+    """
+    from datetime import datetime, timezone
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    migrated = False
+
+    for filename in ("settings.json", "settings.local.json"):
+        settings_path = target / ".claude" / filename
+        if settings_path.exists():
+            backup = settings_path.with_name(f"{filename}.bak.{timestamp}")
+            settings_path.rename(backup)
+            migrated = True
+
+    return "migrated" if migrated else "exists"
+
+
 # ── Shared scaffolding ────────────────────────────────────────────────────────
 
 
@@ -717,6 +753,11 @@ def run_init(
     for path in _markers(target):
         results.append((str(path.relative_to(target)), _touch(path)))
 
+    # ── .claude/settings.json — strip duplicate hook registrations ───────────
+    # Hooks are registered exclusively via managed-settings.json (image layer).
+    # Any "hooks" key in .claude/settings.json causes double-firing; migrate it.
+    results.append((".claude/settings.json", _migrate_settings_json(target)))
+
     # ── .gitignore ────────────────────────────────────────────────────────────
     if git_root:
         results.append((".gitignore", _update_gitignore(git_root)))
@@ -727,6 +768,4 @@ def run_init(
         f"\n[bold]Workspace initialised.[/bold] "
         f"[dim]runtime: docker ({docker_config['image']})[/dim]"
     )
-
-    console.print('  contAIned run "<your task here>"  # For one-time tasks')
     console.print("  contAIned  # For REPL\n")

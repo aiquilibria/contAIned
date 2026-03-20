@@ -1,4 +1,5 @@
-# <span style="color: #64CE91">cont[</span><span style="color: #BD3F39">AI✦</span><span style="color: #64CE91">]ned</span> — Security and Threat Model
+# <span style="color: #64CE91">cont[</span><span style="color: #BD3F39">AI</span><span style="color: #64CE91">]ned</span>
+## <span style="color: #64CE91">[</span><span style="color: #BD3F39">✦</span><span style="color: #64CE91">] </span><span style="color: gray">Security and Threat Model</span>
 
 ## Contents
 
@@ -93,7 +94,7 @@ The critical property is that the agent cannot reach the layers above it. Hook r
 
 Policy is baked into the Docker image at build time by `contAIned init`. Two files are written into the image layer — not the workspace — and cannot be modified at runtime:
 
-- `/etc/claude-code/managed-settings.json` — registers all hooks and deny/allow permission rules at the highest-precedence settings level that Claude Code recognises. When managed settings are active, user-defined hooks are not merely deprioritised; they are blocked entirely. No CLI flag or runtime configuration can override this.
+- `/etc/claude-code/managed-settings.json` — registers all hooks, sandbox rules, permissions, and statusLine. This is the sole settings file active inside the container. Claude Code merges hooks from all settings levels (managed, project, user), so `contAIned init` retires any existing `.claude/settings.json` or `.claude/settings.local.json` by renaming them to dated backups — ensuring managed-settings is the only source of hook registration and no hook fires twice. No CLI flag or runtime configuration can override the managed-settings path itself.
 - `/etc/contained/manifest.yaml` — the operator's policy parameters (egress rules, escalation targets, QA settings). Hooks read policy exclusively from this path; there is no fallback to workspace files.
 
 The image is the operator's trust anchor. Changing policy requires editing `manifest.yaml` and running `contAIned init --rebuild` — a deliberate, out-of-band operator action. There is no in-session path to alter enforcement.
