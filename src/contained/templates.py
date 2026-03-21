@@ -51,7 +51,6 @@ policy:
     destructive:          block     # rm / rm -rf
     privilege_escalation: block     # sudo
     network_exfiltration: block     # curl / wget / nc / ncat
-    git_mutations:        escalate  # git push / push --force → operator approval required
     package_publish:      block     # npm publish / pip upload / twine upload
 
   # ── Egress filtering (outbound network proxy) ─────────────────────────────────
@@ -124,10 +123,9 @@ are returned unchanged — hooks degrade gracefully to the hardcoded behaviour.
 Manifest location:
   /etc/contained/manifest.yaml  — baked into the image by contAIned init
 
-Action values: "block" | "allow" | "escalate"
+Action values: "block" | "allow"
   block    — deny the operation; hook exits 2 with a reason on stderr
   allow    — permit unconditionally
-  escalate — pass through (exit 0); the SDK\'s canUseTool callback decides
 """
 from pathlib import Path
 
@@ -142,7 +140,6 @@ _DEFAULTS = {
         "destructive":          "block",
         "privilege_escalation": "block",
         "network_exfiltration": "block",
-        "git_mutations":        "block",
         "package_publish":      "block",
     },
     "audit": {
@@ -471,17 +468,17 @@ Checks applied in order:
   2. policy.bash.destructive          — rm / rm -rf
   3. policy.bash.privilege_escalation — sudo
   4. policy.bash.network_exfiltration — curl / wget / nc / ncat
-  5. policy.bash.git_mutations        — git commit / reset / rebase / merge / push
-  6. policy.bash.package_publish      — npm publish / pip upload / twine upload
+  5. policy.bash.package_publish      — npm publish / pip upload / twine upload
 
-Workspace boundary is enforced by the Docker container at the kernel level.
+Safe read-only commands (git status/log/diff, ls, etc.) are auto-approved via
+the managed-settings allow list and never reach this hook.  Side-effect commands
+(git commit/push, etc.) are not in the allow list and fall through to the
+permission system, which prompts the operator for approval.
 
-Action values: block | allow | escalate
-  block    — deny (exit 2, reason on stderr)
-  allow    — permit unconditionally; skip the check
-  escalate — pass through (exit 0); SDK\'s canUseTool callback decides
+This hook is a deny-list only: it exits 2 to block, or exits 0 (no decision)
+to let the permission system handle the call.  It never explicitly approves.
 
-Exits 0 to allow, 2 to deny (reason on stderr fed back to agent).
+Exits 0 (no decision) or 2 (denied, reason on stderr fed back to agent).
 Denials are written to the audit log before blocking.
 """
 import json
@@ -521,11 +518,6 @@ _BASH_RULES = [
         "network_exfiltration",
         [re.compile(r\'^(curl|wget|nc|ncat)\\s\')],
         "Outbound network calls from Bash are not permitted.",
-    ),
-    (
-        "git_mutations",
-        [re.compile(r\'^git\\s+(commit|reset|rebase|merge)\\b\'), re.compile(r\'^git\\s+push\\b\')],
-        "Git mutations require explicit operator approval.",
     ),
     (
         "package_publish",
