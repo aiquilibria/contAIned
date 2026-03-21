@@ -66,7 +66,7 @@ The enforcement layer is ordered by tamper-resistance:
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  Rekor transparency log  (optional — Sigstore)              │
-│  Append-only public record: image digest ↔ operator OIDC   │
+│  Append-only public record: image digest ↔ operator OIDC    │
 │  identity ↔ timestamp.  Cannot be removed or modified.      │
 │  Verified by: contAIned verify (host-side, pre-session).    │
 ├─────────────────────────────────────────────────────────────┤
@@ -175,7 +175,7 @@ When `policy.egress.enabled: true`, a filtering proxy sidecar starts alongside t
 
 The default allowlist contains only `api.anthropic.com`. Operators add project-specific domains (package registries, documentation hosts) as needed.
 
-**Known limitation.** The proxy relies on `HTTP_PROXY`/`HTTPS_PROXY` environment variables. Code that opens raw sockets directly (e.g. `socket.connect` to a hardcoded IP) bypasses it. Full kernel-level enforcement requires iptables DNAT rules on the Docker bridge; see the [egress documentation](./egress-and-exfiltration-protection.md) for instructions.
+**Known limitation.** The proxy relies on `HTTP_PROXY`/`HTTPS_PROXY` environment variables. Code that opens raw sockets directly (e.g. `socket.connect` to a hardcoded IP) bypasses it. Full kernel-level enforcement requires iptables DNAT rules on the Docker bridge.
 
 ### Audit and Tracer
 
@@ -321,14 +321,14 @@ The table below maps the threat scenarios and controls described in this documen
 | Threat / Control | OWASP LLM | MITRE ATLAS |
 |---|---|---|
 | Prompt injection — containment of consequences | [LLM01](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) | [AML.T0051](https://atlas.mitre.org/techniques/AML.T0051), [AML.T0054](https://atlas.mitre.org/techniques/AML.T0054) |
-| Output injection — bash restrictions, QA gate, container boundary | [LLM02](https://genai.owasp.org/llmrisk/llm02-insecure-output-handling/) | [AML.T0051.002](https://atlas.mitre.org/techniques/AML.T0051/002) |
-| Excessive agency — layered hook controls, mutation escalation, publish blocking | [LLM08](https://genai.owasp.org/llmrisk/llm08-excessive-agency/) | [AML.T0061](https://atlas.mitre.org/techniques/AML.T0061) |
-| Sensitive information disclosure — read hooks, bash restrictions, egress proxy | [LLM06](https://genai.owasp.org/llmrisk/llm06-sensitive-information-disclosure/) | [AML.T0051](https://atlas.mitre.org/techniques/AML.T0051), [AML.T0024](https://atlas.mitre.org/techniques/AML.T0024) |
-| Supply chain — image-layer policy, egress allowlist, publish blocking | [LLM05](https://genai.owasp.org/llmrisk/llm05-supply-chain-vulnerabilities/) | [AML.T0010](https://atlas.mitre.org/techniques/AML.T0010) |
-| Overreliance — QA gate, `#review`, diff store, escalation workflow | [LLM09](https://genai.owasp.org/llmrisk/llm09-overreliance/) | — |
-| Training data integrity — diff store, full write traceability | [LLM03](https://genai.owasp.org/llmrisk/llm03-training-data-poisoning/) | [AML.T0020](https://atlas.mitre.org/techniques/AML.T0020) |
-| Insecure plugin design — all tools intercepted by image-layer hooks | [LLM07](https://genai.owasp.org/llmrisk/llm07-insecure-plugin-design/) | — |
-| Model theft — read hooks, egress proxy (no weights on-premises) | [LLM10](https://genai.owasp.org/llmrisk/llm10-model-theft/) | [AML.T0024](https://atlas.mitre.org/techniques/AML.T0024) |
-| Denial of service — Docker resource limits; per-developer deployment model | [LLM04](https://genai.owasp.org/llmrisk/llm04-model-denial-of-service/) | [AML.T0029](https://atlas.mitre.org/techniques/AML.T0029) |
-| RAG / vector DB poisoning | — | [AML.T0060](https://atlas.mitre.org/techniques/AML.T0060) — **not applicable** (no retrieval layer) |
-| Adversarial content / societal harm | — | [AML.T0043](https://atlas.mitre.org/techniques/AML.T0043) — **no technical prevention**; operator review is the control |
+| Output injection — bash restrictions, QA gate, container boundary | [LLM05](https://genai.owasp.org/llmrisk/llm05-improper-output-handling/) | [AML.T0051.002](https://atlas.mitre.org/techniques/AML.T0051/002) |
+| Excessive agency — layered hook controls, mutation escalation, publish blocking | [LLM06](https://genai.owasp.org/llmrisk/llm06-excessive-agency/) | [AML.T0061](https://atlas.mitre.org/techniques/AML.T0061) |
+| Sensitive information disclosure — read hooks, bash restrictions, egress proxy | [LLM02](https://genai.owasp.org/llmrisk/llm02-sensitive-information-disclosure/), [LLM07](https://genai.owasp.org/llmrisk/llm07-system-prompt-leakage/) | [AML.T0051](https://atlas.mitre.org/techniques/AML.T0051), [AML.T0024](https://atlas.mitre.org/techniques/AML.T0024) |
+| Supply chain — image-layer policy, egress allowlist, publish blocking | [LLM03](https://genai.owasp.org/llmrisk/llm03-supply-chain/) | [AML.T0010](https://atlas.mitre.org/techniques/AML.T0010) |
+| Overreliance — QA gate, `#review`, diff store, escalation workflow | [LLM09](https://genai.owasp.org/llmrisk/llm09-misinformation/) | — |
+| Training data integrity — diff store, full write traceability | [LLM04](https://genai.owasp.org/llmrisk/llm04-data-and-model-poisoning/) | [AML.T0020](https://atlas.mitre.org/techniques/AML.T0020) |
+| Insecure plugin design — all tools intercepted by image-layer hooks | [LLM03](https://genai.owasp.org/llmrisk/llm03-supply-chain/) | — |
+| Model theft — read hooks, egress proxy (no weights on-premises) | — | [AML.T0024](https://atlas.mitre.org/techniques/AML.T0024) |
+| Denial of service — Docker resource limits; per-developer deployment model | [LLM10](https://genai.owasp.org/llmrisk/llm10-unbounded-consumption/) | [AML.T0029](https://atlas.mitre.org/techniques/AML.T0029) |
+| RAG / vector DB poisoning | [LLM08](https://genai.owasp.org/llmrisk/llm08-vector-and-embedding-weaknesses/) | [AML.T0060](https://atlas.mitre.org/techniques/AML.T0060) — **not applicable** (no retrieval layer) |
+| Adversarial content / societal harm | [LLM09](https://genai.owasp.org/llmrisk/llm09-misinformation/) | [AML.T0043](https://atlas.mitre.org/techniques/AML.T0043) — **no technical prevention**; operator review is the control |

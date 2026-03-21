@@ -64,6 +64,8 @@ def main() -> None:
                 del_ = int(token.split()[0])
 
         # Branch badge: nerd-font branch icon + name on white bg / black fg
+        if len(branch) > 16:
+            branch = branch[:16]
         branch_badge = f"{_BG_WHITE}{_FG_BLACK} ⎇ {branch} {_RESET}"
         git_part = branch_badge
 
