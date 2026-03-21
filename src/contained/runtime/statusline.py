@@ -64,8 +64,8 @@ def main() -> None:
                 del_ = int(token.split()[0])
 
         # Branch badge: nerd-font branch icon + name on white bg / black fg
-        if len(branch) > 16:
-            branch = branch[:16]
+        if len(branch) > 24:
+            branch = f"{branch[:21]}..."
         branch_badge = f"{_BG_WHITE}{_FG_BLACK} ⎇ {branch} {_RESET}"
         git_part = branch_badge
 
@@ -100,7 +100,7 @@ def main() -> None:
 
     parts = [p for p in (contained_part, git_part, cost_part, ctx_part, session_part) if p]
     if parts:
-        print("  │  ".join(parts))
+        print(" │ ".join(parts))
 
 
 if __name__ == "__main__":
