@@ -539,6 +539,11 @@ def _run_wizard(docker_config: dict) -> str:
     qa_lint = click.confirm("    lint    (ruff check)", default=True)
     qa_format = click.confirm("    format  (ruff format --check)", default=True)
     qa_type = click.confirm("    type    (pyright)", default=True)
+    qa_test = click.confirm("    test    (pytest tests/)", default=True)
+    qa_coverage = click.confirm("    coverage (pytest --cov)", default=True)
+    coverage_threshold = 80
+    if qa_coverage:
+        coverage_threshold = click.prompt("    coverage threshold (%)", default=80, type=int)
     console.print()
 
     qa_choices = {
@@ -546,6 +551,9 @@ def _run_wizard(docker_config: dict) -> str:
         "lint": qa_lint,
         "format": qa_format,
         "type": qa_type,
+        "test": qa_test,
+        "coverage": qa_coverage,
+        "coverage_threshold": coverage_threshold,
     }
 
     # ── Model ─────────────────────────────────────────────────────────────────
@@ -571,7 +579,7 @@ def _run_wizard(docker_config: dict) -> str:
     console.print()
     sigstore_enabled = click.confirm(
         "? Enable build provenance (Sigstore / cosign required)",
-        default=False,
+        default=True,
     )
     if sigstore_enabled:
         from contained.docker_runner import _find_cosign
@@ -602,7 +610,7 @@ def _build_manifest(
     qa_choices: dict | None = None,
     egress_enabled: bool = True,
     egress_extra_domains: list[str] | None = None,
-    sigstore_enabled: bool = False,
+    sigstore_enabled: bool = True,
 ) -> str:
     """Return a YAML string for the complete manifest based on wizard choices."""
     import yaml
@@ -612,6 +620,9 @@ def _build_manifest(
         "lint": True,
         "format": True,
         "type": True,
+        "test": True,
+        "coverage": True,
+        "coverage_threshold": 80,
     }
     qa = {**default_qa, **(qa_choices or {})}
 

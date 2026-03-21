@@ -286,7 +286,15 @@ class TestBuildManifest:
     def test_default_qa_all_true(self):
         data = self._parse(docker_config=None, model="m")
         qa = data["policy"]["qa"]
-        assert qa == {"syntax": True, "lint": True, "format": True, "type": True}
+        assert qa == {
+            "syntax": True,
+            "lint": True,
+            "format": True,
+            "type": True,
+            "test": True,
+            "coverage": True,
+            "coverage_threshold": 80,
+        }
 
     def test_qa_choices_override_defaults(self):
         data = self._parse(
@@ -337,9 +345,12 @@ class TestBuildManifest:
         data = self._parse(docker_config=None, model="m")
         assert data["runtime"] == {}
 
-    def test_sigstore_disabled_by_default(self):
+    def test_sigstore_enabled_by_default(self):
         data = self._parse(docker_config=None, model="m")
-        assert data["sigstore"] == {"enabled": False}
+        s = data["sigstore"]
+        assert s["enabled"] is True
+        assert s["rekor_url"] == "https://rekor.sigstore.dev"
+        assert s["fulcio_url"] == "https://fulcio.sigstore.dev"
 
     def test_sigstore_enabled_writes_urls(self):
         data = self._parse(docker_config=None, model="m", sigstore_enabled=True)

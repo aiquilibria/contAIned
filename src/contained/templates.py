@@ -109,6 +109,15 @@ sandbox:
   filesystem:
     denyWrite:
       - .contAIned   # protect the control-plane directory from subprocess writes
+
+# ── Sigstore provenance ────────────────────────────────────────────────────────
+# When enabled, the Docker image is signed with Sigstore (cosign) during
+# `contAIned init`.  Provenance is stored in .contAIned/provenance.yaml and
+# verified on each session start.  Requires cosign to be installed.
+sigstore:
+  enabled: true
+  rekor_url: https://rekor.sigstore.dev
+  fulcio_url: https://fulcio.sigstore.dev
 """
 
 POLICY_LOADER_HOOK = '''\
