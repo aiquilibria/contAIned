@@ -475,11 +475,17 @@ the managed-settings allow list and never reach this hook.  Side-effect commands
 (git commit/push, etc.) are not in the allow list and fall through to the
 permission system, which prompts the operator for approval.
 
-This hook is a deny-list only: it exits 2 to block, or exits 0 (no decision)
-to let the permission system handle the call.  It never explicitly approves.
+For each command this hook outputs one of three JSON decisions:
+  permissionDecision: "deny"  — blocked outright (secrets, destructive ops, etc.)
+  permissionDecision: "allow" — safe read-only command (mirrors the allow list)
+  permissionDecision: "ask"   — side-effect command; operator prompt fires
 
-Exits 0 (no decision) or 2 (denied, reason on stderr fed back to agent).
-Denials are written to the audit log before blocking.
+The "allow" and "ask" paths exist because a PreToolUse hook returning "ask"
+overrides the managed-settings allow list.  Safe patterns are therefore matched
+explicitly here so they are not accidentally caught by the "ask" fallback.
+Keep _SAFE_PATTERNS in sync with the allow list in managed-settings.json.
+
+Outputs JSON to stdout; denials also written to the audit log.
 """
 import json
 import os
@@ -501,6 +507,23 @@ SECRET_FILE_PATTERNS = [
 ]
 SAFE_VARIANT_RE = re.compile(r\'\\.(example|sample|template)\', re.IGNORECASE)
 READ_CMD_RE     = re.compile(r\'^\\s*(cat|head|tail|less|more|bat|pg|view)\\s\', re.IGNORECASE)
+
+# Read-only commands that mirror the managed-settings allow list.
+# Commands matching these patterns are auto-approved (permissionDecision: "allow").
+# Keep in sync with the "allow" list in managed-settings.json.
+_SAFE_PATTERNS = [
+    re.compile(r\'^git\\s+status\\b\'),
+    re.compile(r\'^git\\s+log\\b\'),
+    re.compile(r\'^git\\s+diff\\b\'),
+    re.compile(r\'^git\\s+show\\b\'),
+    re.compile(r\'^git\\s+branch\\b\'),
+    re.compile(r\'^git\\s+stash\\s+list\\b\'),
+    re.compile(r\'^git\\s+remote\\b\'),
+    re.compile(r\'^ls\\b\'),
+    re.compile(r\'^pwd\\b\'),
+    re.compile(r\'^echo\\s\'),
+    re.compile(r\'^which\\s\'),
+]
 
 # (policy key, compiled patterns, denial reason)
 _BASH_RULES = [
@@ -577,21 +600,38 @@ def log_denial(event, command, reason):
 
 
 def enforce(action, event, command, msg):
-    """Act on *action*: block exits 2; allow/escalate pass through."""
+    """Block the tool call: log denial, output JSON deny decision, exit 2."""
     if action == "block":
         log_denial(event, command, msg)
-        print(msg, file=sys.stderr)
+        print(json.dumps({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": msg,
+            }
+        }))
         sys.exit(2)
+
+
+def _ask():
+    """Output a permissionDecision:ask response and exit 0."""
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+        }
+    }))
+    sys.exit(0)
 
 
 try:
     event = json.load(sys.stdin)
 except json.JSONDecodeError:
-    sys.exit(0)
+    _ask()
 
 command = event.get("tool_input", {}).get("command", "")
 if not command:
-    sys.exit(0)
+    _ask()
 
 cwd    = event.get("cwd", ".")
 policy = load_policy(cwd)
@@ -606,7 +646,7 @@ if READ_CMD_RE.match(command):
                 "Secret files (credentials, keys, .env) may not be read.",
             )
 
-# ── Checks 2–6: bash command rules ────────────────────────────────────────────
+# ── Checks 2–5: bash command rules ────────────────────────────────────────────
 for rule_key, patterns, reason in _BASH_RULES:
     action = policy["bash"][rule_key]
     if action == "allow":
@@ -614,7 +654,18 @@ for rule_key, patterns, reason in _BASH_RULES:
     if any(pat.search(command) for pat in patterns):
         enforce(action, event, command, reason)
 
-sys.exit(0)
+# ── Safe read-only commands (mirrors managed-settings allow list) ──────────────
+if any(pat.match(command) for pat in _SAFE_PATTERNS):
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+        }
+    }))
+    sys.exit(0)
+
+# Side-effect command — ask the operator for explicit approval.
+_ask()
 '''
 
 AUDIT_HOOK = '''\

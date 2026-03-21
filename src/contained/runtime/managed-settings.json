@@ -3,18 +3,7 @@
     "allow": [
       "Read(/workspace/**)",
       "Glob(/workspace/**)",
-      "Grep(/workspace/**)",
-      "Bash(git status*)",
-      "Bash(git log*)",
-      "Bash(git diff*)",
-      "Bash(git show*)",
-      "Bash(git branch*)",
-      "Bash(git stash list*)",
-      "Bash(git remote*)",
-      "Bash(ls*)",
-      "Bash(pwd*)",
-      "Bash(echo *)",
-      "Bash(which *)"
+      "Grep(/workspace/**)"
     ],
     "disableBypassPermissionsMode": "disable",
     "allowManagedPermissionRulesOnly": true,
