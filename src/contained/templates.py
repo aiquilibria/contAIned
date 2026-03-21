@@ -1563,7 +1563,7 @@ UserPromptSubmit hook — pre-processes hash commands and injects data for Claud
 
 Commands handled here:
   #db [SQL]              — query tracer.db
-  #status                — tail recent audit log
+  #audit                 — tail recent audit log
   #policy                — show effective policy (read-only view of /etc/contained/manifest.yaml)
   #review                — list recent completed tasks
   #review <n>            — show narrative + diff summary for task n
@@ -1602,7 +1602,7 @@ parts    = prompt.split(None, 1)
 cmd_word = parts[0].lower()
 args     = parts[1].strip() if len(parts) > 1 else ""
 
-_HOOK_COMMANDS = frozenset({"#db", "#status", "#policy", "#review"})
+_HOOK_COMMANDS = frozenset({"#db", "#audit", "#policy", "#review"})
 
 if cmd_word not in _HOOK_COMMANDS:
     sys.exit(0)  # not a known hash command — pass through to Claude
@@ -1647,8 +1647,8 @@ if cmd_word == "#db":
             _lines.append("(no rows)")
         _instruction = "Format and present these database query results clearly to the user."
 
-# ── #status ───────────────────────────────────────────────────────────────────
-elif cmd_word == "#status":
+# ── #audit ────────────────────────────────────────────────────────────────────
+elif cmd_word == "#audit":
     import sqlite3 as _sl
     db_path = Path(cwd) / ".contAIned" / "tracer.db"
     if not db_path.exists():
