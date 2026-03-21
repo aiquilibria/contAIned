@@ -714,6 +714,62 @@ if policy["audit"].get("jsonl_export", False):
 sys.exit(0)
 '''
 
+PERMISSION_REQUEST_HOOK = '''\
+#!/usr/bin/env python3
+"""
+PermissionRequest hook — audits every permission request to tracer.db.
+
+Records the fact that the agent requested permission for a tool call.
+Never blocks execution (always exits 0 without output).
+
+To infer the user\'s decision, cross-reference with PostToolUse:
+  - PermissionRequest entry + matching PostToolUse success  → user approved
+  - PermissionRequest entry + no matching PostToolUse ~30s  → user denied (inferred)
+
+Matching key: (session_id, tool_name, tool_input) + temporal proximity.
+"""
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _policy import load_policy  # noqa: E402
+
+try:
+    event = json.load(sys.stdin)
+except (json.JSONDecodeError, EOFError):
+    sys.exit(0)
+
+cwd    = event.get("cwd", ".")
+policy = load_policy(cwd)
+
+if not policy["audit"]["enabled"]:
+    sys.exit(0)
+
+session_id = event.get("session_id")
+agent_id   = event.get("agent_id")
+actor_id   = agent_id or session_id
+tool       = event.get("tool_name", "")
+tool_input = event.get("tool_input") or {}
+
+try:
+    from contained.tracer import contAInedTracer  # noqa: PLC0415
+    db_path = str(Path(cwd) / ".contAIned" / "tracer.db")
+    tracer  = contAInedTracer(db_path)
+    tracer.log_event(
+        session_id    = actor_id,
+        tool          = tool,
+        tool_input    = tool_input,
+        outcome       = "permission_requested",
+        reason        = None,
+        tool_response = {},
+    )
+except Exception:
+    pass  # never block execution due to logging failure
+
+sys.exit(0)
+'''
+
 QA_HOOK = '''\
 #!/usr/bin/env python3
 """
@@ -1172,20 +1228,19 @@ sys.exit(0)
 SUMMARIZER_HOOK = '''\
 #!/usr/bin/env python3
 """
-Stop hook — runs QA checks, builds a diff summary, and has Claude present it.
+Stop hook — runs QA checks and persists a diff summary to tracer.db.
 
 Fires only for root-agent Stop events (not SubagentStop — that is wired to
 subagent_stop.py).  This is the sole Stop hook; it owns both QA and summary.
 
 Flow:
-  1. Sentinel check: if task already "closed", exit 0 (second Stop — let it through).
+  1. Sentinel check: if task already "closed", exit 0 (no-op).
   2. Run qa.py inline — if any check fails, block and return to agent immediately.
   3. Defensive child check: poll up to 3 × 200 ms for open sub-agent sessions.
   4. Compute per-file unified diffs across the whole agent tree.
   5. Build action log from recent audit events (Bash, Agent, denied calls).
   6. Store JSON summary in tasks.summary; set status = closed.
-  7. Block with structured summary data — Claude formats and presents it, then stops.
-  8. Second Stop fires; sentinel (step 1) sees "closed" and exits 0 cleanly.
+  7. Exit 0 — agent stops cleanly; summary is retrievable via #review.
 """
 import json
 import subprocess
@@ -1452,36 +1507,9 @@ try:
 except Exception:
     pass
 
-# ── Pass summary to Claude for formatting and presentation ────────────────────
-# Block the stop and hand Claude the structured summary data. Claude formats
-# and presents it to the operator, then stops again. The sentinel check at the
-# top of this hook catches that second Stop and exits 0 cleanly.
-_summary_for_presentation = {
-    "task": task_prompt,
-    "file_changes": [
-        {
-            "path":          d["file_path"],
-            "change_type":   d["change_type"],
-            "lines_added":   d["lines_added"],
-            "lines_removed": d["lines_removed"],
-            "reason":        d["reason"],
-        }
-        for d in file_diffs
-    ],
-    "action_log_stats": {
-        "bash":      sum(1 for e in action_log if e["tool"] == "Bash"),
-        "sub_agent": sum(1 for e in action_log if e["tool"] == "Agent"),
-        "denied":    sum(1 for e in action_log if e["outcome"] == "denied"),
-    },
-    "incomplete_children": open_children,
-}
-
-_reason = (
-    "QA checks passed. The task is complete.\\n"
-    "Present the following completion summary clearly to the operator, then stop.\\n\\n"
-    + json.dumps(_summary_for_presentation, indent=2)
-)
-print(json.dumps({"decision": "block", "reason": _reason}))
+# Summary is persisted to tracer.db; no UI output needed.
+# Use #review to inspect completed tasks.
+print("Summarization complete and persisted")
 sys.exit(0)
 '''
 

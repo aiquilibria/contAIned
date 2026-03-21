@@ -101,3 +101,35 @@ def init(directory: str, force: bool, rebuild: bool, manifest_path: str | None) 
         rebuild=rebuild,
         manifest_path=Path(manifest_path) if manifest_path else None,
     )
+
+
+# ── verify ─────────────────────────────────────────────────────────────────────
+
+
+@main.command()
+@click.argument(
+    "directory",
+    default=".",
+    type=click.Path(file_okay=False, resolve_path=True),
+)
+def verify(directory: str) -> None:
+    """
+    Verify workspace image provenance.
+
+    Confirms that the local contained:latest image matches the signed digest
+    recorded at init time, and that the Sigstore signature in the Rekor
+    transparency log is still valid.
+
+    Only meaningful when Sigstore was enabled during contAIned init.
+    If provenance was disabled at init, reports this and exits cleanly.
+
+    Requires: docker (to inspect the local image), cosign (to query Rekor).
+
+    \b
+    Examples:
+      contAIned verify          # verify in current workspace
+      contAIned verify ./repo   # verify a specific workspace directory
+    """
+    from contained.verify import run_verify
+
+    run_verify(Path(directory))

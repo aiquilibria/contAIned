@@ -13,6 +13,7 @@ The agent operates within a defined workspace inside an isolated Docker containe
 - [Commands](#commands)
   - [`contAIned`](#contained-1)
   - [`contAIned init`](#contained-init-directory)
+  - [`contAIned verify`](#contained-verify-directory)
 - [Task lifecycle](#task-lifecycle)
 - [How it works](#how-it-works)
   - [Isolation](#isolation)
@@ -83,6 +84,8 @@ uv add contAIned
 # or
 pip install contAIned
 ```
+
+**Prerequisites:** Docker must be installed and running. `cosign` is optional — required only if you enable build provenance (Sigstore) during `contAIned init`. Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/
 
 ## Quickstart
 
@@ -168,6 +171,23 @@ Baked into the Docker image (not in the workspace):
 ```
 
 Re-running `contAIned init` without `--force` refreshes hook files to the latest bundled templates without touching your manifest. Use `--rebuild` or `--manifest` to rebuild the image.
+
+---
+
+### `contAIned verify [DIRECTORY]`
+
+Verifies workspace image provenance before starting a session. Only meaningful when Sigstore was enabled during `contAIned init`; exits cleanly if provenance was disabled.
+
+```bash
+contAIned verify          # verify current workspace
+contAIned verify ./repo   # verify a specific workspace
+```
+
+Checks:
+1. The current `contained:latest` image digest matches the digest recorded at init time — detects image replacement between sessions.
+2. The Sigstore signature in the Rekor transparency log is still valid for the recorded operator identity.
+
+Requires `docker` and `cosign` on the host. Run this before `contAIned` when operating in environments where image integrity matters.
 
 ---
 

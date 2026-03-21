@@ -94,6 +94,35 @@ def _find_docker() -> str:
     )
 
 
+# Common cosign executable locations when not in PATH
+_COSIGN_SEARCH_PATHS = [
+    "/usr/local/bin/cosign",
+    "/usr/bin/cosign",
+]
+
+
+def _find_cosign() -> str:
+    """
+    Locate the cosign executable (v2.x required).
+
+    Only called when ``sigstore.enabled`` is true.  Raises ``FileNotFoundError``
+    with install instructions if cosign cannot be found.
+    """
+    cosign = shutil.which("cosign")
+    if cosign:
+        return cosign
+
+    for path in _COSIGN_SEARCH_PATHS:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+
+    raise FileNotFoundError(
+        "cosign executable not found. cosign v2.x is required when Sigstore is enabled.\n"
+        "Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/\n"
+        f"Searched PATH and: {', '.join(_COSIGN_SEARCH_PATHS)}"
+    )
+
+
 class DockerRunner:
     """
     Wraps ``docker run`` to execute ``contAIned`` inside a container

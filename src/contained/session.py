@@ -125,6 +125,22 @@ def start_repl(root: Path) -> None:
     if not force_local:
         manifest = _load_manifest(root)
         runtime = manifest.get("runtime", {})
+
+        # Pre-session provenance check when Sigstore is enabled.
+        if manifest.get("sigstore", {}).get("enabled", False):
+            from contained.verify import _verify_workspace
+
+            try:
+                _verify_workspace(root)
+                console.print("[dim][contAIned] Sigstore: provenance verified ✓[/dim]")
+            except RuntimeError as exc:
+                console.print(
+                    f"[red][contAIned] Sigstore verification failed — session blocked.[/red]\n"
+                    f"  {exc}\n"
+                    f"  Run [bold]contAIned init[/bold] to rebuild and re-sign."
+                )
+                raise SystemExit(1)
+
         from contained.docker_runner import DockerRunner
 
         _print_runtime_banner(root)
@@ -147,7 +163,7 @@ def start_repl(root: Path) -> None:
     if model:
         cmd += ["--model", model]
 
-    console.print("[dim]Claude Code is starting up — input may appear delayed.[/dim]")
+    console.print("[dim]Claude Code is starting up — input may appear delayed.[/dim]\n")
 
     try:
         result = subprocess.run(cmd, cwd=str(root))

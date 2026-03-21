@@ -34,6 +34,7 @@ from contained.templates import (
     CLAUDE_MD,
     GITIGNORE_BLOCK,
     GITIGNORE_TEMPLATE,
+    PERMISSION_REQUEST_HOOK,
     POLICY_LOADER_HOOK,
     QA_HOOK,
     RESTRICT_BASH_HOOK,
@@ -239,6 +240,11 @@ def _managed_files(target: Path) -> list[tuple[Path, str, bool]]:
             True,
         ),
         (target / ".contAIned" / "hooks" / "audit.py", AUDIT_HOOK, True),
+        (
+            target / ".contAIned" / "hooks" / "permission_request.py",
+            PERMISSION_REQUEST_HOOK,
+            True,
+        ),
         (target / ".contAIned" / "hooks" / "tracer_pre.py", TRACER_PRE_HOOK, True),
         (target / ".contAIned" / "hooks" / "tracer_post.py", TRACER_POST_HOOK, True),
         (
@@ -332,6 +338,7 @@ def _print_table(results: list[tuple[str, str]]) -> None:
         "exists": "[dim]exists — skipped[/dim]",
         "already configured": "[dim]already configured[/dim]",
         "failed": "[red]failed[/red]",
+        "skipped (Sigstore disabled)": "[dim]skipped (Sigstore disabled)[/dim]",
     }
 
     for rel, status in results:
@@ -359,7 +366,7 @@ def _docker_setup(
     *,
     rebuild: bool = False,
     manifest_content: str | None = None,
-) -> None:
+) -> bool:
     """
     Perform Docker infrastructure setup for a workspace:
       1. Build (or rebuild) the ``contained:latest`` image from the bundled Dockerfile.
@@ -376,6 +383,9 @@ def _docker_setup(
          parameters from the image rather than the workspace.
       2. Create the ``contAIned-agent-config`` named volume.
       3. Create the ``contAIned-net`` bridge network.
+
+    Returns ``True`` if the image was (re)built, ``False`` if it was up to date
+    and the build was skipped.  Callers use this to decide whether to re-sign.
 
     Raises ``RuntimeError`` on any failure (including Docker not found).
     """
@@ -439,6 +449,19 @@ def _docker_setup(
                     console.print(f"  Image [bold]{image}[/bold] policy has changed — rebuilding.")
 
     if needs_build:
+        # Warn if a session is currently running — provenance.yaml will be
+        # refreshed mid-session, making it inconsistent with the running image.
+        ps = subprocess.run(
+            [docker_bin, "ps", "--filter", f"name=contAIned-{workspace.name}-", "--quiet"],
+            capture_output=True,
+            text=True,
+        )
+        if ps.stdout.strip():
+            console.print(
+                f"  [yellow]Warning:[/yellow] a contAIned session for "
+                f"[bold]{workspace.name}[/bold] appears to be running. "
+                "Rebuilding will update provenance.yaml mid-session."
+            )
         console.print(f"  Building image [bold]{image}[/bold] …", end="")
         build_cmd = [
             docker_bin,
@@ -486,6 +509,8 @@ def _docker_setup(
     if result.returncode != 0 and "already exists" not in result.stderr:
         raise RuntimeError(f"docker network create {net}: {result.stderr.strip()}")
     console.print(f"  Network [bold]{net}[/bold] ready.")
+
+    return needs_build
 
 
 # ── Policy wizard ─────────────────────────────────────────────────────────────
@@ -542,12 +567,29 @@ def _run_wizard(docker_config: dict) -> str:
         egress_extra_domains = [d.strip() for d in raw.split(",") if d.strip()]
     console.print()
 
+    # ── Sigstore ──────────────────────────────────────────────────────────────
+    console.print()
+    sigstore_enabled = click.confirm(
+        "? Enable build provenance (Sigstore / cosign required)",
+        default=False,
+    )
+    if sigstore_enabled:
+        from contained.docker_runner import _find_cosign
+
+        try:
+            _find_cosign()
+        except FileNotFoundError as exc:
+            console.print(f"\n[red]✗[/red] {exc}")
+            raise SystemExit(1)
+    console.print()
+
     return _build_manifest(
         docker_config=docker_config,
         model=model,
         qa_choices=qa_choices,
         egress_enabled=egress_enabled,
         egress_extra_domains=egress_extra_domains,
+        sigstore_enabled=sigstore_enabled,
     )
 
 
@@ -560,6 +602,7 @@ def _build_manifest(
     qa_choices: dict | None = None,
     egress_enabled: bool = True,
     egress_extra_domains: list[str] | None = None,
+    sigstore_enabled: bool = False,
 ) -> str:
     """Return a YAML string for the complete manifest based on wizard choices."""
     import yaml
@@ -601,6 +644,12 @@ def _build_manifest(
         },
     }
 
+    sigstore: dict = {"enabled": sigstore_enabled}
+    if sigstore_enabled:
+        sigstore["rekor_url"] = "https://rekor.sigstore.dev"
+        sigstore["fulcio_url"] = "https://fulcio.sigstore.dev"
+    manifest["sigstore"] = sigstore
+
     if docker_config:
         manifest["runtime"]["docker"] = {
             "image": docker_config["image"],
@@ -611,6 +660,30 @@ def _build_manifest(
         }
 
     return yaml.dump(manifest, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+# ── Provenance ────────────────────────────────────────────────────────────────
+
+
+def _write_provenance(target: Path, data: dict) -> str:
+    """Write .contAIned/provenance.yaml and return a status string."""
+    import yaml
+
+    provenance = {
+        "schema_version": 1,
+        "image_digest": data["image_digest"],
+        "rekor_log_index": data["rekor_log_index"],
+        "rekor_entry_url": data["rekor_entry_url"],
+        "operator_identity": data["operator_identity"],
+        "oidc_issuer": data["oidc_issuer"],
+        "signed_at": data["signed_at"],
+    }
+    path = target / ".contAIned" / "provenance.yaml"
+    return _write_file(
+        path,
+        yaml.dump(provenance, default_flow_style=False, sort_keys=False, allow_unicode=True),
+        overwrite=True,
+    )
 
 
 # ── init ──────────────────────────────────────────────────────────────────────
@@ -673,7 +746,9 @@ def run_init(
             pass
         console.print(f"  Using manifest: [dim]{manifest_path}[/dim]")
         try:
-            _docker_setup(docker_config, target, rebuild=True, manifest_content=manifest_content)
+            image_rebuilt = _docker_setup(
+                docker_config, target, rebuild=True, manifest_content=manifest_content
+            )
         except RuntimeError as exc:
             console.print(f"\n[red]✗[/red] Docker setup failed: {exc}")
             raise SystemExit(1)
@@ -693,7 +768,9 @@ def run_init(
             )
             manifest_content = _run_wizard(docker_config)
         try:
-            _docker_setup(docker_config, target, rebuild=rebuild, manifest_content=manifest_content)
+            image_rebuilt = _docker_setup(
+                docker_config, target, rebuild=rebuild, manifest_content=manifest_content
+            )
         except RuntimeError as exc:
             console.print(f"\n[red]✗[/red] Docker setup failed: {exc}\n")
             raise SystemExit(1)
@@ -708,10 +785,62 @@ def run_init(
         manifest_content = _run_wizard(docker_config)
 
         try:
-            _docker_setup(docker_config, target, rebuild=rebuild, manifest_content=manifest_content)
+            image_rebuilt = _docker_setup(
+                docker_config, target, rebuild=rebuild, manifest_content=manifest_content
+            )
         except RuntimeError as exc:
             console.print(f"\n[red]✗[/red] Docker setup failed: {exc}")
             raise SystemExit(1)
+
+    # ── Sigstore signing ──────────────────────────────────────────────────────
+    # Sign if: Sigstore enabled AND (image was rebuilt OR no provenance yet).
+    # Skips re-signing on a refresh where the image was already up to date —
+    # the existing Rekor entry is still valid.
+    provenance_data: dict | None = None
+    sigstore_enabled = False
+    if manifest_content:
+        try:
+            import yaml as _yaml
+
+            _parsed = _yaml.safe_load(manifest_content) or {}
+            _sigstore = _parsed.get("sigstore", {})
+            sigstore_enabled = bool(_sigstore.get("enabled", False))
+            provenance_exists = (target / ".contAIned" / "provenance.yaml").exists()
+            if sigstore_enabled and (image_rebuilt or not provenance_exists):
+                from contained.sigstore import cosign_sign
+
+                rekor_url = _sigstore.get("rekor_url", "https://rekor.sigstore.dev")
+                fulcio_url = _sigstore.get("fulcio_url", "https://fulcio.sigstore.dev")
+                image = docker_config.get("image", "contained:latest")
+                bundle_dest = target / ".contAIned" / "provenance.bundle"
+                console.print("  Signing image with Sigstore …", end="")
+                try:
+                    provenance_data = cosign_sign(image, rekor_url, fulcio_url, bundle_dest)
+                    console.print(" [green]done[/green]")
+                    # Write provenance.yaml now so the smoke-test below sees fresh data.
+                    _write_provenance(target, provenance_data)
+                    # Smoke-test: verify the provenance we just wrote
+                    console.print("  Verifying provenance …", end="")
+                    try:
+                        from contained.verify import _verify_workspace
+
+                        _verify_workspace(target)
+                        console.print(" [green]ok[/green]")
+                    except RuntimeError as verify_exc:
+                        console.print(" [yellow]warning[/yellow]")
+                        console.print(
+                            f"  [yellow]Warning:[/yellow] post-sign verification failed: "
+                            f"{verify_exc}"
+                        )
+                except Exception as exc:
+                    console.print(" [yellow]warning[/yellow]")
+                    console.print(
+                        f"  [yellow]Warning:[/yellow] image signing failed — "
+                        f"workspace will function but lacks Sigstore provenance.\n"
+                        f"  {exc}"
+                    )
+        except Exception:
+            pass
 
     results: list[tuple[str, str]] = []
 
@@ -752,6 +881,14 @@ def run_init(
     # ── Directory markers ─────────────────────────────────────────────────────
     for path in _markers(target):
         results.append((str(path.relative_to(target)), _touch(path)))
+
+    # ── Provenance ────────────────────────────────────────────────────────────
+    if provenance_data:
+        results.append((".contAIned/provenance.yaml", _write_provenance(target, provenance_data)))
+    elif sigstore_enabled:
+        results.append((".contAIned/provenance.yaml", "failed"))
+    else:
+        results.append((".contAIned/provenance.yaml", "skipped (Sigstore disabled)"))
 
     # ── .claude/settings.json — strip duplicate hook registrations ───────────
     # Hooks are registered exclusively via managed-settings.json (image layer).

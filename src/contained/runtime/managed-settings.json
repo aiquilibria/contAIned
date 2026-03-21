@@ -4,7 +4,10 @@
       "Read(/workspace/**)",
       "Glob(/workspace/**)",
       "Grep(/workspace/**)"
-    ]
+    ],
+    "disableBypassPermissionsMode": "disable",
+    "allowManagedPermissionRulesOnly": true,
+    "allowManagedMcpServersOnly": true
   },
   "hooks": {
     "PreToolUse": [
@@ -99,10 +102,22 @@
           }
         ]
       }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /workspace/.contAIned/hooks/permission_request.py"
+          }
+        ]
+      }
     ]
   },
   "sandbox": {
     "enabled": true,
+    "enableWeakerNestedSandbox": true,
+    "allowUnsandboxedCommands": false,
     "filesystem": {
       "denyWrite": [
         ".contAIned",
@@ -110,6 +125,7 @@
       ]
     }
   },
+  "allowManagedHooksOnly": true,
   "statusLine": {
     "type": "command",
     "command": "python3 /etc/contained/statusline.py"

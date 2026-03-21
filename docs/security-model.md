@@ -65,6 +65,11 @@ The enforcement layer is ordered by tamper-resistance:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
+│  Rekor transparency log  (optional — Sigstore)              │
+│  Append-only public record: image digest ↔ operator OIDC   │
+│  identity ↔ timestamp.  Cannot be removed or modified.      │
+│  Verified by: contAIned verify (host-side, pre-session).    │
+├─────────────────────────────────────────────────────────────┤
 │  /etc/claude-code/managed-settings.json  (image layer)      │
 │  Hook registrations — highest precedence in Claude Code;    │
 │  user-defined hooks are blocked entirely when this is set.  │
@@ -85,6 +90,8 @@ The enforcement layer is ordered by tamper-resistance:
 ```
 
 The critical property is that the agent cannot reach the layers above it. Hook registration lives in the image, not the workspace. The managed-settings path is blocked by Claude Code's own sandbox independently of any hook — the protection holds even before the first hook runs. There is no circular dependency: the enforcement layer does not rely on the agent to protect itself.
+
+The Rekor layer is optional. When enabled at `contAIned init` time, it extends the trust hierarchy upward: the image itself becomes accountable, not just its enforcement behaviour. See [Build-time provenance](#build-time-provenance-optional) below.
 
 ---
 
@@ -255,6 +262,39 @@ This is not a technical attack; it is a workflow failure. contAIned addresses it
 **Residual risk.** An operator who approves escalated actions without reading `#review` output accepts the full risk of whatever the agent did. contAIned provides the information needed for an informed decision; it cannot compel the operator to read it.
 
 **Extensibility.** Stricter enforcement — for example, requiring a `#review` step before any escalated action can be approved, or flagging sessions where the operator approved without opening the review — is achievable by building on contAIned's tracer data, which records the full tool call and approval history for every session.
+
+---
+
+## Build-time Provenance (optional)
+
+When the operator enables Sigstore at `contAIned init` time, an additional accountability layer is added **above** the image layer. This does not change the runtime enforcement model — hooks, sandbox, egress proxy, and audit log work identically. What it adds is a non-repudiable record of *who produced the image* and *when*.
+
+### What is recorded
+
+After a successful image build, `contAIned init`:
+
+1. Retrieves the image's SHA256 digest from Docker.
+2. Signs that digest as a blob using `cosign sign-blob` (keyless, OIDC-based). This triggers a browser or device-flow authentication with the operator's OIDC provider (GitHub, Google, or any supported issuer).
+3. Cosign submits the signature and the short-lived Fulcio certificate (which carries the operator's verified identity) to the Rekor append-only transparency log. The entry cannot be removed or modified.
+4. Writes `.contAIned/provenance.yaml` — a local pointer recording the image digest, Rekor log index and entry URL, operator identity, OIDC issuer, and signing timestamp.
+5. Writes `.contAIned/provenance.bundle` — the cosign bundle required for offline verification.
+
+### What is verifiable
+
+`contAIned verify` (host-side, run before starting a session) checks:
+
+- The current `contained:latest` image digest matches the digest in `provenance.yaml`. A mismatch means the image was replaced or rebuilt since init — the session is blocked.
+- The `provenance.bundle` signature is valid against the recorded identity and issuer via `cosign verify-blob`. This confirms the Rekor entry is intact and the certificate chain is valid.
+
+### Scope and boundaries
+
+**The image is never distributed to a registry.** Sigstore signing here is a build-time provenance record for the local operator, not a supply-chain distribution mechanism. Scenarios where a signed image is shared across machines require a registry-based model and are out of scope.
+
+**Physical access to the machine is out of scope.** Consistent with the existing threat model, attacks requiring host OS compromise or physical device access are not addressed.
+
+**Session-level accountability is not provided.** The signature establishes who built the policy. It does not create a per-session cryptographic record of who approved individual escalations. In the local-only model this is not a gap — the operator who signed the image is the same person running sessions.
+
+**`provenance.yaml` is a local pointer, not the authoritative record.** The Rekor entry is permanent and independently verifiable. `provenance.yaml` is a convenience file used by `contAIned verify`. It is gitignored alongside the rest of `.contAIned/`.
 
 ---
 

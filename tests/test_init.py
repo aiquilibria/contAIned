@@ -5,9 +5,11 @@ Excluded: _docker_setup, run_init (require Docker or interactive prompts).
 """
 
 import stat
+from unittest.mock import patch
 
 import yaml
 
+from contained.docker_runner import _find_cosign
 from contained.init import (
     _build_manifest,
     _contAIned_version,
@@ -19,7 +21,9 @@ from contained.init import (
     _touch,
     _update_gitignore,
     _write_file,
+    _write_provenance,
 )
+from contained.sigstore import _extract_oidc_issuer, _extract_san
 from contained.templates import GITIGNORE_BLOCK, GITIGNORE_TEMPLATE
 
 # ── _write_file ───────────────────────────────────────────────────────────────
@@ -333,6 +337,23 @@ class TestBuildManifest:
         data = self._parse(docker_config=None, model="m")
         assert data["runtime"] == {}
 
+    def test_sigstore_disabled_by_default(self):
+        data = self._parse(docker_config=None, model="m")
+        assert data["sigstore"] == {"enabled": False}
+
+    def test_sigstore_enabled_writes_urls(self):
+        data = self._parse(docker_config=None, model="m", sigstore_enabled=True)
+        s = data["sigstore"]
+        assert s["enabled"] is True
+        assert s["rekor_url"] == "https://rekor.sigstore.dev"
+        assert s["fulcio_url"] == "https://fulcio.sigstore.dev"
+
+    def test_sigstore_disabled_omits_urls(self):
+        data = self._parse(docker_config=None, model="m", sigstore_enabled=False)
+        s = data["sigstore"]
+        assert "rekor_url" not in s
+        assert "fulcio_url" not in s
+
 
 # ── _managed_files ────────────────────────────────────────────────────────────
 
@@ -395,3 +416,123 @@ class TestContainedVersion:
         result = _contAIned_version()
         # Either a semver-like string or the fallback
         assert result == "unknown" or result[0].isdigit() or result == "0.1.0"
+
+
+# ── _find_cosign ──────────────────────────────────────────────────────────────
+
+
+class TestFindCosign:
+    def test_finds_cosign_on_path(self, tmp_path):
+        fake = tmp_path / "cosign"
+        fake.write_text("#!/bin/sh\n")
+        fake.chmod(0o755)
+        with patch("shutil.which", return_value=str(fake)):
+            result = _find_cosign()
+        assert result == str(fake)
+
+    def test_finds_cosign_at_known_path(self, tmp_path):
+        fake = tmp_path / "cosign"
+        fake.write_text("#!/bin/sh\n")
+        fake.chmod(0o755)
+        with patch("shutil.which", return_value=None):
+            with patch("contained.docker_runner._COSIGN_SEARCH_PATHS", [str(fake)]):
+                result = _find_cosign()
+        assert result == str(fake)
+
+    def test_raises_when_not_found(self):
+        with patch("shutil.which", return_value=None):
+            with patch("contained.docker_runner._COSIGN_SEARCH_PATHS", []):
+                try:
+                    _find_cosign()
+                    assert False, "expected FileNotFoundError"
+                except FileNotFoundError as exc:
+                    assert "cosign" in str(exc).lower()
+
+    def test_error_message_contains_install_hint(self):
+        with patch("shutil.which", return_value=None):
+            with patch("contained.docker_runner._COSIGN_SEARCH_PATHS", []):
+                try:
+                    _find_cosign()
+                except FileNotFoundError as exc:
+                    assert "sigstore.dev" in str(exc)
+
+
+# ── _extract_san ──────────────────────────────────────────────────────────────
+
+
+class TestExtractSan:
+    def test_extracts_email(self):
+        output = "X509v3 Subject Alternative Name:\n    email:user@example.com\n"
+        assert _extract_san(output) == "user@example.com"
+
+    def test_extracts_uri(self):
+        output = "X509v3 Subject Alternative Name:\n    URI:https://github.com/actions\n"
+        assert _extract_san(output) == "https://github.com/actions"
+
+    def test_extracts_email_from_comma_separated(self):
+        output = "    email:user@example.com, URI:https://accounts.google.com\n"
+        assert _extract_san(output) == "user@example.com"
+
+    def test_returns_unknown_when_no_san(self):
+        assert _extract_san("no relevant content here") == "unknown"
+
+
+# ── _extract_oidc_issuer ──────────────────────────────────────────────────────
+
+
+class TestExtractOidcIssuer:
+    def test_extracts_issuer_after_oid(self):
+        output = "            1.3.6.1.4.1.57264.1.1:\n                https://accounts.google.com\n"
+        assert _extract_oidc_issuer(output) == "https://accounts.google.com"
+
+    def test_extracts_github_issuer(self):
+        output = (
+            "            1.3.6.1.4.1.57264.1.1:\n"
+            "                https://token.actions.githubusercontent.com\n"
+        )
+        assert _extract_oidc_issuer(output) == "https://token.actions.githubusercontent.com"
+
+    def test_returns_unknown_when_oid_absent(self):
+        assert _extract_oidc_issuer("no OID here") == "unknown"
+
+
+# ── _write_provenance ─────────────────────────────────────────────────────────
+
+
+class TestWriteProvenance:
+    _DATA = {
+        "image_digest": "sha256:abc123",
+        "rekor_log_index": 42,
+        "rekor_entry_url": "https://rekor.sigstore.dev/api/v1/log/entries?logIndex=42",
+        "operator_identity": "user@example.com",
+        "oidc_issuer": "https://accounts.google.com",
+        "signed_at": "2026-03-20T12:00:00+00:00",
+    }
+
+    def test_creates_provenance_yaml(self, tmp_path):
+        (tmp_path / ".contAIned").mkdir()
+        status = _write_provenance(tmp_path, self._DATA)
+        assert status == "created"
+        prov_path = tmp_path / ".contAIned" / "provenance.yaml"
+        assert prov_path.exists()
+
+    def test_schema_version_is_1(self, tmp_path):
+        (tmp_path / ".contAIned").mkdir()
+        _write_provenance(tmp_path, self._DATA)
+        data = yaml.safe_load((tmp_path / ".contAIned" / "provenance.yaml").read_text())
+        assert data["schema_version"] == 1
+
+    def test_all_fields_written(self, tmp_path):
+        (tmp_path / ".contAIned").mkdir()
+        _write_provenance(tmp_path, self._DATA)
+        data = yaml.safe_load((tmp_path / ".contAIned" / "provenance.yaml").read_text())
+        for key in self._DATA:
+            assert key in data
+
+    def test_overwrites_on_reinit(self, tmp_path):
+        (tmp_path / ".contAIned").mkdir()
+        _write_provenance(tmp_path, self._DATA)
+        updated = {**self._DATA, "rekor_log_index": 99}
+        _write_provenance(tmp_path, updated)
+        data = yaml.safe_load((tmp_path / ".contAIned" / "provenance.yaml").read_text())
+        assert data["rekor_log_index"] == 99
