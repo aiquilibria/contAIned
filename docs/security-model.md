@@ -11,7 +11,7 @@
   - [Image-Layer Policy — The Root of Trust](#image-layer-policy--the-root-of-trust)
   - [Hook Chain](#hook-chain)
   - [Docker Isolation](#docker-isolation)
-  - [Egress Proxy](#egress-proxy)
+  - [Network Access Controls](#network-access-controls)
   - [Audit and Tracer](#audit-and-tracer)
 - [Threat Scenarios](#threat-scenarios)
   - [Prompt Injection](#prompt-injection)
@@ -160,7 +160,7 @@ contAIned also enables Claude Code's built-in `/sandbox` (bubblewrap on Linux), 
 
 The `managed-settings.json` baked into the image enables the sandbox and adds `denyWrite` rules for `.contAIned/` and `.claude/settings.json` at the OS level — a second enforcement layer behind the hook that already blocks these writes at the SDK level.
 
-### Egress Proxy
+### Network Access Controls
 
 An agent session has four distinct outbound channels:
 
@@ -171,11 +171,15 @@ An agent session has four distinct outbound channels:
 | Agent-written scripts executed later | Agent writes `exfil.py`, hook sees `python exfil.py` — not the script body |
 | MCP / skill processes | Any loaded MCP server making its own HTTP calls |
 
-When `policy.egress.enabled: true`, a filtering proxy sidecar starts alongside the agent on the same Docker network. The agent container receives `HTTP_PROXY` and `HTTPS_PROXY` pointing at the proxy. All outbound HTTP/HTTPS traffic that honours those variables — including `WebFetch`, Bash network tools, and agent-written scripts using standard HTTP libraries — is checked against the operator's domain allowlist. Anything not on the list receives a `403 Forbidden`.
+When `policy.network.enabled: true`, `policy.network.allowed_domains` drives two enforcement mechanisms baked into the image:
 
-The default allowlist contains only `api.anthropic.com`. Operators add project-specific domains (package registries, documentation hosts) as needed.
+**`WebFetch` / `WebSearch`** — each domain in the allowlist generates a `WebFetch(domain:<domain>)` allow rule in `managed-settings.json`. Requests to allowed domains are auto-approved. Requests to any other domain trigger the `PermissionRequest` hook, which surfaces an operator approval prompt and logs the request. No outbound fetch proceeds without an explicit allow rule or deliberate operator approval.
 
-**Known limitation.** The proxy relies on `HTTP_PROXY`/`HTTPS_PROXY` environment variables. Code that opens raw sockets directly (e.g. `socket.connect` to a hardcoded IP) bypasses it. Full kernel-level enforcement requires iptables DNAT rules on the Docker bridge.
+**Bash subprocesses and agent-written scripts** — `managed-settings.json` sets `sandbox.network.allowedDomains` with `allowManagedDomainsOnly: true`. Claude Code's sandbox (bubblewrap on Linux) routes subprocess HTTP/HTTPS traffic through an OS-level filter that blocks requests to non-listed domains with `403 Forbidden`. Because this is enforced at the kernel/namespace level, it cannot be bypassed by modifying environment variables.
+
+The default allowlist contains `api.anthropic.com`, `code.claude.com`, and `docs.anthropic.com`. Operators add project-specific domains as needed and rebuild the image.
+
+**Known limitation.** Both mechanisms cover HTTP/HTTPS. Code that opens raw sockets at the TCP/IP level (e.g. `socket.connect` to a hardcoded IP on a non-HTTP port) bypasses domain-based filtering. Full enforcement of all protocols requires iptables DNAT rules on the Docker bridge; see [Known gaps](../README.md#egress-filtering-against-a-malicious-agent).
 
 ### Audit and Tracer
 
@@ -211,7 +215,7 @@ Together these provide the forensic record that makes injected or unexpected age
 
 **What the adversarial agent can do.** It can attempt any tool call that the policy permits. It can write files anywhere inside the workspace that write-hooks allow. It can make outbound requests to allowlisted domains. It can execute Bash commands that are not on the deny list. These are the same capabilities a legitimate agent has — the enforcement layer does not distinguish intent.
 
-**What it cannot do.** It cannot modify the hook scripts, managed-settings, or the manifest — those paths are blocked by both the hook layer and the OS-level sandbox independently. It cannot deregister or replace hooks, because hook registration is in the image layer and Claude Code blocks user-defined hooks entirely when managed settings are active. It cannot reach the host filesystem. It cannot contact non-allowlisted domains (subject to the proxy limitation described above). It cannot approve its own escalated actions — escalation surfaces to the operator's terminal, not back to the agent.
+**What it cannot do.** It cannot modify the hook scripts, managed-settings, or the manifest — those paths are blocked by both the hook layer and the OS-level sandbox independently. It cannot deregister or replace hooks, because hook registration is in the image layer and Claude Code blocks user-defined hooks entirely when managed settings are active. It cannot reach the host filesystem. It cannot contact non-allowed domains via HTTP/HTTPS from Bash subprocesses — the sandbox enforces this at the OS level. It cannot make `WebFetch` calls to non-allowed domains without triggering an operator approval prompt. It cannot approve its own escalated actions — escalation surfaces to the operator's terminal, not back to the agent.
 
 **Residual risk.** A jailbroken agent that stays within policy bounds is indistinguishable from a legitimate agent at the enforcement layer. The tracer audit log and `#review` are the operator's tools for detecting unexpected behaviour after the fact. For high-value workspaces, operators should review `#review` output before approving any escalated git mutation — this is the intended workflow, not an afterthought.
 
@@ -227,12 +231,12 @@ Agent-written code that passes QA checks and executes as part of the task could 
 |---|---|---|
 | `restrict_reads.py` | Blocks `Read`/`Glob`/`Grep` on secret file patterns (`.env`, `*.pem`, `id_rsa`, …) | Hook-enforced; cannot be disabled at runtime |
 | `restrict_bash.py` | Blocks `cat`, `head`, `tail` on the same patterns; blocks `curl`, `wget`, `nc` | Hook-enforced |
-| Egress proxy | Filters all outbound HTTP/HTTPS against the domain allowlist | Covers `WebFetch`, Bash network tools, agent-written scripts that honour `HTTP_PROXY` |
-| `/sandbox` network | Constrains Bash subprocess network at the OS level | Second layer for Bash-channel exfiltration |
+| `sandbox.network.allowedDomains` | Blocks Bash subprocess HTTP/HTTPS to non-allowed domains at the OS level (bubblewrap) | Kernel-enforced; cannot be bypassed via env vars |
+| `WebFetch` allow rules + `PermissionRequest` hook | Non-allowed `WebFetch`/`WebSearch` surface operator approval prompt; logged | Requires deliberate operator approval; no silent pass |
 
 **Residual scenario — indirect reads via agent-written scripts.** The read hooks block direct file access, but an agent could write a Python script that loads `.env` at runtime via `python-dotenv` or `os.environ`, then writes derived values to another workspace file. The hook layer sees `python3 script.py`, not the secret value. The result is captured in `tracer.db` and visible on `#review`. It does not leave the container unless the operator approves a git commit that includes the file.
 
-**Residual scenario — raw socket exfiltration.** An actively adversarial agent could bypass the proxy by opening raw sockets that ignore `HTTP_PROXY`/`HTTPS_PROXY`. Closing this requires kernel-level iptables DNAT rules on the Docker bridge; see [egress documentation](./egress-and-exfiltration-protection.md). The proxy is designed to prevent accidental exfiltration, not to stop a determined adversary.
+**Residual scenario — raw socket exfiltration.** An actively adversarial agent could exfiltrate data by opening raw TCP sockets on non-HTTP ports, bypassing both the sandbox domain filter and the `WebFetch` approval flow. Closing this requires iptables DNAT rules on the Docker bridge; see [Known gaps](../README.md#egress-filtering-against-a-malicious-agent). The current controls are designed to prevent accidental exfiltration and require explicit operator approval for all `WebFetch` requests to non-allowed domains — not to stop a determined adversary exploiting arbitrary protocols.
 
 ### Supply Chain Attack
 
@@ -302,7 +306,7 @@ After a successful image build, `contAIned init`:
 
 **It does not sanitise inputs.** contAIned does not inspect or filter the content of files the agent reads, prompts the operator sends, or web pages the agent fetches. Prompt injection through workspace content is a real risk; the mitigation is containment of consequences, not prevention of injection.
 
-**It does not enforce kernel-level egress.** The egress proxy covers HTTP/HTTPS traffic that honours `HTTP_PROXY`/`HTTPS_PROXY`. An actively adversarial agent can bypass it with raw socket connections. Full enforcement requires iptables DNAT rules applied with host root access.
+**It does not enforce kernel-level egress for all protocols.** The sandbox network constraints cover HTTP/HTTPS for Bash subprocesses. `WebFetch` to non-allowed domains requires operator approval. An actively adversarial agent can still exfiltrate data via raw socket connections on non-HTTP ports. Full enforcement requires iptables DNAT rules applied with host root access.
 
 **It does not add content-safety filters.** The agent can generate harmful, offensive, or incorrect text. That text ends up as a workspace file, visible on `#review`, and gated behind operator approval before it enters version control — but it is not prevented.
 

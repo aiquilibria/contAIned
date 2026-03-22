@@ -5,6 +5,8 @@ Excluded: _docker_setup, run_init (require Docker or interactive prompts).
 """
 
 import stat
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 import yaml
@@ -123,8 +125,9 @@ class TestGitDetection:
         subdir.mkdir(parents=True)
         assert _is_git_repo(subdir) is True
 
-    def test_is_git_repo_false_no_git(self, tmp_path):
-        assert _is_git_repo(tmp_path) is False
+    def test_is_git_repo_false_no_git(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as d:
+            assert _is_git_repo(Path(d)) is False
 
     def test_git_root_returns_root_path(self, tmp_path):
         (tmp_path / ".git").mkdir()
@@ -132,8 +135,9 @@ class TestGitDetection:
         subdir.mkdir(parents=True)
         assert _git_root(subdir) == tmp_path.resolve()
 
-    def test_git_root_returns_none_outside_repo(self, tmp_path):
-        assert _git_root(tmp_path) is None
+    def test_git_root_returns_none_outside_repo(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as d:
+            assert _git_root(Path(d)) is None
 
     def test_git_root_at_root_returns_root(self, tmp_path):
         (tmp_path / ".git").mkdir()
@@ -636,15 +640,14 @@ class TestBuildManagedSettings:
         assert "mcp__github__*" in allow
         assert "mcp__puppeteer__*" in allow
 
-    def test_mcp_servers_in_allowed_mcp_servers(self):
+    def test_mcp_servers_generate_allow_rules(self):
+        # Approved MCP servers get permission allow rules; server definitions
+        # live in the plugin loaded via --plugin-dir, not in managed settings.
         manifest = {"policy": {"mcp": {"approved_servers": ["github"]}}}
         data = self._settings(manifest)
-        names = [entry["serverName"] for entry in data["allowedMcpServers"]]
-        assert "github" in names
-
-    def test_no_allowed_mcp_servers_key_when_empty(self):
-        data = self._settings()
+        assert "mcp__github__*" in data["permissions"]["allow"]
         assert "allowedMcpServers" not in data
+        assert "allowManagedMcpServersOnly" not in data["permissions"]
 
     def test_skill_generates_allow_rule(self):
         manifest = {"policy": {"skills": {"approved_skills": ["commit", "review-pr"]}}}
@@ -659,6 +662,12 @@ class TestBuildManagedSettings:
         assert "Read(/workspace/**)" in allow
         assert "Glob(/workspace/**)" in allow
         assert "Grep(/workspace/**)" in allow
+
+    def test_tracer_mcp_allow_rule_always_present(self):
+        # The built-in tracer plugin is always loaded via --plugin-dir; its MCP
+        # tools must be pre-approved so calls don't surface approval prompts.
+        data = self._settings()
+        assert "mcp__plugin_contained_tracer__*" in data["permissions"]["allow"]
 
     def test_sandbox_enabled(self):
         data = self._settings()

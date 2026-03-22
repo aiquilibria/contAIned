@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tracer": {
+      "command": "python3",
+      "args": ["-m", "contained.tracer_mcp"]
+    }
+  }
+}

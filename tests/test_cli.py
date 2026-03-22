@@ -4,16 +4,21 @@ Unit tests for contained.cli — pure-logic functions that run without Docker.
 Excluded: main (invokes start_repl), init command (invokes run_init + Docker).
 """
 
+import tempfile
+from pathlib import Path
+
 from contained.cli import _find_root
 
 # ── _find_root ────────────────────────────────────────────────────────────────
 
 
 class TestFindRoot:
-    def test_returns_cwd_when_no_contained_dir(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        result = _find_root()
-        assert result == tmp_path.resolve()
+    def test_returns_cwd_when_no_contained_dir(self, monkeypatch):
+        with tempfile.TemporaryDirectory(dir="/tmp") as d:
+            tmp = Path(d)
+            monkeypatch.chdir(tmp)
+            result = _find_root()
+            assert result == tmp.resolve()
 
     def test_returns_parent_when_contained_dir_found_above(self, tmp_path, monkeypatch):
         (tmp_path / ".contAIned").mkdir()
@@ -41,13 +46,15 @@ class TestFindRoot:
         result = _find_root()
         assert result == subdir.resolve()
 
-    def test_requires_directory_not_file(self, tmp_path, monkeypatch):
+    def test_requires_directory_not_file(self, monkeypatch):
         # A .contAIned *file* (not dir) must not match
-        (tmp_path / ".contAIned").write_text("not a directory")
-        monkeypatch.chdir(tmp_path)
-        result = _find_root()
-        # .contAIned is not a dir, so falls back to cwd
-        assert result == tmp_path.resolve()
+        with tempfile.TemporaryDirectory(dir="/tmp") as d:
+            tmp = Path(d)
+            (tmp / ".contAIned").write_text("not a directory")
+            monkeypatch.chdir(tmp)
+            result = _find_root()
+            # .contAIned is not a dir, so falls back to cwd
+            assert result == tmp.resolve()
 
     def test_deep_nesting_finds_root(self, tmp_path, monkeypatch):
         (tmp_path / ".contAIned").mkdir()

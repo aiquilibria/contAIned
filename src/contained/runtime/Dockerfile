@@ -35,14 +35,12 @@ RUN mkdir -p /etc/claude-code /etc/contained
 COPY src/contained/runtime/statusline.py /etc/contained/statusline.py
 
 # Bake managed-settings.json into the image.
-# Pass base64-encoded JSON via --build-arg MANAGED_SETTINGS_CONTENT=<b64> to
-# use a dynamically generated file (derived from the operator manifest).
-# Falls back to the static template when the arg is empty.
-COPY src/contained/runtime/managed-settings.json /etc/claude-code/managed-settings.json
-ARG MANAGED_SETTINGS_CONTENT=""
-RUN if [ -n "$MANAGED_SETTINGS_CONTENT" ]; then \
-        echo "$MANAGED_SETTINGS_CONTENT" | base64 -d > /etc/claude-code/managed-settings.json; \
-    fi
+# MANAGED_SETTINGS_CONTENT must be passed as a base64-encoded build arg by
+# contAIned init -- direct docker build invocations are not supported.
+ARG MANAGED_SETTINGS_CONTENT
+RUN test -n "$MANAGED_SETTINGS_CONTENT" \
+    || { echo "ERROR: MANAGED_SETTINGS_CONTENT build arg is required. Use contAIned init to build this image."; exit 1; } \
+    && echo "$MANAGED_SETTINGS_CONTENT" | base64 -d > /etc/claude-code/managed-settings.json
 
 # Optional: bake the operator manifest into the image so hooks read policy
 # parameters from /etc/contained/manifest.yaml rather than the workspace.

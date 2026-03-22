@@ -28,3 +28,4 @@ Each task you receive will specify:
 
 - Tool denied + reason → read the reason, change approach
 - QA feedback after stopping → fix the issues described, then stop again
+- Session summary after stopping (reason starts with "QA:") → present it to the operator and stop again without making any changes

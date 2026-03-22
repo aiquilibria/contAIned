@@ -3,11 +3,12 @@
     "allow": [
       "Read(/workspace/**)",
       "Glob(/workspace/**)",
-      "Grep(/workspace/**)"
+      "Grep(/workspace/**)",
+      "mcp__plugin_contained_tracer__*",
+      "Skill(contained:tracer)"
     ],
     "disableBypassPermissionsMode": "disable",
-    "allowManagedPermissionRulesOnly": true,
-    "allowManagedMcpServersOnly": true
+    "allowManagedPermissionRulesOnly": true
   },
   "hooks": {
     "PreToolUse": [

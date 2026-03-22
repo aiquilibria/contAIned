@@ -544,11 +544,13 @@ def _build_managed_settings(manifest: dict) -> str:
         manifest.get("policy", {}).get("skills", {}).get("approved_skills", [])
     )
 
-    # Permission allow rules: workspace access + dynamic domain/MCP/skill rules
+    # Permission allow rules: workspace access + built-in plugin + dynamic domain/MCP/skill rules
     allow_rules: list[str] = [
         "Read(/workspace/**)",
         "Glob(/workspace/**)",
         "Grep(/workspace/**)",
+        "mcp__plugin_contained_tracer__*",  # contAIned built-in tracer plugin (always present)
+        "Skill(contained:tracer)",  # contAIned built-in tracer skill (always present)
     ]
     for domain in allowed_domains:
         allow_rules.append(f"WebFetch(domain:{domain})")
@@ -564,7 +566,6 @@ def _build_managed_settings(manifest: dict) -> str:
             "ask": ["WebFetch", "WebSearch"],
             "disableBypassPermissionsMode": "disable",
             "allowManagedPermissionRulesOnly": True,
-            "allowManagedMcpServersOnly": True,
         },
         "hooks": {
             "PreToolUse": [
@@ -632,10 +633,6 @@ def _build_managed_settings(manifest: dict) -> str:
             "pr": "Generated with Claude Code on cont[AI]ned",
         },
     }
-
-    # Add allowedMcpServers if any servers are approved
-    if mcp_servers:
-        settings["allowedMcpServers"] = [{"serverName": s} for s in mcp_servers]
 
     return json.dumps(settings, indent=2)
 

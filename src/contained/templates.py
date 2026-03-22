@@ -953,12 +953,6 @@ def run(cmd):
 # container because PyPI is blocked by the network proxy.
 
 
-def block(reason):
-    """Tell the SDK to keep the agent running with this feedback."""
-    print(json.dumps({"decision": "block", "reason": reason}))
-    sys.exit(0)
-
-
 # ── Collect Python files (skip generated/tool directories) ────────────────────
 _SKIP_DIRS = {".venv", "__pycache__", ".git", "node_modules", ".contAIned", "pytest-of-agent"}
 py_files = [
@@ -967,19 +961,28 @@ py_files = [
     if not _SKIP_DIRS.intersection(f.parts)
 ]
 
-failures = []
+check_results: list = []  # {"name": str, "status": "pass"|"fail"|"skip", "output": str}
+failures: list = []       # {"check": str, "file": str, "output": str}
+
+
+def record(name: str, status: str, output: str = "") -> None:
+    check_results.append({"name": name, "status": status, "output": output})
+
 
 # ── Syntax check ──────────────────────────────────────────────────────────────
 if qa["syntax"]:
+    syntax_out_parts = []
     for f in py_files:
         code, out = run(["uv", "run", "--no-sync", "python", "-m", "py_compile", str(f)])
         if code != 0:
             failures.append({"check": "syntax", "file": str(f.relative_to(TASK_DIR)), "output": out})
-    if failures:
-        feedback = "QA failed — fix the following issues before finishing:\\n\\n"
-        for item in failures:
-            feedback += f"### {item[\'check\']} error in `{item[\'file\']}`\\n```\\n{item[\'output\']}\\n```\\n\\n"
-        block(feedback)
+            syntax_out_parts.append(f"{f.relative_to(TASK_DIR)}: {out}")
+    if syntax_out_parts:
+        record("syntax", "fail", "\\n".join(syntax_out_parts))
+    else:
+        record("syntax", "pass")
+else:
+    record("syntax", "skip")
 
 # ── ruff check (linting) ──────────────────────────────────────────────────────
 if qa["lint"] and py_files:
@@ -987,8 +990,13 @@ if qa["lint"] and py_files:
         code, out = run(["ruff", "check"] + [str(f) for f in py_files])
         if code != 0:
             failures.append({"check": "ruff check", "file": "python files", "output": out})
+            record("ruff check", "fail", out)
+        else:
+            record("ruff check", "pass")
     except FileNotFoundError:
-        print("ruff not installed — skipping ruff check", file=sys.stderr)
+        record("ruff check", "skip", "ruff not installed")
+else:
+    record("ruff check", "skip")
 
 # ── ruff format --check ───────────────────────────────────────────────────────
 if qa["format"] and py_files:
@@ -996,8 +1004,13 @@ if qa["format"] and py_files:
         code, out = run(["ruff", "format", "--check"] + [str(f) for f in py_files])
         if code != 0:
             failures.append({"check": "ruff format", "file": "python files", "output": out})
+            record("ruff format", "fail", out)
+        else:
+            record("ruff format", "pass")
     except FileNotFoundError:
-        print("ruff not installed — skipping ruff format --check", file=sys.stderr)
+        record("ruff format", "skip", "ruff not installed")
+else:
+    record("ruff format", "skip")
 
 # ── pyright (type checking) ───────────────────────────────────────────────────
 if qa["type"] and py_files:
@@ -1005,8 +1018,13 @@ if qa["type"] and py_files:
         code, out = run(["pyright"])
         if code != 0:
             failures.append({"check": "pyright", "file": "python files", "output": out})
+            record("pyright", "fail", out)
+        else:
+            record("pyright", "pass")
     except FileNotFoundError:
-        print("pyright not installed — skipping type checks", file=sys.stderr)
+        record("pyright", "skip", "pyright not installed")
+else:
+    record("pyright", "skip")
 
 # ── pytest (unit tests) ───────────────────────────────────────────────────────
 if qa["test"]:
@@ -1017,6 +1035,13 @@ if qa["test"]:
         # Exit code 5 means pytest collected no tests — not a failure.
         if code not in (0, 5):
             failures.append({"check": "pytest", "file": "tests/", "output": out})
+            record("pytest", "fail", out)
+        else:
+            record("pytest", "pass")
+    else:
+        record("pytest", "skip", "no tests/ directory")
+else:
+    record("pytest", "skip")
 
 # ── pytest coverage ───────────────────────────────────────────────────────────
 if qa["coverage"]:
@@ -1025,7 +1050,7 @@ if qa["coverage"]:
         # Check that pytest-cov is available before attempting the run.
         probe_code, _ = run(["uv", "run", "--no-sync", "python", "-c", "import pytest_cov"])
         if probe_code != 0:
-            print("pytest-cov not installed — skipping coverage check", file=sys.stderr)
+            record("coverage", "skip", "pytest-cov not installed")
         else:
             threshold = int(qa.get("coverage_threshold", 80))
             code, out = run([
@@ -1038,14 +1063,23 @@ if qa["coverage"]:
             if code not in (0, 5):
                 failures.append({"check": f"coverage (threshold: {threshold}%)",
                                   "file": "tests/", "output": out})
+                record(f"coverage (≥{threshold}%)", "fail", out)
+            else:
+                record(f"coverage (≥{threshold}%)", "pass")
+    else:
+        record("coverage", "skip", "no tests/ directory")
+else:
+    record("coverage", "skip")
 
+# ── Emit result JSON (always) ─────────────────────────────────────────────────
+result: dict = {"checks": check_results}
 if failures:
     feedback = "QA failed — fix the following issues before finishing:\\n\\n"
     for item in failures:
         feedback += f"### {item[\'check\']} error in `{item[\'file\']}`\\n```\\n{item[\'output\']}\\n```\\n\\n"
-    block(feedback)
-
-# All checks passed
+    result["decision"] = "block"
+    result["reason"] = feedback
+print(json.dumps(result))
 sys.exit(0)
 '''
 
@@ -1080,6 +1114,7 @@ Each task you receive will specify:
 
 - Tool denied + reason → read the reason, change approach
 - QA feedback after stopping → fix the issues described, then stop again
+- Session summary after stopping (reason starts with "QA:") → present it to the operator and stop again without making any changes
 """
 
 GITIGNORE_BLOCK = """
@@ -1388,6 +1423,7 @@ if not session_id:
 # Run qa.py inline before building the summary or showing the approval UI.
 # This guarantees QA always completes first regardless of whether the SDK
 # executes Stop hooks sequentially or in parallel.
+_qa_checks: list = []
 _qa_script = Path(cwd) / ".contAIned" / "hooks" / "qa.py"
 if _qa_script.exists():
     try:
@@ -1402,12 +1438,17 @@ if _qa_script.exists():
             try:
                 _qa_out = json.loads(_qa_proc.stdout.strip())
                 if _qa_out.get("decision") == "block":
-                    # QA failed — relay the block decision to the SDK; no UI shown.
-                    print(_qa_proc.stdout, end="")
+                    # QA failed — relay only the block decision to the SDK.
+                    print(json.dumps({
+                        "decision": "block",
+                        "reason": _qa_out.get("reason", "QA checks failed"),
+                    }))
                     sys.exit(0)
+                _qa_checks = _qa_out.get("checks", [])
             except json.JSONDecodeError:
-                pass  # qa emitted non-JSON to stdout — fall through
+                _qa_checks = []
     except Exception:
+        _qa_checks = []
         pass  # qa unavailable — proceed to approval UI
 
 db_path = str(Path(cwd) / ".contAIned" / "tracer.db")
@@ -1459,7 +1500,7 @@ except Exception:
 # ── Skip summary UI if nothing was written this session ───────────────────────
 if not touched_files:
     try:
-        tracer.set_task_status(session_id, "closed", summary={"file_changes": [], "action_log": []})
+        tracer.set_task_status(session_id, "closed", summary={"file_changes": [], "action_log": [], "qa_checks": _qa_checks})
     except Exception:
         pass
     sys.exit(0)
@@ -1563,6 +1604,7 @@ summary = {
     ],
     "action_log": action_log,
     "incomplete_children": open_children,
+    "qa_checks": _qa_checks,
 }
 
 # ── Locate Claude Code transcript for this session ────────────────────────────
@@ -1626,9 +1668,23 @@ try:
 except Exception:
     pass
 
-# Summary is persisted to tracer.db; no UI output needed.
-# Use #review to inspect completed tasks.
-print("Summarization complete and persisted")
+# Block with a formatted summary so Claude surfaces it to the operator.
+# On the next Stop (after Claude acknowledges), the sentinel check at the top
+# detects status == "closed" and exits 0 cleanly — no infinite loop.
+_status_icons = {"pass": "✓", "fail": "✗", "skip": "·"}
+_qa_line = "  ".join(
+    f"{_status_icons.get(c['status'], '?')} {c['name']}"
+    for c in _qa_checks
+) if _qa_checks else "(no checks recorded)"
+
+_changed = summary.get("file_changes", [])
+_files_line = "\\n".join(
+    f"- {c['file_path'].replace('/workspace/', '')} (+{c['lines_added']}/-{c['lines_removed']})"
+    for c in _changed
+) if _changed else "- (no file changes)"
+
+_summary_msg = f"QA: {_qa_line}\\n\\nChanged:\\n{_files_line}\\n\\nUse #review to inspect the full diff and narrative."
+print(json.dumps({"decision": "block", "reason": _summary_msg}))
 sys.exit(0)
 '''
 

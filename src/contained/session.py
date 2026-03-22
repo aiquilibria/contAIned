@@ -158,7 +158,8 @@ def start_repl(root: Path) -> None:
         console.print()
         raise SystemExit(1)
 
-    cmd = ["claude"]
+    plugin_dir = Path(__file__).parent / "runtime" / "plugin"
+    cmd = ["claude", "--plugin-dir", str(plugin_dir)]
     model = _load_model_config(root)
     if model:
         cmd += ["--model", model]

@@ -29,3 +29,4 @@ node_modules/
 .slash/
 docs/*
 .claude/*
+pytest-of-agent*

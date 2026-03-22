@@ -72,7 +72,7 @@ contAIned fills that gap:
 | Operator review before changes are accepted | ✗ | ✗ | ✓ |
 | QA gate blocks agent from finishing prematurely | ✗ | ✗ | ✓ |
 | Policy baked into image; tamper-proof at runtime | ✗ | ✗ | ✓ |
-| Egress filtering — outbound network allowlist | ✗ | ✗ | ◑ (proxy sidecar; prevents accidental exfiltration) |
+| Egress filtering — outbound network allowlist | ✗ | ✗ | ◑ (sandbox network + operator approval flow; prevents accidental exfiltration) |
 | Works on Linux in CI/CD | ✓ | ✗ (MicroVM) | ✓ |
 
 contAIned and `/sandbox` are complementary, not competing. Enabling both means subprocess writes are blocked at the OS level *and* SDK tool calls are blocked at the hook level — two independent enforcement layers from two different trust boundaries.
@@ -162,7 +162,7 @@ Claude Code runs as a direct child process with your terminal inherited — all 
 | `#review <N>` | Show narrative + diff summary for task N |
 | `#db` | Query `tracer.db` — last 10 tasks |
 | `#db <SQL>` | Run arbitrary SQL against `tracer.db` |
-| `#status` | Show last 20 audit-log entries |
+| `#audit` | Show last 20 audit-log entries |
 | `#policy` | Show the effective policy manifest (read-only) |
 
 Any other input is forwarded verbatim to the agent.
@@ -312,15 +312,18 @@ This prevents any Bash subprocess (shell scripts, Python executed via Bash, buil
 
 ### Egress filtering
 
-An agent session has multiple channels for sending data out of the workspace: Claude Code's built-in `WebFetch` tool, Bash subprocesses (`curl`, `wget`), and scripts the agent writes and then executes. Different controls cover different channels — none of the simpler approaches cover all three.
+An agent session has multiple channels for sending data out of the workspace: Claude Code's built-in `WebFetch` tool, Bash subprocesses (`curl`, `wget`), and scripts the agent writes and then executes. Different controls cover different channels.
 
-contAIned addresses this with a filtering proxy sidecar. When `policy.egress.enabled` is `true` in `manifest.yaml`, a second container running `contained.proxy` starts alongside the agent on the same Docker network. The agent container receives `HTTP_PROXY` and `HTTPS_PROXY` pointing at the proxy. All outbound HTTP and HTTPS traffic — including `WebFetch`, Bash network tools, and agent-written scripts that honor the proxy environment variables — is checked against a domain allowlist. Anything not on the list gets a `403 Forbidden`.
+contAIned addresses this with two complementary mechanisms, both driven by `policy.network.allowed_domains` in `manifest.yaml`:
 
-Enable it and set the allowlist in `.contAIned/manifest.yaml`, then rebuild the image:
+- **`WebFetch` / `WebSearch`** — requests to allowed domains are auto-approved. Requests to any other domain surface an operator confirmation prompt (via the `PermissionRequest` hook) and are logged. No request proceeds without either an explicit allow rule or operator approval.
+- **Bash subprocesses and agent-written scripts** — Claude Code's built-in sandbox enforces the `allowedDomains` list at the OS level (bubblewrap on Linux). HTTP traffic to non-allowed domains is blocked with a `403 Forbidden` regardless of the tool used.
+
+Configure the allowlist in `.contAIned/manifest.yaml`, then rebuild the image:
 
 ```yaml
 policy:
-  egress:
+  network:
     enabled: true
     allowed_domains:
       - api.anthropic.com    # required — Anthropic API
@@ -333,9 +336,7 @@ policy:
 contAIned init --rebuild
 ```
 
-The proxy sidecar starts and stops automatically with each session.
-
-**Design intent — accidental exfiltration.** The proxy works by injecting `HTTP_PROXY` and `HTTPS_PROXY` into the agent container. This covers the common cases: `WebFetch` calls, Bash network tools, and agent-written scripts that use standard HTTP libraries. It is designed to prevent the agent from accidentally sending data outside the workspace — not to stop an agent that is actively trying to circumvent it. A malicious agent could bypass the proxy by opening raw sockets that ignore the env vars. Addressing that requires kernel-level enforcement; see [Known gaps](#known-gaps) below.
+**Design intent — accidental exfiltration.** The sandbox network constraints cover Bash subprocesses and agent-written scripts at the OS level. `WebFetch` to non-allowed domains requires explicit operator approval rather than proceeding silently. Together these prevent the agent from accidentally sending data outside the workspace. The residual risk — raw non-HTTP socket connections that bypass both layers — is described in [Known gaps](#known-gaps) below.
 
 ### Tracer
 
@@ -394,13 +395,11 @@ The stored data in `tracer.db` is complete and unaffected; this is purely a disp
 
 ### Egress filtering against a malicious agent
 
-The egress proxy relies on `HTTP_PROXY` / `HTTPS_PROXY` environment variables, which are visible to the agent. A cooperative or accidentally misbehaving agent is contained; an agent actively trying to exfiltrate data can bypass the proxy by dialing sockets directly.
+Bash subprocess network access is enforced at the OS level by Claude Code's sandbox (bubblewrap), so it cannot be bypassed by manipulating environment variables. `WebFetch` to non-allowed domains requires operator approval — it will not proceed silently in an unattended session.
 
-Full enforcement requires iptables DNAT rules on the Docker bridge that transparently redirect all outbound traffic through the proxy at the kernel level — making bypass impossible regardless of how the agent opens connections. The rules require `CAP_NET_ADMIN` on the host, which means root or `sudo`.
+The residual gap is outbound connections that bypass both layers: code that opens raw non-HTTP sockets (e.g. `socket.connect` to a hardcoded IP) is not constrained by the sandbox's domain-based rules. Full enforcement of all protocols requires iptables DNAT rules on the Docker bridge that redirect all port traffic through a filtering proxy at the kernel level. Those rules require `CAP_NET_ADMIN` on the host.
 
-`contAIned init` runs as an unprivileged user and cannot write iptables rules directly. Docker's own daemon solves an analogous problem — it installs bridge rules for every network it creates — but it does so because it runs as root. There is currently no way to delegate the iptables write to the Docker daemon without a custom network driver plugin, which is significant additional scope.
-
-**Pending:** investigate whether a lightweight Docker network plugin can install the redirect rules at `contAIned init` time via the daemon, eliminating the need for user-facing `sudo`. Until then, operators who need a hard boundary against a malicious agent can apply the rules manually after init:
+**Pending:** investigate whether a lightweight Docker network plugin can install redirect rules at `contAIned init` time, eliminating the need for user-facing `sudo`. Until then, operators who need a hard boundary against this scenario can apply rules manually after init:
 
 ```bash
 BRIDGE=$(docker network inspect contAIned-net \

@@ -21,7 +21,7 @@ packages = ["src/contained"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-tmp_path_base_dir = "/tmp"
+addopts = ""
 
 [tool.ruff]
 target-version = "py313"
