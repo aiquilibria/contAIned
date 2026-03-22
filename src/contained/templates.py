@@ -53,19 +53,19 @@ policy:
     network_exfiltration: block     # curl / wget / nc / ncat
     package_publish:      block     # npm publish / pip upload / twine upload
 
-  # ── Egress filtering (outbound network proxy) ─────────────────────────────────
-  # When enabled, a filtering proxy sidecar container is started alongside the
-  # agent.  All outbound HTTP/HTTPS traffic routed through HTTP_PROXY /
-  # HTTPS_PROXY is filtered against the domain allowlist; everything else is
-  # rejected with 403 Forbidden.
+  # ── Network policy ────────────────────────────────────────────────────────────
+  # Controls outbound network access for both Claude Code tools and subprocesses.
+  #
+  # allowed_domains — domains that are silently permitted:
+  #   - WebFetch / WebSearch: requests to these domains are auto-approved.
+  #     Requests to any other domain surface an operator confirmation prompt and
+  #     are logged as exceptions.
+  #   - Bash subprocesses: HTTP traffic is routed through the Claude Code sandbox
+  #     proxy; requests to non-allowed domains are blocked (HTTP 403).
   #
   # api.anthropic.com must remain in allowed_domains — the agent cannot function
   # without it.  Add project-specific domains (package registries, APIs) as needed.
-  #
-  # Note: enforcement covers processes that honour HTTP_PROXY / HTTPS_PROXY.
-  # For full kernel-level enforcement add iptables redirect rules on the Docker
-  # bridge — see docs/egress-and-exfiltration-protection.md.
-  egress:
+  network:
     enabled: false
     allowed_domains:
       - api.anthropic.com    # required — Anthropic API
@@ -87,6 +87,20 @@ policy:
     test:               true   # pytest tests/
     coverage:           true   # pytest --cov --cov-fail-under (requires pytest-cov)
     coverage_threshold: 80     # minimum % line coverage when coverage is true
+
+  # ── MCP server approvals ──────────────────────────────────────────────────────
+  # List of approved MCP server names.  Each entry generates an allow rule for
+  # all tools from that server (mcp__<server>__*) in managed-settings.json.
+  # Only servers listed here can be added when allowManagedMcpServersOnly is set.
+  mcp:
+    approved_servers: []   # e.g. [github, puppeteer]
+
+  # ── Skill approvals ───────────────────────────────────────────────────────────
+  # Explicit allowlist of skill names.  Each entry generates a Skill(<name>)
+  # allow rule in managed-settings.json.  Unlisted skills surface an operator
+  # confirmation prompt and are logged as exceptions.
+  skills:
+    approved_skills: []    # e.g. [commit, review-pr]
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
 agent:
@@ -163,6 +177,20 @@ _DEFAULTS = {
         "test":               True,
         "coverage":           True,
         "coverage_threshold": 80,
+    },
+    "network": {
+        "enabled":        False,
+        "allowed_domains": [
+            "api.anthropic.com",
+            "code.claude.com",
+            "docs.anthropic.com",
+        ],
+    },
+    "mcp": {
+        "approved_servers": [],
+    },
+    "skills": {
+        "approved_skills": [],
     },
 }
 
@@ -727,18 +755,53 @@ if is_error:
     elif isinstance(content, str):
         reason = content or None
 
+# ── Exception detection ───────────────────────────────────────────────────────
+# Flag successful WebFetch/WebSearch/Skill/MCP calls that were approved outside
+# the policy allowlist — these required operator confirmation and are exceptions.
+approved_exception = False
+exception_detail: str | None = None
+if outcome == "success":
+    network_policy = policy.get("network", {})
+    allowed_domains = network_policy.get("allowed_domains", [])
+    if tool == "WebFetch":
+        try:
+            from urllib.parse import urlparse  # noqa: PLC0415
+            domain = urlparse(tool_input.get("url", "")).hostname or ""
+            if domain and domain not in allowed_domains:
+                approved_exception = True
+                exception_detail = domain
+        except Exception:
+            pass
+    elif tool == "WebSearch":
+        approved_exception = True
+    elif tool == "Skill":
+        skill_name = tool_input.get("skill", "") or tool_input.get("name", "")
+        approved_skills = policy.get("skills", {}).get("approved_skills", [])
+        if skill_name and skill_name not in approved_skills:
+            approved_exception = True
+            exception_detail = skill_name
+    elif tool.startswith("mcp__"):
+        parts = tool.split("__", 2)
+        server = parts[1] if len(parts) > 1 else ""
+        approved_servers = policy.get("mcp", {}).get("approved_servers", [])
+        if server and server not in approved_servers:
+            approved_exception = True
+            exception_detail = server
+
 # ── Primary store: tracer.db ──────────────────────────────────────────────────
 try:
     from contained.tracer import contAInedTracer  # noqa: PLC0415
     db_path = str(Path(cwd) / ".contAIned" / "tracer.db")
     tracer  = contAInedTracer(db_path)
     tracer.log_event(
-        session_id    = actor_id,
-        tool          = tool,
-        tool_input    = tool_input,
-        outcome       = outcome,
-        reason        = reason,
-        tool_response = tool_response,
+        session_id        = actor_id,
+        tool              = tool,
+        tool_input        = tool_input,
+        outcome           = outcome,
+        reason            = reason,
+        tool_response     = tool_response,
+        approved_exception = approved_exception,
+        exception_detail   = exception_detail,
     )
 except Exception:
     pass  # never block execution due to logging failure
@@ -755,6 +818,10 @@ if policy["audit"].get("jsonl_export", False):
     }
     if reason:
         entry["reason"] = reason
+    if approved_exception:
+        entry["approved_exception"] = True
+        if exception_detail:
+            entry["exception_detail"] = exception_detail
     try:
         audit_log = Path(cwd) / ".contAIned" / "audit" / "pipeline.jsonl"
         audit_log.parent.mkdir(parents=True, exist_ok=True)
@@ -883,7 +950,7 @@ def run(cmd):
 
 # Dev dependencies (pytest, pytest-cov, pyright, ruff) are pre-installed in
 # the container image.  No uv sync needed — and uv sync would fail inside the
-# container because PyPI is blocked by the egress proxy.
+# container because PyPI is blocked by the network proxy.
 
 
 def block(reason):
@@ -893,7 +960,7 @@ def block(reason):
 
 
 # ── Collect Python files (skip generated/tool directories) ────────────────────
-_SKIP_DIRS = {".venv", "__pycache__", ".git", "node_modules", ".contAIned"}
+_SKIP_DIRS = {".venv", "__pycache__", ".git", "node_modules", ".contAIned", "pytest-of-agent"}
 py_files = [
     f
     for f in TASK_DIR.rglob("**/*.py")

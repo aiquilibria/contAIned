@@ -32,8 +32,17 @@ RUN uv pip install --system --python python3.13 --no-cache --break-system-packag
 # settings level — Claude Code blocks all user-defined hooks when this file is
 # present, eliminating the circular self-protection problem.
 RUN mkdir -p /etc/claude-code /etc/contained
-COPY src/contained/runtime/managed-settings.json /etc/claude-code/managed-settings.json
 COPY src/contained/runtime/statusline.py /etc/contained/statusline.py
+
+# Bake managed-settings.json into the image.
+# Pass base64-encoded JSON via --build-arg MANAGED_SETTINGS_CONTENT=<b64> to
+# use a dynamically generated file (derived from the operator manifest).
+# Falls back to the static template when the arg is empty.
+COPY src/contained/runtime/managed-settings.json /etc/claude-code/managed-settings.json
+ARG MANAGED_SETTINGS_CONTENT=""
+RUN if [ -n "$MANAGED_SETTINGS_CONTENT" ]; then \
+        echo "$MANAGED_SETTINGS_CONTENT" | base64 -d > /etc/claude-code/managed-settings.json; \
+    fi
 
 # Optional: bake the operator manifest into the image so hooks read policy
 # parameters from /etc/contained/manifest.yaml rather than the workspace.

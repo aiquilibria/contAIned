@@ -77,6 +77,48 @@ contAIned fills that gap:
 
 contAIned and `/sandbox` are complementary, not competing. Enabling both means subprocess writes are blocked at the OS level *and* SDK tool calls are blocked at the hook level — two independent enforcement layers from two different trust boundaries.
 
+### Why not native settings?
+
+Claude Code ships a real operator control plane: `managed-settings.json` accepts `allow`, `ask`, and `deny` rules, sandbox filesystem and network constraints, hook registration, and MCP server allowlists. contAIned uses all of these. The question is what they can and cannot express on their own.
+
+**What native settings can approximate (cumbersomely)**
+
+Simple path-based blocking for `Read`, `Write`, and `Glob` is mechanically expressible. Blocking `.env` files requires enumerating each pattern — `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa`, `credentials.json`, … — across each tool separately: `Read`, `Glob`, `Grep`, `Write`, `Edit`, `MultiEdit`. That's upwards of 60 individual `deny` entries to cover the same ground as one Python regex. The same brittleness applies to Bash command restrictions: `deny: ["Bash(rm -rf*)"]` works for the literal prefix but misses variations, and has no way to check whether a `cat` command is targeting a sensitive file versus a source file.
+
+**Where native settings cannot reach**
+
+The deeper problems are structural:
+
+- **`deny` beats `allow` unconditionally.** Claude Code's evaluation order is fixed: `deny → ask → allow`. There is no way to write "deny `**/.env*` except `**/.env.example`" — the deny fires regardless of any allow rule. The hooks resolve this with an explicit safe-variant check before the block logic.
+
+- **No programmable logic.** Native rules are pattern lists. They cannot parse a bash command to extract its file argument, call an external tool, query a database, or apply context-sensitive judgement. The `restrict_bash.py` hook uses `shlex.split` to extract file paths from commands and checks those paths against the secret pattern list; no combination of native rules can replicate this.
+
+- **No audit trail.** Native denials are silent — nothing is written. Hooks write a structured entry to `.contAIned/audit/pipeline.jsonl` and `tracer.db` on every denial and every allowed call, with timestamp, session ID, tool, target, and reason. That record exists whether or not the operator is watching, and is queryable via `#db`.
+
+- **No lifecycle or quality gate.** There is no native equivalent of the `Stop` hook event. The permission system decides whether individual tool calls are allowed; it has no concept of intercepting the agent's "I am done" signal to run tests, check coverage, or build a diff summary before the result is accepted.
+
+- **No tamper-proof policy.** A settings file in `.claude/settings.json` is writable by the agent. `managed-settings.json` in the image layer is harder to reach, but it is a static file with no provenance. contAIned bakes policy into the image at build time, records a manifest hash in the image label for drift detection, and optionally signs the image with Sigstore — giving operators a chain of custody from manifest authoring to runtime enforcement that native settings alone cannot provide.
+
+- **No workspace isolation.** Native settings constrain what the agent *can do* but not *where it runs*. There is no settings-based equivalent of running the agent inside a Docker container with the workspace bind-mounted and nothing else visible.
+
+**The design choice**
+
+contAIned uses native settings for what they do well — hook registration, sandbox filesystem and network rules, WebFetch domain allowlisting, MCP server restrictions — and hooks for everything that requires logic, state, or lifecycle control. The split is deliberate: declarative rules for coarse structure, executable Python for anything that needs to reason about context.
+
+| | Native settings | contAIned |
+|---|:---:|:---:|
+| Block reads/writes to specific path patterns | ✓ (verbose) | ✓ |
+| Safe-variant exception (allow `.env.example`, deny `.env`) | ✗ | ✓ |
+| Bash semantic parsing (detect `cat .env` vs `cat README.md`) | ✗ | ✓ |
+| Structured audit log of every tool call | ✗ | ✓ |
+| QA gate — block agent from finishing until checks pass | ✗ | ✓ |
+| Actionable denial feedback to the agent | ✗ | ✓ |
+| Task lifecycle, diff store, operator review | ✗ | ✓ |
+| Policy tamper-proof at runtime; Sigstore provenance | ✗ | ✓ |
+| Workspace isolation (agent sees only the project) | ✗ | ✓ |
+
+---
+
 ## Install
 
 ```bash

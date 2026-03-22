@@ -11,6 +11,7 @@ import yaml
 
 from contained.docker_runner import _find_cosign
 from contained.init import (
+    _build_managed_settings,
     _build_manifest,
     _contAIned_version,
     _git_root,
@@ -308,24 +309,24 @@ class TestBuildManifest:
         assert qa["syntax"] is True  # default kept
 
     def test_anthropic_always_in_allowed_domains(self):
-        data = self._parse(docker_config=None, model="m", egress_enabled=True)
-        domains = data["policy"]["egress"]["allowed_domains"]
+        data = self._parse(docker_config=None, model="m", network_enabled=True)
+        domains = data["policy"]["network"]["allowed_domains"]
         assert "api.anthropic.com" in domains
 
-    def test_extra_egress_domains_appended(self):
+    def test_extra_network_domains_appended(self):
         data = self._parse(
             docker_config=None,
             model="m",
-            egress_enabled=True,
-            egress_extra_domains=["pypi.org", "github.com"],
+            network_enabled=True,
+            network_extra_domains=["pypi.org", "github.com"],
         )
-        domains = data["policy"]["egress"]["allowed_domains"]
+        domains = data["policy"]["network"]["allowed_domains"]
         assert "pypi.org" in domains
         assert "github.com" in domains
 
-    def test_egress_disabled(self):
-        data = self._parse(docker_config=None, model="m", egress_enabled=False)
-        assert data["policy"]["egress"]["enabled"] is False
+    def test_network_disabled(self):
+        data = self._parse(docker_config=None, model="m", network_enabled=False)
+        assert data["policy"]["network"]["enabled"] is False
 
     def test_docker_config_written_to_runtime(self):
         docker_cfg = {
@@ -547,3 +548,119 @@ class TestWriteProvenance:
         _write_provenance(tmp_path, updated)
         data = yaml.safe_load((tmp_path / ".contAIned" / "provenance.yaml").read_text())
         assert data["rekor_log_index"] == 99
+
+
+# ── _build_manifest (mcp / skills) ───────────────────────────────────────────
+
+
+class TestBuildManifestMcpSkills:
+    def _parse(self, **kwargs) -> dict:
+        return yaml.safe_load(_build_manifest(**kwargs))
+
+    def test_mcp_approved_servers_in_manifest(self):
+        data = self._parse(
+            docker_config=None,
+            model="m",
+            mcp_approved_servers=["github", "puppeteer"],
+        )
+        assert data["policy"]["mcp"]["approved_servers"] == ["github", "puppeteer"]
+
+    def test_approved_skills_in_manifest(self):
+        data = self._parse(
+            docker_config=None,
+            model="m",
+            approved_skills=["commit", "review-pr"],
+        )
+        assert data["policy"]["skills"]["approved_skills"] == ["commit", "review-pr"]
+
+    def test_empty_mcp_and_skills_by_default(self):
+        data = self._parse(docker_config=None, model="m")
+        assert data["policy"]["mcp"]["approved_servers"] == []
+        assert data["policy"]["skills"]["approved_skills"] == []
+
+
+# ── _build_managed_settings ───────────────────────────────────────────────────
+
+
+import json  # noqa: E402
+
+
+class TestBuildManagedSettings:
+    def _settings(self, manifest: dict | None = None) -> dict:
+        return json.loads(_build_managed_settings(manifest or {}))
+
+    def test_returns_valid_json(self):
+        result = _build_managed_settings({})
+        data = json.loads(result)
+        assert isinstance(data, dict)
+
+    def test_default_domains_in_allow_rules(self):
+        data = self._settings()
+        allow = data["permissions"]["allow"]
+        assert "WebFetch(domain:api.anthropic.com)" in allow
+        assert "WebFetch(domain:code.claude.com)" in allow
+        assert "WebFetch(domain:docs.anthropic.com)" in allow
+
+    def test_extra_domain_generates_allow_rule(self):
+        manifest = {
+            "policy": {
+                "network": {
+                    "allowed_domains": ["api.anthropic.com", "pypi.org"],
+                }
+            }
+        }
+        data = self._settings(manifest)
+        assert "WebFetch(domain:pypi.org)" in data["permissions"]["allow"]
+
+    def test_ask_rules_include_webfetch_and_websearch(self):
+        data = self._settings()
+        ask = data["permissions"]["ask"]
+        assert "WebFetch" in ask
+        assert "WebSearch" in ask
+
+    def test_sandbox_allowed_domains_matches_network_policy(self):
+        manifest = {
+            "policy": {
+                "network": {
+                    "allowed_domains": ["api.anthropic.com", "example.com"],
+                }
+            }
+        }
+        data = self._settings(manifest)
+        assert data["sandbox"]["network"]["allowedDomains"] == ["api.anthropic.com", "example.com"]
+
+    def test_mcp_server_generates_allow_rule(self):
+        manifest = {"policy": {"mcp": {"approved_servers": ["github", "puppeteer"]}}}
+        data = self._settings(manifest)
+        allow = data["permissions"]["allow"]
+        assert "mcp__github__*" in allow
+        assert "mcp__puppeteer__*" in allow
+
+    def test_mcp_servers_in_allowed_mcp_servers(self):
+        manifest = {"policy": {"mcp": {"approved_servers": ["github"]}}}
+        data = self._settings(manifest)
+        names = [entry["serverName"] for entry in data["allowedMcpServers"]]
+        assert "github" in names
+
+    def test_no_allowed_mcp_servers_key_when_empty(self):
+        data = self._settings()
+        assert "allowedMcpServers" not in data
+
+    def test_skill_generates_allow_rule(self):
+        manifest = {"policy": {"skills": {"approved_skills": ["commit", "review-pr"]}}}
+        data = self._settings(manifest)
+        allow = data["permissions"]["allow"]
+        assert "Skill(commit)" in allow
+        assert "Skill(review-pr)" in allow
+
+    def test_workspace_read_rules_always_present(self):
+        data = self._settings()
+        allow = data["permissions"]["allow"]
+        assert "Read(/workspace/**)" in allow
+        assert "Glob(/workspace/**)" in allow
+        assert "Grep(/workspace/**)" in allow
+
+    def test_sandbox_enabled(self):
+        data = self._settings()
+        assert data["sandbox"]["enabled"] is True
+        assert data["sandbox"]["enableWeakerNestedSandbox"] is True

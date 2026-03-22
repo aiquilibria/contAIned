@@ -366,6 +366,7 @@ def _docker_setup(
     *,
     rebuild: bool = False,
     manifest_content: str | None = None,
+    managed_settings_content: str | None = None,
 ) -> bool:
     """
     Perform Docker infrastructure setup for a workspace:
@@ -381,6 +382,9 @@ def _docker_setup(
          Pass ``manifest_content`` (raw YAML string) to bake the operator manifest into
          the image as ``/etc/contained/manifest.yaml``.  When present, hooks read policy
          parameters from the image rather than the workspace.
+         Pass ``managed_settings_content`` (JSON string) to bake a generated
+         managed-settings.json into the image as
+         ``/etc/claude-code/managed-settings.json``, replacing the static template.
       2. Create the ``contAIned-agent-config`` named volume.
       3. Create the ``contAIned-net`` bridge network.
 
@@ -410,6 +414,7 @@ def _docker_setup(
 
     manifest_hash = hashlib.sha256((manifest_content or "").encode()).hexdigest()[:16]
     manifest_b64 = base64.b64encode((manifest_content or "").encode()).decode()
+    managed_settings_b64 = base64.b64encode((managed_settings_content or "").encode()).decode()
 
     image = config["image"]
     current_version = _contAIned_version()
@@ -476,6 +481,8 @@ def _docker_setup(
             f"contAIned.manifest_hash={manifest_hash}",
             "--build-arg",
             f"MANIFEST_CONTENT={manifest_b64}",
+            "--build-arg",
+            f"MANAGED_SETTINGS_CONTENT={managed_settings_b64}",
         ]
         build_cmd += ["-t", image, "-f", str(dockerfile), str(project_root)]
         result = subprocess.run(
@@ -511,6 +518,126 @@ def _docker_setup(
     console.print(f"  Network [bold]{net}[/bold] ready.")
 
     return needs_build
+
+
+# ── Managed-settings builder ──────────────────────────────────────────────────
+
+
+def _build_managed_settings(manifest: dict) -> str:
+    """Generate managed-settings.json content from the parsed manifest dict.
+
+    The returned JSON is baked into the Docker image as
+    /etc/claude-code/managed-settings.json, replacing the static template.
+    Dynamic sections (WebFetch allow rules, sandbox.network.allowedDomains, MCP
+    server rules, skill allow rules) are derived from policy.network,
+    policy.mcp, and policy.skills in the manifest.
+    """
+    import json
+
+    network = manifest.get("policy", {}).get("network", {})
+    allowed_domains: list[str] = network.get(
+        "allowed_domains",
+        ["api.anthropic.com", "code.claude.com", "docs.anthropic.com"],
+    )
+    mcp_servers: list[str] = manifest.get("policy", {}).get("mcp", {}).get("approved_servers", [])
+    approved_skills: list[str] = (
+        manifest.get("policy", {}).get("skills", {}).get("approved_skills", [])
+    )
+
+    # Permission allow rules: workspace access + dynamic domain/MCP/skill rules
+    allow_rules: list[str] = [
+        "Read(/workspace/**)",
+        "Glob(/workspace/**)",
+        "Grep(/workspace/**)",
+    ]
+    for domain in allowed_domains:
+        allow_rules.append(f"WebFetch(domain:{domain})")
+    for server in mcp_servers:
+        allow_rules.append(f"mcp__{server}__*")
+    for skill in approved_skills:
+        allow_rules.append(f"Skill({skill})")
+
+    hook_cmd = "python3 /workspace/.contAIned/hooks/{}.py"
+    settings: dict = {
+        "permissions": {
+            "allow": allow_rules,
+            "ask": ["WebFetch", "WebSearch"],
+            "disableBypassPermissionsMode": "disable",
+            "allowManagedPermissionRulesOnly": True,
+            "allowManagedMcpServersOnly": True,
+        },
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Read|Glob|Grep",
+                    "hooks": [{"type": "command", "command": hook_cmd.format("restrict_reads")}],
+                },
+                {
+                    "matcher": "Write|Edit|MultiEdit",
+                    "hooks": [
+                        {"type": "command", "command": hook_cmd.format("restrict_writes")},
+                        {"type": "command", "command": hook_cmd.format("tracer_pre")},
+                    ],
+                },
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": hook_cmd.format("restrict_bash")}],
+                },
+            ],
+            "PostToolUse": [
+                {
+                    "matcher": "Write|Edit|MultiEdit",
+                    "hooks": [{"type": "command", "command": hook_cmd.format("tracer_post")}],
+                },
+                {
+                    "matcher": "*",
+                    "hooks": [{"type": "command", "command": hook_cmd.format("audit")}],
+                },
+            ],
+            "SubagentStart": [
+                {"hooks": [{"type": "command", "command": hook_cmd.format("subagent_start")}]},
+            ],
+            "SubagentStop": [
+                {"hooks": [{"type": "command", "command": hook_cmd.format("subagent_stop")}]},
+            ],
+            "Stop": [
+                {"hooks": [{"type": "command", "command": hook_cmd.format("summarizer")}]},
+            ],
+            "UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": hook_cmd.format("user_prompt_submit")}]},
+            ],
+            "PermissionRequest": [
+                {"hooks": [{"type": "command", "command": hook_cmd.format("permission_request")}]},
+            ],
+        },
+        "sandbox": {
+            "enabled": True,
+            "enableWeakerNestedSandbox": True,
+            "allowUnsandboxedCommands": False,
+            "network": {
+                "allowedDomains": allowed_domains,
+                "allowManagedDomainsOnly": True,
+            },
+            "filesystem": {
+                "denyWrite": [".contAIned", ".claude/settings.json"],
+            },
+        },
+        "allowManagedHooksOnly": True,
+        "statusLine": {
+            "type": "command",
+            "command": "python3 /etc/contained/statusline.py",
+        },
+        "attribution": {
+            "commit": "Generated with Claude Code on cont[AI]ned",
+            "pr": "Generated with Claude Code on cont[AI]ned",
+        },
+    }
+
+    # Add allowedMcpServers if any servers are approved
+    if mcp_servers:
+        settings["allowedMcpServers"] = [{"serverName": s} for s in mcp_servers]
+
+    return json.dumps(settings, indent=2)
 
 
 # ── Policy wizard ─────────────────────────────────────────────────────────────
@@ -560,19 +687,35 @@ def _run_wizard(docker_config: dict) -> str:
     model = click.prompt("? Default model", default="claude-sonnet-4-6")
     console.print()
 
-    # ── Egress ────────────────────────────────────────────────────────────────
-    egress_enabled = click.confirm(
-        "? Enable outbound network egress policy"
+    # ── Network ───────────────────────────────────────────────────────────────
+    network_enabled = click.confirm(
+        "? Enable network domain policy"
         " (api.anthropic.com, code.claude.com, docs.anthropic.com always allowed)",
         default=True,
     )
-    egress_extra_domains: list[str] = []
-    if egress_enabled:
+    network_extra_domains: list[str] = []
+    if network_enabled:
         raw = click.prompt(
             "  Additional allowed domains (comma-separated, or Enter to skip)",
             default="",
         )
-        egress_extra_domains = [d.strip() for d in raw.split(",") if d.strip()]
+        network_extra_domains = [d.strip() for d in raw.split(",") if d.strip()]
+    console.print()
+
+    # ── MCP servers ───────────────────────────────────────────────────────────
+    raw = click.prompt(
+        "? Approved MCP servers (comma-separated, or Enter to skip)",
+        default="",
+    )
+    mcp_approved_servers = [s.strip() for s in raw.split(",") if s.strip()]
+    console.print()
+
+    # ── Skills ────────────────────────────────────────────────────────────────
+    raw = click.prompt(
+        "? Approved skills (comma-separated, or Enter to skip)",
+        default="",
+    )
+    approved_skills = [s.strip() for s in raw.split(",") if s.strip()]
     console.print()
 
     # ── Sigstore ──────────────────────────────────────────────────────────────
@@ -595,8 +738,10 @@ def _run_wizard(docker_config: dict) -> str:
         docker_config=docker_config,
         model=model,
         qa_choices=qa_choices,
-        egress_enabled=egress_enabled,
-        egress_extra_domains=egress_extra_domains,
+        network_enabled=network_enabled,
+        network_extra_domains=network_extra_domains,
+        mcp_approved_servers=mcp_approved_servers,
+        approved_skills=approved_skills,
         sigstore_enabled=sigstore_enabled,
     )
 
@@ -608,8 +753,10 @@ def _build_manifest(
     docker_config: dict | None,
     model: str,
     qa_choices: dict | None = None,
-    egress_enabled: bool = True,
-    egress_extra_domains: list[str] | None = None,
+    network_enabled: bool = True,
+    network_extra_domains: list[str] | None = None,
+    mcp_approved_servers: list[str] | None = None,
+    approved_skills: list[str] | None = None,
     sigstore_enabled: bool = True,
 ) -> str:
     """Return a YAML string for the complete manifest based on wizard choices."""
@@ -643,10 +790,16 @@ def _build_manifest(
                 "package_publish": "block",
             },
             "audit": {"enabled": True},
-            "egress": {
-                "enabled": egress_enabled,
+            "network": {
+                "enabled": network_enabled,
                 "allowed_domains": ["api.anthropic.com", "code.claude.com", "docs.anthropic.com"]
-                + (egress_extra_domains or []),
+                + (network_extra_domains or []),
+            },
+            "mcp": {
+                "approved_servers": mcp_approved_servers or [],
+            },
+            "skills": {
+                "approved_skills": approved_skills or [],
             },
             "qa": qa,
         },
@@ -747,6 +900,7 @@ def run_init(
             console.print(f"[red]✗[/red] Invalid manifest: {exc}")
             raise SystemExit(1)
         # Update docker_config from the provided manifest
+        parsed: dict = {}
         try:
             import yaml as _yaml
 
@@ -758,7 +912,11 @@ def run_init(
         console.print(f"  Using manifest: [dim]{manifest_path}[/dim]")
         try:
             image_rebuilt = _docker_setup(
-                docker_config, target, rebuild=True, manifest_content=manifest_content
+                docker_config,
+                target,
+                rebuild=True,
+                manifest_content=manifest_content,
+                managed_settings_content=_build_managed_settings(parsed),
             )
         except RuntimeError as exc:
             console.print(f"\n[red]✗[/red] Docker setup failed: {exc}")
@@ -779,8 +937,15 @@ def run_init(
             )
             manifest_content = _run_wizard(docker_config)
         try:
+            import yaml as _yaml
+
+            _parsed_existing = _yaml.safe_load(manifest_content) or {}
             image_rebuilt = _docker_setup(
-                docker_config, target, rebuild=rebuild, manifest_content=manifest_content
+                docker_config,
+                target,
+                rebuild=rebuild,
+                manifest_content=manifest_content,
+                managed_settings_content=_build_managed_settings(_parsed_existing),
             )
         except RuntimeError as exc:
             console.print(f"\n[red]✗[/red] Docker setup failed: {exc}\n")
@@ -796,8 +961,15 @@ def run_init(
         manifest_content = _run_wizard(docker_config)
 
         try:
+            import yaml as _yaml
+
+            _parsed_wizard = _yaml.safe_load(manifest_content) or {}
             image_rebuilt = _docker_setup(
-                docker_config, target, rebuild=rebuild, manifest_content=manifest_content
+                docker_config,
+                target,
+                rebuild=rebuild,
+                manifest_content=manifest_content,
+                managed_settings_content=_build_managed_settings(_parsed_wizard),
             )
         except RuntimeError as exc:
             console.print(f"\n[red]✗[/red] Docker setup failed: {exc}")
