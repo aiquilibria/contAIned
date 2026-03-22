@@ -14,10 +14,11 @@ All generated content lives here so the init logic stays clean.
 POLICY_MANIFEST = """\
 # contAIned policy manifest
 #
-# Two sections:
+# Three sections:
 #   1. runtime — Docker container resource settings.
-#   2. policy  — enforcement settings read by the hook scripts.
-#   3. agent   — model selection passed to the claude CLI.
+#   2. agent   — model selection passed to the claude CLI.
+#   3. policy  — all governance settings read by the hook scripts,
+#                including build-time provenance (sigstore).
 #
 # Action values accepted by policy settings:
 #   block    — deny the operation outright; agent receives a clear reason
@@ -37,7 +38,24 @@ runtime:
     network: contAIned-net
     agent_config_volume: contAIned-agent-config
 
+# ── Agent ─────────────────────────────────────────────────────────────────────
+agent:
+  # Model passed via --model to the claude CLI. Leave blank to use claude's default.
+  model: claude-sonnet-4-6
+    budget_tokens: 1024
+
 policy:
+
+  # ── Sigstore provenance ──────────────────────────────────────────────────────
+  # When enabled, the Docker image is signed with Sigstore (cosign) during
+  # `contAIned init`.  Provenance is stored in .contAIned/provenance.yaml and
+  # verified on each session start.  Requires cosign to be installed.
+  # Provenance is also stamped into every task closure in tracer.db, binding
+  # each task to the exact signed image that enforced its policy.
+  sigstore:
+    enabled: true
+    rekor_url: https://rekor.sigstore.dev
+    fulcio_url: https://fulcio.sigstore.dev
 
   # ── Secret-file protection ──────────────────────────────────────────────────
   secrets:
@@ -102,12 +120,6 @@ policy:
   skills:
     approved_skills: []    # e.g. [commit, review-pr]
 
-# ── Agent ─────────────────────────────────────────────────────────────────────
-agent:
-  # Model passed via --model to the claude CLI. Leave blank to use claude's default.
-  model: claude-sonnet-4-6
-    budget_tokens: 1024
-
 # ── Sandbox ───────────────────────────────────────────────────────────────────
 # Claude Code's built-in OS-level sandbox (Seatbelt on macOS, bubblewrap on
 # Linux).  Complements contAIned's PreToolUse hooks: the sandbox blocks subprocess
@@ -123,15 +135,6 @@ sandbox:
   filesystem:
     denyWrite:
       - .contAIned   # protect the control-plane directory from subprocess writes
-
-# ── Sigstore provenance ────────────────────────────────────────────────────────
-# When enabled, the Docker image is signed with Sigstore (cosign) during
-# `contAIned init`.  Provenance is stored in .contAIned/provenance.yaml and
-# verified on each session start.  Requires cosign to be installed.
-sigstore:
-  enabled: true
-  rekor_url: https://rekor.sigstore.dev
-  fulcio_url: https://fulcio.sigstore.dev
 """
 
 POLICY_LOADER_HOOK = '''\
@@ -1737,7 +1740,13 @@ sys.exit(0)
 USER_PROMPT_SUBMIT_HOOK = '''\
 #!/usr/bin/env python3
 """
-UserPromptSubmit hook — registers the root session in tracer.db on the first prompt.
+UserPromptSubmit hook — registers the root session in tracer.db on the first prompt,
+and audits operator shell escapes (! commands) if the SDK delivers them here.
+
+Claude Code docs state this hook fires "when the user submits a prompt, before Claude
+processes it" with no documented exception for ! shell escapes.  Whether ! commands
+actually reach this hook is unconfirmed; the detection below is conditional — it logs
+only when the prompt starts with "!" so legitimate prompts are unaffected either way.
 
 Session history, audit logs, and file diffs are queryable via the /contained:tracer
 skill backed by the tracer MCP server.
@@ -1756,13 +1765,29 @@ cwd        = event.get("cwd", ".")
 session_id = event.get("session_id")
 agent_id   = event.get("agent_id")
 
-# ── Register root session on first prompt (idempotent) ────────────────────────
 if session_id and not agent_id:
     db_path = Path(cwd) / ".contAIned" / "tracer.db"
     if db_path.exists():
         try:
             from contained.tracer import contAInedTracer  # noqa: PLC0415
-            contAInedTracer(str(db_path)).open_task(session_id, prompt)
+            tracer = contAInedTracer(str(db_path))
+
+            # ── Register root session on first prompt (idempotent) ────────────
+            tracer.open_task(session_id, prompt)
+
+            # ── Audit operator shell escapes (! commands) ─────────────────────
+            # If the SDK delivers ! commands to this hook, prompt starts with "!".
+            # Log them as OperatorShell events so they appear in the audit trail
+            # alongside agent tool calls.  If the SDK intercepts ! before firing
+            # this hook, this block never runs — no false positives either way.
+            if prompt.startswith("!"):
+                tracer.log_event(
+                    session_id=session_id,
+                    tool="OperatorShell",
+                    tool_input={"command": prompt[1:].strip()},
+                    outcome="operator",
+                    reason="operator shell escape (!)",
+                )
         except Exception:
             pass
 

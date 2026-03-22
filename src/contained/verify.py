@@ -43,7 +43,7 @@ def _verify_workspace(target: Path) -> dict | None:
         raise RuntimeError("No manifest found. Is this a contAIned workspace?")
 
     manifest = yaml.safe_load(manifest_path.read_text()) or {}
-    sigstore_cfg = manifest.get("sigstore", {})
+    sigstore_cfg = manifest.get("policy", {}).get("sigstore") or manifest.get("sigstore", {})
 
     if not sigstore_cfg.get("enabled", False):
         return None  # disabled — not an error

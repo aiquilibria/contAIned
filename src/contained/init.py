@@ -770,9 +770,18 @@ def _build_manifest(
     }
     qa = {**default_qa, **(qa_choices or {})}
 
+    sigstore: dict = {"enabled": sigstore_enabled}
+    if sigstore_enabled:
+        sigstore["rekor_url"] = "https://rekor.sigstore.dev"
+        sigstore["fulcio_url"] = "https://fulcio.sigstore.dev"
+
     manifest: dict = {
         "runtime": {},
+        "agent": {
+            "model": model,
+        },
         "policy": {
+            "sigstore": sigstore,
             "secrets": {
                 "reads": "block",
                 "writes": "block",
@@ -800,16 +809,7 @@ def _build_manifest(
             },
             "qa": qa,
         },
-        "agent": {
-            "model": model,
-        },
     }
-
-    sigstore: dict = {"enabled": sigstore_enabled}
-    if sigstore_enabled:
-        sigstore["rekor_url"] = "https://rekor.sigstore.dev"
-        sigstore["fulcio_url"] = "https://fulcio.sigstore.dev"
-    manifest["sigstore"] = sigstore
 
     if docker_config:
         manifest["runtime"]["docker"] = {
@@ -983,7 +983,7 @@ def run_init(
             import yaml as _yaml
 
             _parsed = _yaml.safe_load(manifest_content) or {}
-            _sigstore = _parsed.get("sigstore", {})
+            _sigstore = _parsed.get("policy", {}).get("sigstore") or _parsed.get("sigstore", {})
             sigstore_enabled = bool(_sigstore.get("enabled", False))
             provenance_exists = (target / ".contAIned" / "provenance.yaml").exists()
             if sigstore_enabled and (image_rebuilt or not provenance_exists):

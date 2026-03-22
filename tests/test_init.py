@@ -352,21 +352,21 @@ class TestBuildManifest:
 
     def test_sigstore_enabled_by_default(self):
         data = self._parse(docker_config=None, model="m")
-        s = data["sigstore"]
+        s = data["policy"]["sigstore"]
         assert s["enabled"] is True
         assert s["rekor_url"] == "https://rekor.sigstore.dev"
         assert s["fulcio_url"] == "https://fulcio.sigstore.dev"
 
     def test_sigstore_enabled_writes_urls(self):
         data = self._parse(docker_config=None, model="m", sigstore_enabled=True)
-        s = data["sigstore"]
+        s = data["policy"]["sigstore"]
         assert s["enabled"] is True
         assert s["rekor_url"] == "https://rekor.sigstore.dev"
         assert s["fulcio_url"] == "https://fulcio.sigstore.dev"
 
     def test_sigstore_disabled_omits_urls(self):
         data = self._parse(docker_config=None, model="m", sigstore_enabled=False)
-        s = data["sigstore"]
+        s = data["policy"]["sigstore"]
         assert "rekor_url" not in s
         assert "fulcio_url" not in s
 

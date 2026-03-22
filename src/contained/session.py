@@ -127,7 +127,8 @@ def start_repl(root: Path) -> None:
         runtime = manifest.get("runtime", {})
 
         # Pre-session provenance check when Sigstore is enabled.
-        if manifest.get("sigstore", {}).get("enabled", False):
+        _sigstore_cfg = manifest.get("policy", {}).get("sigstore") or manifest.get("sigstore", {})
+        if _sigstore_cfg.get("enabled", False):
             from contained.verify import _verify_workspace
 
             try:

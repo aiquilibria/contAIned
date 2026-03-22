@@ -381,6 +381,14 @@ The image is automatically rebuilt when the manifest hash changes — running `c
 
 ## Known gaps
 
+### Operator shell escape (`!`) audit coverage
+
+The audit log records every agent tool call. Commands run by the operator directly via `!command` (Claude Code's shell escape) are not agent tool calls and therefore do not pass through the `PreToolUse`/`PostToolUse` hooks.
+
+The `UserPromptSubmit` hook may receive `!` commands — Claude Code's documentation states it fires "when the user submits a prompt, before Claude processes it" with no documented exception for shell escapes. The hook detects and logs any prompt starting with `"!"` as an `OperatorShell` audit event, which will appear in `tracer.db` alongside agent events and be queryable via `/contained:tracer`.
+
+**Caveat:** whether `!` commands actually reach `UserPromptSubmit` is unconfirmed — the SDK may intercept them before the hook fires. If it does fire, coverage is automatic. If not, the fallback is shell history logging (`HISTFILE`, `PROMPT_COMMAND='history -a'`) at the container level.
+
 ### QA hook coverage
 
 The built-in `qa.py` Stop hook ships with quality checks for Python projects (linting, type checking, tests). There are no pre-built QA checks for other languages — Go, JavaScript, TypeScript, etc. Projects using those languages must write their own checks in `qa.py`, which requires Python knowledge and is not guided by the current tooling. Broader language coverage is planned.

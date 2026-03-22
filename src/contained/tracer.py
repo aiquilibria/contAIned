@@ -85,8 +85,10 @@ CREATE TABLE IF NOT EXISTS audit_events (
     session_id  TEXT    REFERENCES tasks(session_id),
     tool        TEXT    NOT NULL,
     input       TEXT,               -- JSON: tool-specific trace unit (see log_event)
-    outcome     TEXT    NOT NULL,   -- "success" | "denied"
-    reason      TEXT                -- populated on denial
+    outcome             TEXT    NOT NULL,   -- "success" | "denied"
+    reason              TEXT,               -- populated on denial
+    approved_exception  INTEGER NOT NULL DEFAULT 0,  -- 1 if approved outside policy allowlist
+    exception_detail    TEXT                -- domain / skill / server that was the exception
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_events(session_id, id DESC);
@@ -433,6 +435,8 @@ class contAInedTracer:
         """
         migrations = [
             "ALTER TABLE tasks ADD COLUMN narrative TEXT",
+            "ALTER TABLE audit_events ADD COLUMN approved_exception INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE audit_events ADD COLUMN exception_detail TEXT",
         ]
         for sql in migrations:
             try:
@@ -566,6 +570,8 @@ class contAInedTracer:
         outcome: str,
         reason: Optional[str] = None,
         tool_response: Optional[dict] = None,
+        approved_exception: bool = False,
+        exception_detail: Optional[str] = None,
     ) -> None:
         """
         Append one audit event for a tool call.
@@ -591,8 +597,9 @@ class contAInedTracer:
                 self.conn.execute(
                     """
                     INSERT INTO audit_events
-                        (ts, session_id, tool, input, outcome, reason)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                        (ts, session_id, tool, input, outcome, reason,
+                         approved_exception, exception_detail)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ts,
@@ -601,6 +608,8 @@ class contAInedTracer:
                         json.dumps(trace_unit) if trace_unit is not None else None,
                         outcome,
                         reason,
+                        1 if approved_exception else 0,
+                        exception_detail,
                     ),
                 )
         except Exception:
