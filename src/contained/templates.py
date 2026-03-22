@@ -1396,8 +1396,10 @@ Flow:
   3. Defensive child check: poll up to 3 × 200 ms for open sub-agent sessions.
   4. Compute per-file unified diffs across the whole agent tree.
   5. Build action log from recent audit events (Bash, Agent, denied calls).
-  6. Store JSON summary in tasks.summary; set status = closed.
-  7. Exit 0 — agent stops cleanly; summary is retrievable via /contained:tracer.
+  6. Build provenance_log — append current container provenance to any existing
+     entries so resumed tasks preserve the full signing history across rebuilds.
+  7. Store JSON summary in tasks.summary; set status = closed.
+  8. Exit 0 — agent stops cleanly; summary is retrievable via /contained:tracer.
 """
 import json
 import subprocess
@@ -1494,6 +1496,38 @@ for _attempt in range(3):
         break
     time.sleep(0.2)
 
+# ── Build provenance log ───────────────────────────────────────────────────────
+# Read the provenance snapshot bind-mounted read-only at container startup
+# (see docker_runner.py).  Merge with any existing log entries so that tasks
+# resumed after a container rebuild accumulate the full signing history —
+# each closure records exactly which signed image was running at that point.
+_prov_log: list = []
+try:
+    _existing_row = tracer.conn.execute(
+        "SELECT summary FROM tasks WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if _existing_row and _existing_row[0]:
+        _prov_log = json.loads(_existing_row[0]).get("provenance_log", [])
+except Exception:
+    pass
+
+_prov_snapshot = Path("/run/contained/provenance.yaml")
+if _prov_snapshot.exists():
+    try:
+        import yaml as _yaml
+        _prov = _yaml.safe_load(_prov_snapshot.read_text()) or {}
+        _prov_log.append({
+            "closed_at":         time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "image_digest":      _prov.get("image_digest", ""),
+            "operator_identity": _prov.get("operator_identity", ""),
+            "oidc_issuer":       _prov.get("oidc_issuer", ""),
+            "signed_at":         _prov.get("signed_at", ""),
+            "rekor_log_index":   _prov.get("rekor_log_index"),
+            "rekor_entry_url":   _prov.get("rekor_entry_url", ""),
+        })
+    except Exception:
+        pass
+
 # ── Collect file diffs ─────────────────────────────────────────────────────────
 try:
     touched_files = tracer.list_touched_files(session_id)
@@ -1503,7 +1537,7 @@ except Exception:
 # ── Skip summary UI if nothing was written this session ───────────────────────
 if not touched_files:
     try:
-        tracer.set_task_status(session_id, "closed", summary={"file_changes": [], "action_log": [], "qa_checks": _qa_checks})
+        tracer.set_task_status(session_id, "closed", summary={"provenance_log": _prov_log, "file_changes": [], "action_log": [], "qa_checks": _qa_checks})
     except Exception:
         pass
     sys.exit(0)
@@ -1595,6 +1629,7 @@ except Exception:
 
 # ── Assemble and store summary ─────────────────────────────────────────────────
 summary = {
+    "provenance_log": _prov_log,
     "file_changes": [
         {
             "file_path":   d["file_path"],
@@ -1686,7 +1721,15 @@ _files_line = "\\n".join(
     for c in _changed
 ) if _changed else "- (no file changes)"
 
-_summary_msg = f"QA: {_qa_line}\\n\\nChanged:\\n{_files_line}\\n\\nUse /contained:tracer to inspect the full diff and narrative."
+_prov_line = ""
+if _prov_log:
+    _latest = _prov_log[-1]
+    _digest_short = (_latest.get("image_digest") or "")[:19]
+    _operator = _latest.get("operator_identity") or ""
+    _rekor = _latest.get("rekor_log_index")
+    _prov_line = f"\\nProvenance: {_digest_short}… · {_operator}" + (f" · Rekor #{_rekor}" if _rekor else "")
+
+_summary_msg = f"QA: {_qa_line}\\n\\nChanged:\\n{_files_line}{_prov_line}\\n\\nUse /contained:tracer to inspect the full diff and narrative."
 print(json.dumps({"decision": "block", "reason": _summary_msg}))
 sys.exit(0)
 '''

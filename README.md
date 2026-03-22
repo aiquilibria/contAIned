@@ -329,7 +329,34 @@ contAIned init --rebuild
 
 ### Tracer
 
-`tracer.db` (SQLite, WAL mode) records every task, sub-agent invocation, file diff (content-addressed blob store), and QA result. The `#db` hash command gives the operator direct SQL access.
+`tracer.db` (SQLite, WAL mode) records every task, sub-agent invocation, file diff (content-addressed blob store), and QA result. Use the **`/contained:tracer`** skill to query session history, audit logs, and file diffs.
+
+#### Provenance stamping
+
+Every task closure writes a `provenance_log` entry into `tasks.summary`. Each entry captures the image digest, Sigstore operator identity, Rekor log index, and a `closed_at` timestamp — binding the task record to the exact signed image that enforced its policy.
+
+This matters for accountability in two ways:
+
+**Any task in the database is fully traceable.** Given a closed task, you can determine not just *what* the agent did (audit log + diffs) but *which signed image constrained it* — and from there independently verify the operator identity and policy contents via Rekor. The chain is: task → image digest → Rekor entry → operator OIDC identity → policy manifest.
+
+**Resumed tasks accumulate a complete signing history.** When a task is reopened after a container rebuild (new `contAIned init`, new image signing), the next closure appends a second entry to `provenance_log` rather than overwriting the first. A task resumed across three builds carries three entries — each recording the image and operator identity that governed that portion of the work. The complete chain of custody is preserved regardless of how many rebuild cycles occurred.
+
+The log is queryable directly:
+
+```sql
+-- Which image ran this task?
+SELECT json_extract(summary, '$.provenance_log[0].image_digest'),
+       json_extract(summary, '$.provenance_log[0].operator_identity'),
+       json_extract(summary, '$.provenance_log[0].rekor_log_index')
+FROM   tasks WHERE session_id = ?;
+
+-- Tasks that ran under a specific image digest
+SELECT session_id, started_at
+FROM   tasks
+WHERE  json_extract(summary, '$.provenance_log[0].image_digest') = 'sha256:...';
+```
+
+When Sigstore is disabled (`sigstore.enabled: false`), `provenance_log` is written as an empty list — the field is always present, making the absence of provenance legible rather than ambiguous.
 
 ---
 

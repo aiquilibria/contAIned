@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -237,11 +238,52 @@ class DockerRunner:
         Network isolation is handled by the Claude Code sandbox
         (``sandbox.network.allowedDomains`` in managed-settings.json), not by
         a sidecar proxy.
+
+        Provenance snapshot
+        -------------------
+        If ``provenance.yaml`` exists in the workspace, it is copied to a
+        host-side temp directory and mounted into the container at
+        ``/run/contained/`` as a **read-only** bind mount.  This guarantees
+        that the running session is always bound to the provenance that was
+        verified at startup — even if the workspace files are overwritten by an
+        external rebuild.  The temp files are removed once the container exits.
         """
         args = self._base_args()
-        # Insert -it (interactive TTY) before the image name
+
+        # Snapshot provenance files to a host temp dir and mount read-only.
+        # /run/contained/ is root-owned inside the image, so agent cannot write
+        # there directly.  The :ro flag enforces this at the kernel level too.
+        tmp_prov_dir: Path | None = None
+        prov_yaml = self.workspace / ".contAIned" / "provenance.yaml"
+        prov_bundle = self.workspace / ".contAIned" / "provenance.bundle"
+        # Insert -it (interactive TTY) and any provenance volumes before the
+        # image name.  Everything after the image is interpreted by Docker as
+        # the in-container command, so these flags must come before it.
         image = self.config.get("image", "contained:latest")
         idx = args.index(image)
+
+        if prov_yaml.exists():
+            tmp_prov_dir = Path(tempfile.mkdtemp(prefix="contained-prov-"))
+            shutil.copy2(prov_yaml, tmp_prov_dir / "provenance.yaml")
+            prov_args = [
+                "--volume",
+                f"{tmp_prov_dir}/provenance.yaml:/run/contained/provenance.yaml:ro",
+            ]
+            if prov_bundle.exists():
+                shutil.copy2(prov_bundle, tmp_prov_dir / "provenance.bundle")
+                prov_args += [
+                    "--volume",
+                    f"{tmp_prov_dir}/provenance.bundle:/run/contained/provenance.bundle:ro",
+                ]
+            args[idx:idx] = prov_args
+            idx += len(prov_args)  # keep idx pointing at the image
+
         args.insert(idx, "-it")
-        result = subprocess.run(args)
+
+        try:
+            result = subprocess.run(args)
+        finally:
+            if tmp_prov_dir is not None:
+                shutil.rmtree(tmp_prov_dir, ignore_errors=True)
+
         sys.exit(result.returncode)

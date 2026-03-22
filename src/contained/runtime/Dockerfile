@@ -31,7 +31,7 @@ RUN uv pip install --system --python python3.13 --no-cache --break-system-packag
 # managed-settings.json registers enforcement hooks at the highest-precedence
 # settings level — Claude Code blocks all user-defined hooks when this file is
 # present, eliminating the circular self-protection problem.
-RUN mkdir -p /etc/claude-code /etc/contained
+RUN mkdir -p /etc/claude-code /etc/contained /run/contained
 COPY src/contained/runtime/statusline.py /etc/contained/statusline.py
 
 # Bake managed-settings.json into the image.

@@ -187,6 +187,8 @@ Every tool call is recorded by `audit.py` (PostToolUse) in the tracer database. 
 
 **Tracer database** (`tracer.db`) — the primary store. A SQLite database in WAL mode that records every tool call event, task, sub-agent invocation, file diff (content-addressed blob store), and QA result. The `#review <N>` command retrieves the narrative and per-file diff summary for any completed task. The `#db <SQL>` command gives the operator direct SQL access for ad-hoc queries. Writes to `.contAIned/` are blocked by the hook layer, so the database cannot be cleared or tampered with by the agent.
 
+**Provenance stamping** — when Sigstore is enabled, every task closure writes a `provenance_log` entry into `tasks.summary`. Each entry records the image digest, Rekor log index, operator identity, and a `closed_at` timestamp, taken from a read-only snapshot of `provenance.yaml` bind-mounted at container startup. This binds each task record to the signed image that enforced its policy. For tasks resumed after a container rebuild, entries accumulate rather than overwrite — the complete signing history across all image versions is preserved in the database. The chain is: task → image digest → Rekor entry → operator OIDC identity → policy manifest. Any closed task is therefore independently auditable end-to-end without requiring the live image or workspace.
+
 **JSONL mirror** (`audit/pipeline.jsonl`) — an optional append-only flat-file export, enabled by setting `policy.audit.jsonl_export: true` in `manifest.yaml`. Off by default.
 
 Together these provide the forensic record that makes injected or unexpected agent behaviour detectable after the fact, and give the operator the information needed to make an informed decision before approving an escalated git mutation.
@@ -296,7 +298,7 @@ After a successful image build, `contAIned init`:
 
 **Physical access to the machine is out of scope.** Consistent with the existing threat model, attacks requiring host OS compromise or physical device access are not addressed.
 
-**Session-level accountability is not provided.** The signature establishes who built the policy. It does not create a per-session cryptographic record of who approved individual escalations. In the local-only model this is not a gap — the operator who signed the image is the same person running sessions.
+**Session-level accountability is partial, not cryptographic.** The signature establishes who built the policy. It does not create a cryptographically signed record of who approved individual escalations. What it does provide, via provenance stamping in the tracer (see above), is a non-repudiable pointer: every task in `tracer.db` carries the image digest and Rekor log index of the signed image that ran it, so the full chain from task to policy author is auditable. What it does not provide is a per-approval signature — the operator's identity is established at build time, not at each escalation decision.
 
 **`provenance.yaml` is a local pointer, not the authoritative record.** The Rekor entry is permanent and independently verifiable. `provenance.yaml` is a convenience file used by `contAIned verify`. It is gitignored alongside the rest of `.contAIned/`.
 
