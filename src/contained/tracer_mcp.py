@@ -38,7 +38,7 @@ _TOOLS = [
             "Call this first to understand what tables and columns are available "
             "before writing SQL queries. "
             "IMPORTANT: only call this tool when the user has explicitly invoked "
-            "the /contained:tracer command. Do not call it for general questions."
+            "the contained:tracer skill. Do not call it for general questions."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
@@ -51,7 +51,7 @@ _TOOLS = [
             "blobs (content store). "
             "Only SELECT and WITH queries are permitted. Returns up to 500 rows. "
             "IMPORTANT: only call this tool when the user has explicitly invoked "
-            "the /contained:tracer command. Do not call it for general questions."
+            "the contained:tracer skill. Do not call it for general questions."
         ),
         "inputSchema": {
             "type": "object",

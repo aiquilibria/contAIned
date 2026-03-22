@@ -1394,7 +1394,7 @@ Flow:
   4. Compute per-file unified diffs across the whole agent tree.
   5. Build action log from recent audit events (Bash, Agent, denied calls).
   6. Store JSON summary in tasks.summary; set status = closed.
-  7. Exit 0 — agent stops cleanly; summary is retrievable via #review.
+  7. Exit 0 — agent stops cleanly; summary is retrievable via /contained:tracer.
 """
 import json
 import subprocess
@@ -1683,7 +1683,7 @@ _files_line = "\\n".join(
     for c in _changed
 ) if _changed else "- (no file changes)"
 
-_summary_msg = f"QA: {_qa_line}\\n\\nChanged:\\n{_files_line}\\n\\nUse #review to inspect the full diff and narrative."
+_summary_msg = f"QA: {_qa_line}\\n\\nChanged:\\n{_files_line}\\n\\nUse /contained:tracer to inspect the full diff and narrative."
 print(json.dumps({"decision": "block", "reason": _summary_msg}))
 sys.exit(0)
 '''
@@ -1691,17 +1691,10 @@ sys.exit(0)
 USER_PROMPT_SUBMIT_HOOK = '''\
 #!/usr/bin/env python3
 """
-UserPromptSubmit hook — pre-processes hash commands and injects data for Claude to format.
+UserPromptSubmit hook — registers the root session in tracer.db on the first prompt.
 
-Commands handled here:
-  #db [SQL]              — query tracer.db
-  #audit                 — tail recent audit log
-  #policy                — show effective policy (read-only view of /etc/contained/manifest.yaml)
-  #review                — list recent completed tasks
-  #review <n>            — show narrative + diff summary for task n
-
-On match: data is collected and injected as additionalContext; Claude formats and presents it.
-On miss:  exit 0 — Claude\'s own /help, /compact, /clear, etc. pass through.
+Session history, audit logs, and file diffs are queryable via the /contained:tracer
+skill backed by the tracer MCP server.
 """
 import json
 import sys
@@ -1718,7 +1711,7 @@ session_id = event.get("session_id")
 agent_id   = event.get("agent_id")
 
 # ── Register root session on first prompt (idempotent) ────────────────────────
-if session_id and not agent_id and not prompt.startswith("#"):
+if session_id and not agent_id:
     db_path = Path(cwd) / ".contAIned" / "tracer.db"
     if db_path.exists():
         try:
@@ -1727,254 +1720,5 @@ if session_id and not agent_id and not prompt.startswith("#"):
         except Exception:
             pass
 
-if not prompt.startswith("#"):
-    sys.exit(0)
-
-parts    = prompt.split(None, 1)
-cmd_word = parts[0].lower()
-args     = parts[1].strip() if len(parts) > 1 else ""
-
-_HOOK_COMMANDS = frozenset({"#db", "#audit", "#policy", "#review"})
-
-if cmd_word not in _HOOK_COMMANDS:
-    sys.exit(0)  # not a known hash command — pass through to Claude
-
-# ── Collect data for Claude to format ────────────────────────────────────────
-_lines = []        # data lines to pass to Claude
-_instruction = ""  # formatting instruction for Claude
-
-# ── #db ───────────────────────────────────────────────────────────────────────
-if cmd_word == "#db":
-    import sqlite3 as _sl
-    db_path = Path(cwd) / ".contAIned" / "tracer.db"
-    if not db_path.exists():
-        _lines.append("Error: No tracer.db found. Run `contAIned init` first.")
-        _instruction = "Inform the user that the database does not exist yet."
-    else:
-        query = args or (
-            "SELECT session_id, status, "
-            "datetime(started_at/1000,\'unixepoch\') AS started, "
-            "substr(prompt,1,60) AS prompt "
-            "FROM tasks WHERE parent_session_id IS NULL "
-            "ORDER BY started_at DESC LIMIT 10"
-        )
-        _lines.append(f"Query: {query}")
-        _lines.append("")
-        conn = _sl.connect(str(db_path))
-        conn.row_factory = _sl.Row
-        try:
-            rows = conn.execute(query).fetchall()
-        except _sl.Error as exc:
-            rows = []
-            _lines.append(f"SQL error: {exc}")
-        finally:
-            conn.close()
-        if rows:
-            cols = list(rows[0].keys())
-            _lines.append(" | ".join(cols))
-            _lines.append("-" * (sum(len(c) for c in cols) + 3 * (len(cols) - 1)))
-            for row in rows:
-                _lines.append(" | ".join(str(v) if v is not None else "" for v in row))
-        else:
-            _lines.append("(no rows)")
-        _instruction = "Format and present these database query results clearly to the user."
-
-# ── #audit ────────────────────────────────────────────────────────────────────
-elif cmd_word == "#audit":
-    import sqlite3 as _sl
-    db_path = Path(cwd) / ".contAIned" / "tracer.db"
-    if not db_path.exists():
-        _lines.append("Error: No tracer.db found. Run `contAIned init` first.")
-        _instruction = "Inform the user that the database does not exist yet."
-    else:
-        conn = _sl.connect(str(db_path))
-        conn.row_factory = _sl.Row
-        try:
-            rows = conn.execute(
-                "SELECT ts, substr(session_id,1,8) AS session, tool, outcome "
-                "FROM audit_events ORDER BY ts DESC LIMIT 20"
-            ).fetchall()
-        except _sl.Error:
-            rows = []
-        finally:
-            conn.close()
-        if rows:
-            _lines.append("Recent audit events (newest first, up to 20):")
-            _lines.append("")
-            _lines.append("ts | session | tool | outcome")
-            _lines.append("-" * 40)
-            for row in rows:
-                _lines.append(" | ".join(str(v) if v is not None else "" for v in row))
-        else:
-            _lines.append("No audit events found.")
-        _instruction = "Present this audit log clearly, highlighting any denied operations or patterns worth noting."
-
-# ── #policy ───────────────────────────────────────────────────────────────────
-elif cmd_word == "#policy":
-    import yaml as _yaml
-    _manifest_path = Path("/etc/contained/manifest.yaml")
-
-    if not _manifest_path.exists():
-        _lines.append("Error: No policy manifest found at /etc/contained/manifest.yaml.")
-        _lines.append("The container image may not have been built with a manifest baked in.")
-        _lines.append("Rebuild with: contAIned init --manifest policy.yaml")
-        _instruction = "Inform the user that no baked-in policy manifest was found and explain how to rebuild the image."
-    else:
-        try:
-            _manifest_text = _manifest_path.read_text()
-            _lines.append("Effective policy (/etc/contained/manifest.yaml — read-only):")
-            _lines.append("")
-            _lines.append(_manifest_text)
-            _lines.append("To change policy, rebuild the image: contAIned init --manifest policy.yaml")
-            _instruction = "Present this policy manifest clearly to the user, formatting the YAML readably and briefly explaining the key settings. Note it is read-only and changes require a container rebuild."
-        except Exception as _e:
-            _lines.append(f"Error: Could not read manifest: {_e}")
-            _instruction = "Inform the user of the manifest read error."
-
-# ── #review ───────────────────────────────────────────────────────────────────
-elif cmd_word == "#review":
-    db_path = Path(cwd) / ".contAIned" / "tracer.db"
-    if not db_path.exists():
-        _lines.append("Error: No tracer.db found. Run `contAIned init` first.")
-        _instruction = "Inform the user that the database does not exist yet."
-    else:
-        try:
-            from contained.tracer import contAInedTracer as _ST
-            _tr = _ST(str(db_path))
-            _tasks = _tr.conn.execute(
-                """
-                SELECT session_id, prompt, started_at, ended_at, summary, narrative
-                FROM tasks
-                WHERE status = \'closed\'
-                  AND parent_session_id IS NULL
-                ORDER BY ended_at DESC
-                LIMIT 20
-                """
-            ).fetchall()
-            _tasks = [
-                {
-                    "session_id": r[0], "prompt": r[1],
-                    "started_at": r[2], "ended_at": r[3],
-                    "summary": json.loads(r[4]) if r[4] else None,
-                    "narrative": json.loads(r[5]) if r[5] else None,
-                }
-                for r in _tasks
-            ]
-        except Exception as _e:
-            _lines.append(f"Tracer error: {_e}")
-            _tasks = []
-            _instruction = "Inform the user of the tracer error."
-
-        if not _tasks and not _instruction:
-            _lines.append("No completed tasks found.")
-            _instruction = "Inform the user there are no completed tasks yet."
-        elif not _instruction:
-            if not args:
-                from datetime import datetime as _dt, timezone as _tz
-                _lines.append(f"Recent completed tasks ({len(_tasks)}):")
-                _lines.append("")
-                for _i, _r in enumerate(_tasks, 1):
-                    _ts = _dt.fromtimestamp(_r["ended_at"] / 1000, tz=_tz.utc)
-                    _fc_count = len((_r.get("summary") or {}).get("file_changes", []))
-                    _has_narrative = bool((_r.get("narrative") or {}).get("closings"))
-                    _entry = f"{_i}. {_r[\'session_id\'][:12]}  \\"{_r[\'prompt\'][:60]}\\"  ({_ts.strftime(\'%Y-%m-%d %H:%M\')})"
-                    if _fc_count:
-                        _entry += f"  [{_fc_count} file(s)]"
-                    if _has_narrative:
-                        _entry += "  [has narrative]"
-                    _lines.append(_entry)
-                _instruction = (
-                    "Present this list of completed tasks clearly. "
-                    "Remind the user they can type `#review <n>` to see full detail for a task."
-                )
-            else:
-                if not args.isdigit() or int(args) < 1:
-                    _lines.append("Usage error: #review <number>  (run #review to see the list)")
-                    _instruction = "Explain the correct usage of #review to the user."
-                else:
-                    _idx = int(args) - 1
-                    if _idx >= len(_tasks):
-                        _lines.append(f"No task {args}. Run #review to see the list.")
-                        _instruction = "Inform the user the task number is out of range."
-                    else:
-                        _r = _tasks[_idx]
-                        from datetime import datetime as _dt, timezone as _tz
-                        _ts = _dt.fromtimestamp(_r["ended_at"] / 1000, tz=_tz.utc)
-                        _lines.append(f"Task {args}:")
-                        _lines.append(f"  Original user prompt: {_r[\'prompt\']}")
-                        _lines.append(f"  Completed: {_ts.strftime(\'%Y-%m-%d %H:%M UTC\')}")
-
-                        _narrative = _r.get("narrative") or {}
-                        _closings  = _narrative.get("closings") or []
-                        if _closings:
-                            _lines.append("")
-                            _lines.append("Agent narrative (closing statements by turn):")
-                            for _turn_i, _closing in enumerate(_closings, 1):
-                                if len(_closings) > 1:
-                                    _lines.append(f"  [Turn {_turn_i}]")
-                                _lines.append(f"  {_closing}")
-
-                        _file_changes = (_r.get("summary") or {}).get("file_changes", [])
-                        _action_log   = (_r.get("summary") or {}).get("action_log", [])
-
-                        if _file_changes:
-                            _lines.append("")
-                            _lines.append(f"File changes ({len(_file_changes)}):")
-                            for _fc in _file_changes:
-                                _fp  = _fc.get("file_path", "?")
-                                _add = _fc.get("lines_added", 0)
-                                _rem = _fc.get("lines_removed", 0)
-                                _lines.append(f"  {_fp}  +{_add}/-{_rem}")
-                                try:
-                                    _diff = _tr.diff_task(_r["session_id"], _fp)
-                                    _dlines = _diff.splitlines() if _diff else []
-                                except Exception:
-                                    _dlines = []
-                                for _ln in _dlines[:200]:
-                                    _lines.append(f"  {_ln}")
-                                if len(_dlines) > 200:
-                                    _lines.append("  ... (diff truncated)")
-                        else:
-                            _lines.append("")
-                            _lines.append("No file changes recorded.")
-
-                        _notable = [
-                            _e for _e in _action_log
-                            if _e.get("tool") in ("Bash", "Agent") or _e.get("outcome") == "denied"
-                        ]
-                        if _notable:
-                            _lines.append("")
-                            _lines.append(f"Notable actions ({len(_notable)}):")
-                            for _e in _notable[-20:]:
-                                _inp = _e.get("input") or {}
-                                if _e.get("tool") == "Bash":
-                                    _cmd = (_inp.get("command") or "")[:80]
-                                    _ec  = _inp.get("exit_code")
-                                    _entry = f"  bash: {_cmd}"
-                                    if _ec is not None:
-                                        _entry += f" (exit: {_ec})"
-                                    _lines.append(_entry)
-                                elif _e.get("tool") == "Agent":
-                                    _lines.append(f"  agent [{_inp.get(\'agent_type\') or \'agent\'}]: {(_inp.get(\'prompt_head\') or \'\')[:60]}")
-                                elif _e.get("outcome") == "denied":
-                                    _lines.append(f"  DENIED: {_e.get(\'tool\')} — {(_e.get(\'reason\') or \'\')[:80]}")
-
-                        _instruction = (
-                            "Using the original user prompt, the agent\'s narrative, and the list of "
-                            "actions taken, write a clear and concise justification of why each action "
-                            "was necessary and sufficient to fulfil what the user asked. Be specific — "
-                            "connect each step directly to the requirement it addressed."
-                        )
-
-# ── Pass data to Claude for formatting ────────────────────────────────────────
-_context = "\\n".join(_lines)
-print(json.dumps({
-    "hookSpecificOutput": {
-        "hookEventName": "UserPromptSubmit",
-        "additionalContext": (
-            f"[contAIned hook data for \'{prompt}\']\\n\\n{_context}\\n\\n{_instruction}"
-        ),
-    },
-}))
 sys.exit(0)
 '''

@@ -154,18 +154,7 @@ contAIned
 
 Claude Code runs as a direct child process with your terminal inherited — all I/O passes through unmodified. The agent has access to your project workspace (bind-mounted at `/workspace`) and nothing else.
 
-**Hash commands** (handled by the `UserPromptSubmit` hook before the agent sees them):
-
-| Command | What it does |
-|---|---|
-| `#review` | List recent completed tasks |
-| `#review <N>` | Show narrative + diff summary for task N |
-| `#db` | Query `tracer.db` — last 10 tasks |
-| `#db <SQL>` | Run arbitrary SQL against `tracer.db` |
-| `#audit` | Show last 20 audit-log entries |
-| `#policy` | Show the effective policy manifest (read-only) |
-
-Any other input is forwarded verbatim to the agent.
+All input is forwarded verbatim to the agent. Use the **`/contained:tracer`** skill to query session history, audit logs, file diffs, and the tracer database directly.
 
 ---
 
