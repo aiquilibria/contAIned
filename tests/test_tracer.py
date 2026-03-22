@@ -1203,7 +1203,7 @@ class TestTaskCreation:
         assert count == 3
 
     def test_closed_tasks_queryable(self, tracer: contAInedTracer) -> None:
-        """Closed tasks are queryable for #review history display."""
+        """Closed tasks are queryable for session history display."""
         for sid in ("S1", "S2"):
             tracer.open_task(sid, f"task {sid}")
             tracer.set_task_status(sid, "closed")
@@ -1375,7 +1375,7 @@ class TestNarrative:
         assert json.loads(row[0]) == summary
 
     def test_narrative_queryable_on_closed_task(self, tracer: contAInedTracer) -> None:
-        """Narrative stored at close is retrievable via direct SQL (used by #review)."""
+        """Narrative stored at close is retrievable via direct SQL (used by contained:tracer)."""
         tracer.open_task("S1", "task")
         tracer.set_task_status("S1", "closed", narrative="Done everything.")
         row = tracer.conn.execute(

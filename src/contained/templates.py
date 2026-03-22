@@ -560,6 +560,9 @@ _SAFE_PATTERNS = [
     re.compile(r\'^pwd\\b\'),
     re.compile(r\'^echo\\s\'),
     re.compile(r\'^which\\s\'),
+    # grep/rg via Bash are read-only — mirror the Grep tool\'s auto-approval.
+    re.compile(r\'^grep\\b\'),
+    re.compile(r\'^rg\\b\'),
 ]
 
 # (policy key, compiled patterns, denial reason)
