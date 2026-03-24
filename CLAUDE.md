@@ -28,4 +28,4 @@ Each task you receive will specify:
 
 - Tool denied + reason → read the reason, change approach
 - QA feedback after stopping → fix the issues described, then stop again
-- Session summary after stopping (reason starts with "QA: ✓") → present it to the operator and stop. Do not proceed with any further implementation, do not propose next steps, and do not treat the operator's next message as implicit approval for any pending action. Wait for an explicit instruction.
+- Session summary after stopping (reason starts with "QA:") → present it to the operator and stop again without making any changes
