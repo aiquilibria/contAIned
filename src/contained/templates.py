@@ -135,6 +135,13 @@ sandbox:
   filesystem:
     denyWrite:
       - .contAIned   # protect the control-plane directory from subprocess writes
+
+# ── Mainlined ──────────────────────────────────────────────────────────────────
+# Work unit payloads are POSTed to runtime.mainlined.url at git push time.
+# MAINLINED_API_KEY is injected as an environment variable (not stored here).
+runtime:
+  mainlined:
+    url: ""   # e.g. https://mainlined.example.com
 """
 
 POLICY_LOADER_HOOK = '''\
@@ -1388,23 +1395,26 @@ sys.exit(0)
 SUMMARIZER_HOOK = '''\
 #!/usr/bin/env python3
 """
-Stop hook — runs QA checks and persists a diff summary to tracer.db.
+Stop hook — runs QA checks, processes any pending git push, and closes the task.
 
 Fires only for root-agent Stop events (not SubagentStop — that is wired to
-subagent_stop.py).  This is the sole Stop hook; it owns both QA and summary.
+subagent_stop.py).  This is the sole Stop hook; it owns QA, push processing,
+and task closure.
 
 Flow:
   1. Sentinel check: if task already "closed", exit 0 (no-op).
   2. Run qa.py inline — if any check fails, block and return to agent immediately.
   3. Defensive child check: poll up to 3 × 200 ms for open sub-agent sessions.
-  4. Compute per-file unified diffs across the whole agent tree.
-  5. Build action log from recent audit events (Bash, Agent, denied calls).
-  6. Build provenance_log — append current container provenance to any existing
+  4. Build provenance_log — append current container provenance to any existing
      entries so resumed tasks preserve the full signing history across rebuilds.
-  7. Store JSON summary in tasks.summary; set status = closed.
-  8. Exit 0 — agent stops cleanly; summary is retrievable via /contained:tracer.
+  5. Collect file diffs and action log for the operator summary UI.
+  6. If a git push happened this session: build_actions, assemble_payload, POST,
+     mark work unit pushed, open next work unit.
+  7. Store transcript_path; set task status = closed.
+  8. Block with a formatted summary so Claude surfaces it to the operator.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -1692,20 +1702,121 @@ if _transcript_path and Path(_transcript_path).exists():
 # Rebuild summary with enriched action_log.
 summary["action_log"] = action_log
 
-# ── Extract structured narrative from transcript ──────────────────────────────
-# Collects thinking blocks + pre-tool reasoning + closing statement in one pass.
-_narrative_data: dict = {}
-if _transcript_path and Path(_transcript_path).exists():
+# ── Process any pending git push ───────────────────────────────────────────────
+# Detect a successful git push this session; if found, build the ATP work unit
+# payload, POST it to mainlined, close the work unit, and open the next one.
+try:
+    _wu_id = tracer.get_active_work_unit(session_id)
+    if _wu_id:
+        _push_events = tracer.conn.execute(
+            """
+            SELECT input FROM audit_events
+            WHERE session_id = ? AND tool = \'Bash\' AND outcome = \'success\'
+            ORDER BY id DESC LIMIT 50
+            """,
+            (session_id,),
+        ).fetchall()
+        _push_found = False
+        for (_ae_input,) in _push_events:
+            _inp = json.loads(_ae_input) if _ae_input else {}
+            _cmd = (_inp.get("command") or "").strip()
+            _exit = _inp.get("exit_code")
+            if (
+                _exit == 0
+                and "git" in _cmd
+                and "push" in _cmd
+                and "--dry-run" not in _cmd
+            ):
+                _push_found = True
+                break
+
+        if _push_found:
+            _head_res = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, cwd=cwd, timeout=10,
+            )
+            _head_commit = _head_res.stdout.strip() if _head_res.returncode == 0 else ""
+
+            if _qa_checks:
+                _qa_passed = all(
+                    c.get("status") == "pass"
+                    for c in _qa_checks
+                    if c.get("status") != "skip"
+                )
+                tracer.record_qa_result(_wu_id, {"checks": _qa_checks, "passed": _qa_passed})
+
+            _wu_narrative = None
+            if _transcript_path and Path(_transcript_path).exists():
+                try:
+                    from contained.tracer import extract_narrative_from_transcript  # noqa: PLC0415
+                    _wu_narrative = extract_narrative_from_transcript(_transcript_path) or None
+                except Exception:
+                    pass
+            if _wu_narrative:
+                try:
+                    tracer.record_narrative(_wu_id, _wu_narrative)
+                except Exception:
+                    pass
+
+            tracer.build_actions(_wu_id, [t for t in [_transcript_path] if t])
+
+            try:
+                _payload = tracer.assemble_payload(_wu_id)
+            except Exception:
+                _payload = None
+
+            if _payload:
+                try:
+                    _mainlined_url = None
+                    _manifest_path = Path(cwd) / ".contAIned" / "manifest.yaml"
+                    if _manifest_path.exists():
+                        import yaml as _yaml  # noqa: PLC0415
+                        _manifest = _yaml.safe_load(_manifest_path.read_text()) or {}
+                        _mainlined_url = _manifest.get("runtime", {}).get("mainlined", {}).get("url")
+                    _atp_key = os.environ.get("MAINLINED_API_KEY")
+                    if _mainlined_url and _atp_key:
+                        import urllib.request  # noqa: PLC0415
+                        _req = urllib.request.Request(
+                            _atp_url,
+                            data=json.dumps(_payload).encode("utf-8"),
+                            headers={
+                                "Content-Type": "application/json",
+                                "Authorization": f"Bearer {_atp_key}",
+                            },
+                            method="POST",
+                        )
+                        urllib.request.urlopen(_req, timeout=30)
+                except Exception:
+                    pass
+
+            if _head_commit:
+                tracer.complete_work_unit(_wu_id, _head_commit)
+                try:
+                    _wu_row = tracer.conn.execute(
+                        "SELECT repo_url, branch FROM work_units WHERE id = ?",
+                        (_wu_id,),
+                    ).fetchone()
+                    if _wu_row:
+                        tracer.open_or_find_work_unit(
+                            repo_url=_wu_row[0],
+                            branch=_wu_row[1],
+                            base_commit=_head_commit,
+                            prompt="(continued after push)",
+                        )
+                except Exception:
+                    pass
+except Exception:
+    pass
+
+# ── Store transcript path and close task ──────────────────────────────────────
+if _transcript_path:
     try:
-        from contained.tracer import extract_session_narrative  # noqa: PLC0415
-        _narrative_data = extract_session_narrative(_transcript_path) or {}
+        tracer.set_task_transcript_path(session_id, _transcript_path)
     except Exception:
         pass
 
-_narrative_json = json.dumps(_narrative_data) if _narrative_data else None
-
 try:
-    tracer.set_task_status(session_id, "closed", summary=summary, narrative=_narrative_json)
+    tracer.set_task_status(session_id, "closed", summary=summary)
 except Exception:
     pass
 
@@ -1741,7 +1852,9 @@ USER_PROMPT_SUBMIT_HOOK = '''\
 #!/usr/bin/env python3
 """
 UserPromptSubmit hook — registers the root session in tracer.db on the first prompt,
-and audits operator shell escapes (! commands) if the SDK delivers them here.
+opens or finds the current work unit, and records a policy snapshot.
+
+Also audits operator shell escapes (! commands) if the SDK delivers them here.
 
 Claude Code docs state this hook fires "when the user submits a prompt, before Claude
 processes it" with no documented exception for ! shell escapes.  Whether ! commands
@@ -1752,6 +1865,7 @@ Session history, audit logs, and file diffs are queryable via the /contained:tra
 skill backed by the tracer MCP server.
 """
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1775,6 +1889,39 @@ if session_id and not agent_id:
             # ── Register root session on first prompt (idempotent) ────────────
             tracer.open_task(session_id, prompt)
 
+            # ── Work unit registration ────────────────────────────────────────
+            # Detect git state and associate this session with a work unit.
+            # Errors are silently swallowed so git absence never blocks the agent.
+            try:
+                _git_url = subprocess.run(
+                    ["git", "remote", "get-url", "origin"],
+                    capture_output=True, text=True, cwd=cwd, timeout=5,
+                ).stdout.strip()
+                _git_branch = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, cwd=cwd, timeout=5,
+                ).stdout.strip()
+                _git_base = subprocess.run(
+                    ["git", "rev-parse", "HEAD"],
+                    capture_output=True, text=True, cwd=cwd, timeout=5,
+                ).stdout.strip()
+                if _git_url and _git_branch and _git_base:
+                    _work_unit_id = tracer.open_or_find_work_unit(
+                        repo_url=_git_url,
+                        branch=_git_branch,
+                        base_commit=_git_base,
+                        prompt=prompt or "(no prompt)",
+                    )
+                    tracer.register_session_in_work_unit(_work_unit_id, session_id)
+                    tracer.record_policy_snapshot(
+                        work_unit_id=_work_unit_id,
+                        session_id=session_id,
+                        manifest_path=str(Path(cwd) / ".contAIned" / "manifest.yaml"),
+                        provenance_path="/run/contained/provenance.yaml",
+                    )
+            except Exception:
+                pass
+
             # ── Audit operator shell escapes (! commands) ─────────────────────
             # If the SDK delivers ! commands to this hook, prompt starts with "!".
             # Log them as OperatorShell events so they appear in the audit trail
@@ -1790,6 +1937,66 @@ if session_id and not agent_id:
                 )
         except Exception:
             pass
+
+sys.exit(0)
+'''
+
+PUSH_HOOK = '''\
+#!/usr/bin/env python3
+"""
+PostToolUse hook — detects successful git push Bash commands and logs a GitPush
+audit event so the stop hook\'s push-processing path can detect it reliably.
+
+The actual payload assembly (build_actions, assemble_payload, POST) happens in
+the stop hook (summarizer.py) which has the full session transcript available.
+
+This hook must never block execution (always exits 0).
+"""
+import json
+import sys
+
+try:
+    event = json.load(sys.stdin)
+except (json.JSONDecodeError, EOFError):
+    sys.exit(0)
+
+tool = event.get("tool_name", "")
+if tool != "Bash":
+    sys.exit(0)
+
+tool_input    = event.get("tool_input") or {}
+tool_response = event.get("tool_response") or {}
+
+cmd = (tool_input.get("command") or "").strip()
+if not ("git" in cmd and "push" in cmd and "--dry-run" not in cmd):
+    sys.exit(0)
+
+exit_code = tool_response.get("exit_code")
+if exit_code is not None and exit_code != 0:
+    sys.exit(0)
+
+session_id = event.get("session_id")
+agent_id   = event.get("agent_id")
+actor_id   = agent_id or session_id
+cwd        = event.get("cwd", ".")
+
+if not actor_id:
+    sys.exit(0)
+
+try:
+    from pathlib import Path
+    from contained.tracer import contAInedTracer  # noqa: PLC0415
+    db_path = str(Path(cwd) / ".contAIned" / "tracer.db")
+    tracer = contAInedTracer(db_path)
+    tracer.log_event(
+        session_id=actor_id,
+        tool="GitPush",
+        tool_input={"command": cmd},
+        outcome="success",
+        reason=None,
+    )
+except Exception:
+    pass
 
 sys.exit(0)
 '''

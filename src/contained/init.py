@@ -36,6 +36,7 @@ from contained.templates import (
     GITIGNORE_TEMPLATE,
     PERMISSION_REQUEST_HOOK,
     POLICY_LOADER_HOOK,
+    PUSH_HOOK,
     QA_HOOK,
     RESTRICT_BASH_HOOK,
     RESTRICT_READS_HOOK,
@@ -264,6 +265,7 @@ def _managed_files(target: Path) -> list[tuple[Path, str, bool]]:
             USER_PROMPT_SUBMIT_HOOK,
             True,
         ),
+        (target / ".contAIned" / "hooks" / "push_hook.py", PUSH_HOOK, True),
         (target / "CLAUDE.md", CLAUDE_MD, False),
     ]
 
@@ -551,6 +553,7 @@ def _build_managed_settings(manifest: dict) -> str:
         "Grep(/workspace/**)",
         "mcp__plugin_contained_tracer__*",  # contAIned built-in tracer plugin (always present)
         "Skill(contained:tracer)",  # contAIned built-in tracer skill (always present)
+        "Skill(contained:submit)",  # contAIned built-in submit skill (always present)
     ]
     for domain in allowed_domains:
         allow_rules.append(f"WebFetch(domain:{domain})")
@@ -589,6 +592,10 @@ def _build_managed_settings(manifest: dict) -> str:
                 {
                     "matcher": "Write|Edit|MultiEdit",
                     "hooks": [{"type": "command", "command": hook_cmd.format("tracer_post")}],
+                },
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": hook_cmd.format("push_hook")}],
                 },
                 {
                     "matcher": "*",

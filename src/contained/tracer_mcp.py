@@ -2,9 +2,11 @@
 """
 Minimal MCP server for the contAIned tracer database.
 
-Exposes two tools:
-  get_schema   — return table DDL so Claude knows what's queryable
-  query_tracer — run a read-only SQL query and return results
+Exposes four tools:
+  get_schema       — return table DDL so Claude knows what's queryable
+  query_tracer     — run a read-only SQL query and return results
+  list_work_units  — list work units with status, branch, and prompt
+  get_payload      — assemble and return the ATP payload for a work unit
 
 Usage:
   python3 tracer_mcp.py [--db /path/to/tracer.db]
@@ -64,6 +66,44 @@ _TOOLS = [
             "required": ["sql"],
         },
     },
+    {
+        "name": "list_work_units",
+        "description": (
+            "List contAIned work units from the tracer database. "
+            "Returns id, status, branch, base_commit, head_commit, opened_at, and prompt "
+            "for each unit, newest first. "
+            "IMPORTANT: only call this tool when the user has explicitly invoked "
+            "the contained:submit skill."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": "Filter by status: open, pushed, or abandoned. Omit for all.",
+                }
+            },
+        },
+    },
+    {
+        "name": "get_payload",
+        "description": (
+            "Assemble and return the work unit payload for a given work_unit_id. "
+            "The payload contains the full invocation and outcome records. "
+            "IMPORTANT: only call this tool when the user has explicitly invoked "
+            "the contained:submit skill."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "work_unit_id": {
+                    "type": "string",
+                    "description": "The work unit UUID (full or unambiguous prefix).",
+                }
+            },
+            "required": ["work_unit_id"],
+        },
+    },
 ]
 
 # ── Tool implementations ───────────────────────────────────────────────────────
@@ -116,6 +156,62 @@ def tool_query_tracer(sql: str) -> str:
         conn.close()
 
 
+def tool_list_work_units(status: str | None = None) -> str:
+    conn = _connect()
+    if isinstance(conn, str):
+        return conn
+    try:
+        where = f"WHERE status = '{status}'" if status else ""
+        rows = conn.execute(
+            f"""
+            SELECT id, status, branch, base_commit, head_commit, opened_at, prompt
+            FROM work_units
+            {where}
+            ORDER BY opened_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+        if not rows:
+            return "(no work units found)"
+        lines = []
+        for r in rows:
+            head = (r["head_commit"] or "")[:8] or "(open)"
+            base = (r["head_commit"] and r["base_commit"] or r["base_commit"] or "")[:8]
+            prompt_short = (r["prompt"] or "")[:60]
+            lines.append(
+                f"[{r['status']}] {r['id'][:8]}…  {r['branch']}  {base}→{head}  {prompt_short}"
+            )
+        return "\n".join(lines)
+    except sqlite3.Error as exc:
+        return f"Error: {exc}"
+    finally:
+        conn.close()
+
+
+def tool_get_payload(work_unit_id: str) -> str:
+    if not Path(DB_PATH).exists():
+        return f"Error: tracer.db not found at {DB_PATH}."
+    try:
+        from contained.tracer import contAInedTracer  # noqa: PLC0415
+
+        tracer = contAInedTracer(DB_PATH)
+        # Support unambiguous prefix matching.
+        if len(work_unit_id) < 36:
+            row = tracer.conn.execute(
+                "SELECT id FROM work_units WHERE id LIKE ?",
+                (f"{work_unit_id}%",),
+            ).fetchone()
+            if not row:
+                return f"Error: no work unit found with prefix '{work_unit_id}'."
+            work_unit_id = row[0]
+        payload = tracer.assemble_payload(work_unit_id)
+        return json.dumps(payload, indent=2, ensure_ascii=False)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    except Exception as exc:
+        return f"Error assembling payload: {exc}"
+
+
 # ── JSON-RPC dispatch ──────────────────────────────────────────────────────────
 
 
@@ -152,6 +248,10 @@ def _handle(req: dict) -> dict | None:
             text = tool_get_schema()
         elif name == "query_tracer":
             text = tool_query_tracer(arguments.get("sql", ""))
+        elif name == "list_work_units":
+            text = tool_list_work_units(arguments.get("status"))
+        elif name == "get_payload":
+            text = tool_get_payload(arguments.get("work_unit_id", ""))
         else:
             return err(-32601, f"Unknown tool: {name}")
         return ok({"content": [{"type": "text", "text": text}]})

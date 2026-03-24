@@ -1339,32 +1339,6 @@ class TestTaskLifecycleEdgeCases:
 
 
 class TestNarrative:
-    def test_set_task_status_stores_narrative(self, tracer: contAInedTracer) -> None:
-        """narrative is persisted when passed to set_task_status."""
-        tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "closed", narrative="I fixed the bug.")
-        row = tracer.conn.execute("SELECT narrative FROM tasks WHERE session_id = 'S1'").fetchone()
-        assert row[0] == "I fixed the bug."
-
-    def test_set_task_status_narrative_none_preserves_existing(
-        self, tracer: contAInedTracer
-    ) -> None:
-        """Passing narrative=None must NOT overwrite an existing value (COALESCE)."""
-        tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "closed", narrative="First narrative.")
-        # Second call without narrative — existing value must survive.
-        tracer.set_task_status("S1", "closed")
-        row = tracer.conn.execute("SELECT narrative FROM tasks WHERE session_id = 'S1'").fetchone()
-        assert row[0] == "First narrative."
-
-    def test_set_task_status_narrative_can_be_overwritten(self, tracer: contAInedTracer) -> None:
-        """Passing an explicit narrative overwrites the previous value."""
-        tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "closed", narrative="Draft.")
-        tracer.set_task_status("S1", "closed", narrative="Final.")
-        row = tracer.conn.execute("SELECT narrative FROM tasks WHERE session_id = 'S1'").fetchone()
-        assert row[0] == "Final."
-
     def test_summary_preserved_on_second_close(self, tracer: contAInedTracer) -> None:
         """Second set_task_status without summary must not clear an existing one."""
         tracer.open_task("S1", "task")
@@ -1374,37 +1348,16 @@ class TestNarrative:
         row = tracer.conn.execute("SELECT summary FROM tasks WHERE session_id = 'S1'").fetchone()
         assert json.loads(row[0]) == summary
 
-    def test_narrative_queryable_on_closed_task(self, tracer: contAInedTracer) -> None:
-        """Narrative stored at close is retrievable via direct SQL (used by contained:tracer)."""
-        tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "closed", narrative="Done everything.")
-        row = tracer.conn.execute(
-            "SELECT narrative FROM tasks WHERE session_id = 'S1' AND status = 'closed'"
-        ).fetchone()
-        assert row is not None
-        assert row[0] == "Done everything."
-
-    def test_narrative_none_when_absent(self, tracer: contAInedTracer) -> None:
-        """narrative is NULL when not set at close."""
-        tracer.open_task("S1", "task")
-        tracer.set_task_status("S1", "closed")
-        row = tracer.conn.execute("SELECT narrative FROM tasks WHERE session_id = 'S1'").fetchone()
-        assert row[0] is None
-
-    def test_migrate_adds_column_to_existing_db(self, db_path: str) -> None:
+    def test_migrate_is_idempotent(self, db_path: str) -> None:
         """_migrate is idempotent — running it twice on the same DB does not raise."""
         t = contAInedTracer(db_path)
-        # Calling _migrate again manually must not raise even though the column exists.
         t._migrate()
         t._migrate()
-        # Column must be present.
-        cols = [row[1] for row in t.conn.execute("PRAGMA table_info(tasks)").fetchall()]
-        assert "narrative" in cols
 
-    def test_narrative_column_present_in_schema(self, tracer: contAInedTracer) -> None:
-        """tasks table must have a narrative column after init."""
+    def test_transcript_path_column_present_in_schema(self, tracer: contAInedTracer) -> None:
+        """tasks table must have a transcript_path column after init."""
         cols = [row[1] for row in tracer.conn.execute("PRAGMA table_info(tasks)").fetchall()]
-        assert "narrative" in cols
+        assert "transcript_path" in cols
 
 
 # ---------------------------------------------------------------------------

@@ -5,6 +5,9 @@ Implements the core DB and write-capture API described in docs/contAIned-trace.m
 
 Phase 1: contAInedTracer class with full schema, blob store, baselines, snapshots,
 audit events, task lifecycle, tree diffing, and GC.
+
+Phase 2: Work unit tracking, policy snapshots, actions timeline, and payload
+assembly for ATP proof submission at git push time.
 """
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import json
 import sqlite3
 import threading as _threading
 import time
+import uuid
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,7 +48,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at          INTEGER NOT NULL,
     ended_at            INTEGER,
     summary             TEXT,   -- JSON: per-file diff summary, populated at close
-    narrative           TEXT    -- agent's final human-readable summary, set on close
+    transcript_path     TEXT    -- absolute path to the Claude Code JSONL transcript
 );
 
 CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_session_id);
@@ -69,7 +73,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
     file_path   TEXT    NOT NULL,
     blob_hash   TEXT    NOT NULL REFERENCES blobs(hash),
     written_at  INTEGER NOT NULL,   -- Unix timestamp (ms)
-    metadata    TEXT                -- Optional JSON: pass number, notes, etc.
+    metadata    TEXT,               -- Optional JSON: pass number, notes, etc.
+    diff_hash   TEXT    REFERENCES blobs(hash)  -- unified diff, NULL for new/binary
 );
 
 CREATE INDEX IF NOT EXISTS idx_snapshots_file
@@ -93,6 +98,79 @@ CREATE TABLE IF NOT EXISTS audit_events (
 
 CREATE INDEX IF NOT EXISTS idx_audit_session ON audit_events(session_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_tool    ON audit_events(tool, id DESC);
+
+-- Work unit registry.
+-- A work unit is the set of changes on a branch since the previous push.
+-- Keyed on (repo_url, branch, base_commit). Closes when git push fires.
+CREATE TABLE IF NOT EXISTS work_units (
+    id           TEXT    PRIMARY KEY,   -- UUID
+    repo_url     TEXT    NOT NULL,
+    branch       TEXT    NOT NULL,
+    base_commit  TEXT    NOT NULL,      -- HEAD when unit opened (last pushed commit)
+    head_commit  TEXT,                  -- populated at push (NULL = still open)
+    opened_at    INTEGER NOT NULL,      -- Unix ms
+    pushed_at    INTEGER,               -- Unix ms (set when payload is POSTed)
+    status       TEXT    NOT NULL DEFAULT 'open',  -- open | pushed | abandoned
+    prompt       TEXT    NOT NULL,      -- first user message since base_commit
+    narrative    TEXT,                  -- assistant summary at push time
+    qa_result    TEXT,                  -- JSON: {checks, passed} for result.qa
+    UNIQUE (repo_url, branch, base_commit)
+);
+
+-- Maps sessions to their work unit (many sessions may contribute to one unit).
+CREATE TABLE IF NOT EXISTS work_unit_sessions (
+    work_unit_id  TEXT  NOT NULL REFERENCES work_units(id),
+    session_id    TEXT  NOT NULL REFERENCES tasks(session_id),
+    PRIMARY KEY (work_unit_id, session_id)
+);
+
+-- Policy snapshot per session start within a work unit.
+-- One row per session where the manifest differed from the previous session.
+CREATE TABLE IF NOT EXISTS policy_snapshots (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_unit_id   TEXT    NOT NULL REFERENCES work_units(id),
+    session_id     TEXT    NOT NULL REFERENCES tasks(session_id),
+    manifest_hash  TEXT    NOT NULL,
+    manifest_text  TEXT    NOT NULL,   -- full YAML of /etc/contained/manifest.yaml
+    provenance     TEXT    NOT NULL,   -- provenance snapshot at container startup
+    captured_at    INTEGER NOT NULL    -- Unix ms (taken immediately at session open)
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_snapshots_unit ON policy_snapshots(work_unit_id);
+
+-- Proof-ready unified timeline. Populated at push time by build_actions().
+-- Directly maps to outcome.result.actions[] in the ATP payload.
+CREATE TABLE IF NOT EXISTS actions (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_unit_id       TEXT    NOT NULL REFERENCES work_units(id),
+    session_id         TEXT    NOT NULL REFERENCES tasks(session_id),
+    seq                INTEGER NOT NULL,   -- global order within the work unit
+    ts                 TEXT,               -- ISO-8601
+    action_type        TEXT    NOT NULL,
+    -- 'user_message' | 'assistant_response' | 'tool_call' | 'skill_use'
+
+    -- tool_call / skill_use fields
+    tool_name          TEXT,
+    tool_input         TEXT,               -- JSON
+    tool_outcome       TEXT,               -- success | denied | permission_requested
+    tool_reason        TEXT,
+    approved_exception INTEGER,            -- 1 if operator approved out-of-policy
+    exception_detail   TEXT,
+    output_hash        TEXT    REFERENCES blobs(hash),
+
+    -- file write enrichment (subset of tool_call)
+    file_path          TEXT,
+    before_hash        TEXT,               -- NULL for new files
+    after_hash         TEXT,
+
+    -- message fields
+    content_hash       TEXT    REFERENCES blobs(hash),
+    content_short      TEXT,               -- first 500 chars
+
+    UNIQUE (work_unit_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_actions_session ON actions(session_id);
 """
 
 # Tools whose content is fully captured in the blobs/snapshots tables.
@@ -434,9 +512,10 @@ class contAInedTracer:
         column.
         """
         migrations = [
-            "ALTER TABLE tasks ADD COLUMN narrative TEXT",
             "ALTER TABLE audit_events ADD COLUMN approved_exception INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE audit_events ADD COLUMN exception_detail TEXT",
+            "ALTER TABLE snapshots ADD COLUMN diff_hash TEXT REFERENCES blobs(hash)",
+            "ALTER TABLE tasks ADD COLUMN transcript_path TEXT",
         ]
         for sql in migrations:
             try:
@@ -535,17 +614,20 @@ class contAInedTracer:
 
         The caller (tracer_post.py) reads the file from disk after the write
         so that the stored blob always reflects what is actually on disk.
+        Computes a unified diff from the baseline blob and caches it as
+        ``snapshots.diff_hash`` for fast payload assembly.
         Returns the blob hash.
         """
         blob_hash = self._store_blob(content)
         now_ms = int(time.time() * 1000)
+        diff_hash = self._compute_snapshot_diff(session_id, file_path, blob_hash)
 
         with self.conn:
             self.conn.execute(
                 """
                 INSERT INTO snapshots
-                    (session_id, file_path, blob_hash, written_at, metadata)
-                VALUES (?, ?, ?, ?, ?)
+                    (session_id, file_path, blob_hash, written_at, metadata, diff_hash)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -553,10 +635,63 @@ class contAInedTracer:
                     blob_hash,
                     now_ms,
                     json.dumps(metadata) if metadata else None,
+                    diff_hash,
                 ),
             )
 
         return blob_hash
+
+    def _compute_snapshot_diff(
+        self,
+        session_id: str,
+        file_path: str,
+        new_blob_hash: str,
+    ) -> Optional[str]:
+        """
+        Compute a unified diff from the baseline to the new blob for *file_path*
+        and return the blob hash of the stored diff text.
+
+        Uses the baseline captured for *session_id* (not the full tree) to keep
+        this fast at write time.  Returns None if no baseline exists (possible
+        when the baseline hook hasn't fired yet) or if the content is binary.
+        """
+        try:
+            bl = self.conn.execute(
+                "SELECT pre_hash FROM baselines WHERE session_id = ? AND file_path = ?",
+                (session_id, file_path),
+            ).fetchone()
+            if bl is None:
+                return None  # baseline not yet captured
+
+            pre_hash = bl[0]
+            new_content = self._retrieve_blob(new_blob_hash)
+
+            # Heuristic binary check: NUL byte in first 8 KB
+            if b"\x00" in new_content[:8192]:
+                return None
+
+            after_lines = new_content.decode("utf-8", errors="replace").splitlines()
+
+            if pre_hash is None:
+                before_lines: list[str] = []
+            else:
+                old_content = self._retrieve_blob(pre_hash)
+                before_lines = old_content.decode("utf-8", errors="replace").splitlines()
+
+            diff = "\n".join(
+                difflib.unified_diff(
+                    before_lines,
+                    after_lines,
+                    fromfile=f"a/{file_path}",
+                    tofile=f"b/{file_path}",
+                    lineterm="",
+                )
+            )
+            if not diff:
+                return None
+            return self._store_blob(diff.encode("utf-8"))
+        except Exception:
+            return None
 
     # ------------------------------------------------------------------
     # Audit event logging  (called from audit.py)
@@ -695,17 +830,15 @@ class contAInedTracer:
         session_id: str,
         status: str,
         summary: Optional[dict] = None,
-        narrative: Optional[str] = None,
     ) -> None:
         """
         Transition *session_id*'s task to *status*.
 
         Optionally attaches a diff summary (JSON-serialisable dict) to
-        ``tasks.summary`` and a human-readable narrative to ``tasks.narrative``.
-        Sets ``ended_at`` to now.
+        ``tasks.summary``.  Sets ``ended_at`` to now.
 
-        ``COALESCE(?, col)`` semantics: passing ``None`` for *summary* or
-        *narrative* preserves whatever value is already stored in the DB.
+        ``COALESCE(?, col)`` semantics: passing ``None`` for *summary*
+        preserves whatever value is already stored in the DB.
         Pass an explicit value to overwrite.
         """
         now_ms = int(time.time() * 1000)
@@ -713,19 +846,586 @@ class contAInedTracer:
             self.conn.execute(
                 """
                 UPDATE tasks
-                SET status    = ?,
-                    ended_at  = ?,
-                    summary   = COALESCE(?, summary),
-                    narrative = COALESCE(?, narrative)
+                SET status   = ?,
+                    ended_at = ?,
+                    summary  = COALESCE(?, summary)
                 WHERE session_id = ?
                 """,
                 (
                     status,
                     now_ms,
                     json.dumps(summary) if summary is not None else None,
-                    narrative,
                     session_id,
                 ),
+            )
+
+    # ------------------------------------------------------------------
+    # Work unit lifecycle
+    # ------------------------------------------------------------------
+
+    def open_or_find_work_unit(
+        self,
+        repo_url: str,
+        branch: str,
+        base_commit: str,
+        prompt: str,
+    ) -> str:
+        """
+        Return the id of the open work unit for *(repo_url, branch, base_commit)*,
+        creating it if it does not yet exist.
+
+        The ``prompt`` is stored only on creation — if the unit already exists
+        (resumed session), the original prompt is preserved.
+        """
+        now_ms = int(time.time() * 1000)
+        unit_id = str(uuid.uuid4())
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO work_units
+                    (id, repo_url, branch, base_commit, opened_at, status, prompt)
+                VALUES (?, ?, ?, ?, ?, 'open', ?)
+                """,
+                (unit_id, repo_url, branch, base_commit, now_ms, prompt),
+            )
+            # If the unit already existed with a blank prompt (written at session
+            # startup before the first user message was known), fill it in now.
+            if prompt:
+                self.conn.execute(
+                    """
+                    UPDATE work_units SET prompt = ?
+                    WHERE repo_url = ? AND branch = ? AND base_commit = ?
+                      AND (prompt IS NULL OR prompt = '')
+                    """,
+                    (prompt, repo_url, branch, base_commit),
+                )
+        row = self.conn.execute(
+            "SELECT id FROM work_units WHERE repo_url = ? AND branch = ? AND base_commit = ?",
+            (repo_url, branch, base_commit),
+        ).fetchone()
+        return row[0]
+
+    def register_session_in_work_unit(
+        self,
+        work_unit_id: str,
+        session_id: str,
+    ) -> None:
+        """Link *session_id* to *work_unit_id* (idempotent)."""
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR IGNORE INTO work_unit_sessions (work_unit_id, session_id) VALUES (?, ?)",
+                (work_unit_id, session_id),
+            )
+
+    def record_policy_snapshot(
+        self,
+        work_unit_id: str,
+        session_id: str,
+        manifest_path: str,
+        provenance_path: str,
+    ) -> None:
+        """
+        Capture the current manifest and provenance snapshot for this session.
+
+        Reads the manifest YAML from *manifest_path* and the provenance YAML
+        from *provenance_path*.  If either file is missing an empty string is
+        stored so the row is always written.
+        """
+        try:
+            manifest_text = Path(manifest_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            manifest_text = ""
+        manifest_hash = hashlib.sha256(manifest_text.encode()).hexdigest()
+
+        try:
+            provenance_text = Path(provenance_path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            provenance_text = ""
+
+        now_ms = int(time.time() * 1000)
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO policy_snapshots
+                    (work_unit_id, session_id, manifest_hash,
+                     manifest_text, provenance, captured_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (work_unit_id, session_id, manifest_hash, manifest_text, provenance_text, now_ms),
+            )
+
+    def record_qa_result(self, work_unit_id: str, result_dict: dict) -> None:
+        """Store *result_dict* as the QA result for *work_unit_id*."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE work_units SET qa_result = ? WHERE id = ?",
+                (json.dumps(result_dict), work_unit_id),
+            )
+
+    def record_narrative(self, work_unit_id: str, narrative: str) -> None:
+        """Store *narrative* in ``work_units.narrative`` for *work_unit_id*."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE work_units SET narrative = ? WHERE id = ?",
+                (narrative, work_unit_id),
+            )
+
+    def get_active_work_unit(self, session_id: str) -> Optional[str]:
+        """
+        Return the work_unit_id of the open work unit associated with
+        *session_id*, or None if not found.
+        """
+        row = self.conn.execute(
+            """
+            SELECT wu.id FROM work_units wu
+            JOIN work_unit_sessions wus ON wus.work_unit_id = wu.id
+            WHERE wus.session_id = ? AND wu.status = 'open'
+            ORDER BY wu.opened_at DESC LIMIT 1
+            """,
+            (session_id,),
+        ).fetchone()
+        return row[0] if row else None
+
+    def complete_work_unit(self, work_unit_id: str, head_commit: str) -> None:
+        """Mark *work_unit_id* as pushed, recording *head_commit*.  Sets ``pushed_at`` to now."""
+        now_ms = int(time.time() * 1000)
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE work_units
+                SET status = 'pushed', pushed_at = ?, head_commit = ?
+                WHERE id = ?
+                """,
+                (now_ms, head_commit, work_unit_id),
+            )
+
+    # ------------------------------------------------------------------
+    # Actions timeline builder
+    # ------------------------------------------------------------------
+
+    def build_actions(
+        self,
+        work_unit_id: str,
+        transcript_paths: list[str],
+    ) -> None:
+        """
+        Populate the ``actions`` table for *work_unit_id* from the session
+        transcripts and ``audit_events``.
+
+        Parses each JSONL transcript in *transcript_paths* in order, creates
+        action rows for user messages, assistant responses, and tool calls,
+        then merges ``audit_events`` for policy outcomes (denials, approved
+        exceptions) and enriches file-change actions with before/after blob
+        hashes from ``snapshots`` and ``baselines``.
+
+        Rows are inserted with ``INSERT OR IGNORE`` so the method is safe to
+        call multiple times (e.g. after a retry).
+        """
+        # ── Collect session ids for this work unit ─────────────────────
+        session_ids: list[str] = [
+            r[0]
+            for r in self.conn.execute(
+                "SELECT session_id FROM work_unit_sessions WHERE work_unit_id = ?",
+                (work_unit_id,),
+            ).fetchall()
+        ]
+        default_session = session_ids[0] if session_ids else "unknown"
+
+        # ── Build audit event lookup (session_id, tool) → [events] ─────
+        audit_lookup: dict[tuple, list[dict]] = {}
+        if session_ids:
+            ph = ",".join("?" * len(session_ids))
+            for row in self.conn.execute(
+                f"""
+                SELECT ts, session_id, tool, input, outcome, reason,
+                       approved_exception, exception_detail
+                FROM audit_events
+                WHERE session_id IN ({ph})
+                ORDER BY id
+                """,
+                session_ids,
+            ).fetchall():
+                key = (row[1], row[2])
+                audit_lookup.setdefault(key, []).append(
+                    {
+                        "ts": row[0],
+                        "outcome": row[4],
+                        "reason": row[5],
+                        "approved_exception": row[6],
+                        "exception_detail": row[7],
+                    }
+                )
+
+        # ── Build baseline lookup (file_path → pre_hash) ───────────────
+        baseline_lookup: dict[str, Optional[str]] = {}
+        if session_ids:
+            ph = ",".join("?" * len(session_ids))
+            for row in self.conn.execute(
+                f"""
+                SELECT file_path, pre_hash FROM baselines
+                WHERE session_id IN ({ph})
+                ORDER BY captured_at ASC
+                """,
+                session_ids,
+            ).fetchall():
+                if row[0] not in baseline_lookup:
+                    baseline_lookup[row[0]] = row[1]
+
+        # ── Build snapshot lookup (file_path → [blob_hash]) ────────────
+        snapshot_lookup: dict[str, list[str]] = {}
+        if session_ids:
+            ph = ",".join("?" * len(session_ids))
+            for row in self.conn.execute(
+                f"""
+                SELECT file_path, blob_hash FROM snapshots
+                WHERE session_id IN ({ph})
+                ORDER BY written_at, id
+                """,
+                session_ids,
+            ).fetchall():
+                snapshot_lookup.setdefault(row[0], []).append(row[1])
+
+        # ── Parse transcripts ───────────────────────────────────────────
+        actions: list[dict] = []
+        seq = 0
+        audit_use_counts: dict[tuple, int] = {}
+
+        for transcript_path in transcript_paths:
+            if not transcript_path:
+                continue
+            p = Path(transcript_path)
+            if not p.exists():
+                continue
+            try:
+                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+
+            for raw_line in lines:
+                raw_line = raw_line.strip()
+                if not raw_line:
+                    continue
+                try:
+                    entry = json.loads(raw_line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+
+                entry_type = entry.get("type")
+                entry_ts = entry.get("timestamp") or entry.get("ts")
+                # sessionId in transcript uses camelCase
+                cur_session = entry.get("sessionId") or entry.get("session_id") or default_session
+
+                if entry_type == "user":
+                    message = entry.get("message") or {}
+                    content = message.get("content") or []
+                    text = ""
+                    if isinstance(content, str):
+                        text = content
+                    elif isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = (block.get("text") or "").strip()
+                                break
+                    if text.strip():
+                        seq += 1
+                        actions.append(
+                            {
+                                "work_unit_id": work_unit_id,
+                                "session_id": cur_session,
+                                "seq": seq,
+                                "ts": entry_ts,
+                                "action_type": "user_message",
+                                "content_short": text[:500],
+                            }
+                        )
+
+                elif entry_type == "assistant":
+                    if entry.get("isMeta") or entry.get("isSidechain"):
+                        continue
+                    message = entry.get("message") or {}
+                    content = message.get("content") or []
+                    if not isinstance(content, list):
+                        continue
+
+                    text_parts: list[str] = []
+                    tool_calls: list[dict] = []
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type")
+                        if btype == "text":
+                            t = (block.get("text") or "").strip()
+                            if t:
+                                text_parts.append(t)
+                        elif btype == "tool_use":
+                            tool_calls.append(block)
+
+                    if text_parts:
+                        combined = "\n".join(text_parts)
+                        seq += 1
+                        actions.append(
+                            {
+                                "work_unit_id": work_unit_id,
+                                "session_id": cur_session,
+                                "seq": seq,
+                                "ts": entry_ts,
+                                "action_type": "assistant_response",
+                                "content_short": combined[:500],
+                            }
+                        )
+
+                    for tool_block in tool_calls:
+                        tool_name = tool_block.get("name") or ""
+                        tool_input = tool_block.get("input") or {}
+
+                        audit_key = (cur_session, tool_name)
+                        audit_events_list = audit_lookup.get(audit_key, [])
+                        use_idx = audit_use_counts.get(audit_key, 0)
+                        audit_ev = (
+                            audit_events_list[use_idx] if use_idx < len(audit_events_list) else None
+                        )
+                        if audit_ev:
+                            audit_use_counts[audit_key] = use_idx + 1
+
+                        outcome = audit_ev["outcome"] if audit_ev else "success"
+                        reason = audit_ev["reason"] if audit_ev else None
+                        approved_exception = audit_ev["approved_exception"] if audit_ev else 0
+                        exception_detail = audit_ev["exception_detail"] if audit_ev else None
+
+                        seq += 1
+                        action: dict = {
+                            "work_unit_id": work_unit_id,
+                            "session_id": cur_session,
+                            "seq": seq,
+                            "ts": entry_ts,
+                            "action_type": "skill_use" if tool_name == "Skill" else "tool_call",
+                            "tool_name": tool_name,
+                            "tool_input": json.dumps(tool_input),
+                            "tool_outcome": outcome,
+                            "tool_reason": reason,
+                            "approved_exception": approved_exception,
+                            "exception_detail": exception_detail,
+                        }
+
+                        # Enrich write tool actions with file hashes
+                        if tool_name in _WRITE_TOOLS:
+                            fp = tool_input.get("file_path")
+                            if tool_name == "MultiEdit":
+                                edits = tool_input.get("edits") or []
+                                fps = list(
+                                    {e.get("file_path") for e in edits if e.get("file_path")}
+                                )
+                                fp = fps[0] if fps else None
+                            if fp:
+                                action["file_path"] = fp
+                                action["before_hash"] = baseline_lookup.get(fp)
+                                snaps = snapshot_lookup.get(fp, [])
+                                if snaps:
+                                    action["after_hash"] = snaps[-1]
+
+                        actions.append(action)
+
+        # ── Write actions to DB ─────────────────────────────────────────
+        if actions:
+            with self.conn:
+                for a in actions:
+                    self.conn.execute(
+                        """
+                        INSERT OR IGNORE INTO actions
+                            (work_unit_id, session_id, seq, ts, action_type,
+                             tool_name, tool_input, tool_outcome, tool_reason,
+                             approved_exception, exception_detail,
+                             file_path, before_hash, after_hash,
+                             content_short)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            a["work_unit_id"],
+                            a["session_id"],
+                            a["seq"],
+                            a.get("ts"),
+                            a["action_type"],
+                            a.get("tool_name"),
+                            a.get("tool_input"),
+                            a.get("tool_outcome"),
+                            a.get("tool_reason"),
+                            a.get("approved_exception"),
+                            a.get("exception_detail"),
+                            a.get("file_path"),
+                            a.get("before_hash"),
+                            a.get("after_hash"),
+                            a.get("content_short"),
+                        ),
+                    )
+
+    # ------------------------------------------------------------------
+    # Payload assembly
+    # ------------------------------------------------------------------
+
+    def assemble_payload(self, work_unit_id: str) -> dict:
+        """
+        Assemble and return the ``{invocation, outcome}`` ATP payload for
+        *work_unit_id*.
+
+        Reads from ``work_units``, ``policy_snapshots``, ``snapshots``,
+        ``baselines``, ``blobs``, and ``actions``.  Diff text is read from the
+        cached ``blobs`` entry referenced by ``snapshots.diff_hash``; no
+        filesystem access is required.
+        """
+        wu = self.conn.execute(
+            """
+            SELECT id, repo_url, branch, base_commit, head_commit,
+                   prompt, narrative, qa_result, pushed_at
+            FROM work_units WHERE id = ?
+            """,
+            (work_unit_id,),
+        ).fetchone()
+        if wu is None:
+            raise ValueError(f"Work unit not found: {work_unit_id}")
+
+        policy_snaps = self.conn.execute(
+            """
+            SELECT session_id, manifest_hash, manifest_text, provenance, captured_at
+            FROM policy_snapshots
+            WHERE work_unit_id = ?
+            ORDER BY captured_at
+            """,
+            (work_unit_id,),
+        ).fetchall()
+
+        diffs_rows = self.conn.execute(
+            """
+            SELECT s.file_path,
+                   bl.pre_hash      AS before_hash,
+                   s.blob_hash      AS after_hash,
+                   b_diff.content   AS diff_compressed
+            FROM (
+                SELECT file_path, MAX(s2.id) AS last_id
+                FROM   snapshots s2
+                JOIN   work_unit_sessions wus ON wus.session_id = s2.session_id
+                WHERE  wus.work_unit_id = ?
+                GROUP  BY s2.file_path
+            ) latest
+            JOIN   snapshots s    ON s.id = latest.last_id
+            LEFT JOIN baselines bl   ON bl.session_id = s.session_id
+                                    AND bl.file_path  = s.file_path
+            LEFT JOIN blobs b_diff   ON b_diff.hash = s.diff_hash
+            """,
+            (work_unit_id,),
+        ).fetchall()
+
+        action_rows = self.conn.execute(
+            """
+            SELECT seq, ts, session_id, action_type,
+                   tool_name, tool_input, tool_outcome, tool_reason,
+                   approved_exception, exception_detail, output_hash,
+                   file_path, before_hash, after_hash,
+                   content_short, content_hash
+            FROM actions
+            WHERE work_unit_id = ?
+            ORDER BY seq
+            """,
+            (work_unit_id,),
+        ).fetchall()
+
+        qa_result = json.loads(wu[7]) if wu[7] else None
+        qa_passed = bool(qa_result and qa_result.get("passed"))
+
+        diffs = []
+        for row in diffs_rows:
+            diff_text = None
+            if row[3]:
+                try:
+                    diff_text = zlib.decompress(row[3]).decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+            diffs.append(
+                {
+                    "file_path": row[0],
+                    "before_hash": row[1],
+                    "after_hash": row[2],
+                    "diff": diff_text,
+                }
+            )
+
+        formatted_actions = []
+        for row in action_rows:
+            a: dict = {
+                "seq": row[0],
+                "ts": row[1],
+                "type": row[3],
+            }
+            if row[4]:  # tool_name
+                a["tool"] = row[4]
+            if row[5]:
+                try:
+                    a["input"] = json.loads(row[5])
+                except Exception:
+                    a["input"] = row[5]
+            if row[6]:
+                a["outcome"] = row[6]
+            if row[7]:
+                a["reason"] = row[7]
+            if row[8]:
+                a["approved_exception"] = bool(row[8])
+            if row[9]:
+                a["exception_detail"] = row[9]
+            if row[11]:
+                a["file_path"] = row[11]
+            if row[12]:
+                a["before_hash"] = row[12]
+            if row[13]:
+                a["after_hash"] = row[13]
+            if row[14]:
+                a["content"] = row[14]
+            formatted_actions.append(a)
+
+        return {
+            "invocation": {
+                "method": "query",
+                "trigger": {
+                    "source": "user_api",
+                    "requester_system_uri": None,
+                    "authenticated": True,
+                },
+                "input": {
+                    "prompt": wu[5],
+                    "policy_snapshots": [
+                        {
+                            "session_id": ps[0],
+                            "manifest_hash": ps[1],
+                            "manifest_text": ps[2],
+                            "provenance": ps[3],
+                            "captured_at": ps[4],
+                        }
+                        for ps in policy_snaps
+                    ],
+                    "git": {
+                        "repo_url": wu[1],
+                        "branch": wu[2],
+                        "base_commit": wu[3],
+                        "head_commit": wu[4],
+                    },
+                },
+            },
+            "outcome": {
+                "result": {
+                    "response": wu[6],
+                    "diffs": diffs,
+                    "actions": formatted_actions,
+                    "qa": qa_result,
+                },
+                "status": "success" if qa_passed else "failed",
+                "error": None,
+            },
+        }
+
+    def set_task_transcript_path(self, session_id: str, transcript_path: str) -> None:
+        """Store *transcript_path* on the task row for *session_id*."""
+        with self.conn:
+            self.conn.execute(
+                "UPDATE tasks SET transcript_path = ? WHERE session_id = ?",
+                (transcript_path, session_id),
             )
 
     def get_child_sessions(self, session_id: str) -> list[str]:

@@ -165,6 +165,45 @@ def start_repl(root: Path) -> None:
     if model:
         cmd += ["--model", model]
 
+    # ── Pre-register work unit ────────────────────────────────────────────────
+    # Open or find the work unit for the current branch before Claude starts,
+    # so the unit exists before any tool call can occur.  session_id is not yet
+    # known here; register_session_in_work_unit and record_policy_snapshot are
+    # called in the UserPromptSubmit hook once the session is established.
+    _tracer = _get_tracer(root)
+    if _tracer is not None:
+        try:
+            _git_url = subprocess.run(
+                ["git", "remote", "get-url", "origin"],
+                capture_output=True,
+                text=True,
+                cwd=str(root),
+                timeout=5,
+            ).stdout.strip()
+            _git_branch = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=str(root),
+                timeout=5,
+            ).stdout.strip()
+            _git_base = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=str(root),
+                timeout=5,
+            ).stdout.strip()
+            if _git_branch and _git_base:
+                _tracer.open_or_find_work_unit(
+                    repo_url=_git_url or "local",
+                    branch=_git_branch,
+                    base_commit=_git_base,
+                    prompt="",
+                )
+        except Exception:
+            pass
+
     console.print("[dim]Claude Code is starting up — input may appear delayed.[/dim]\n")
 
     try:
