@@ -136,9 +136,7 @@ class DockerRunner:
         Absolute path to the workspace root (bound to ``/workspace`` inside
         the container).
     policy:
-        The ``policy`` dict from ``.contAIned/manifest.yaml``.  Used to
-        configure the network proxy when ``policy.network.enabled``
-        is true.
+        The ``policy`` dict from ``.contAIned/manifest.yaml``.
     """
 
     def __init__(
@@ -236,8 +234,7 @@ class DockerRunner:
         and block until the session ends.  Exits with the container's exit code.
 
         Network isolation is handled by the Claude Code sandbox
-        (``sandbox.network.allowedDomains`` in managed-settings.json), not by
-        a sidecar proxy.
+        (``sandbox.network.allowedDomains`` in managed-settings.json).
 
         Provenance snapshot
         -------------------

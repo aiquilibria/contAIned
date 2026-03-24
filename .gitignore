@@ -18,6 +18,7 @@ build/
 .venv/
 .env
 .coverage
+coverage.xml
 
 # ── Node ──────────────────────────────────────────────────────────────────────
 node_modules/

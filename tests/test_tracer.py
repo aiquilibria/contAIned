@@ -571,6 +571,27 @@ class TestDiffTask:
         diff = tracer.diff_task("S1", "same.py")
         assert diff == ""
 
+    def test_binary_file_skips_diff(self, tracer: contAInedTracer) -> None:
+        """Binary files (with NUL bytes) produce no diff_hash in the snapshot."""
+        import time
+
+        binary_content = b"binary\x00data\xff"
+        tracer.open_task("S1", "task")
+        now_ms = int(time.time() * 1000)
+        pre_hash = tracer._store_blob(b"old text\n")
+        tracer.conn.execute(
+            "INSERT OR IGNORE INTO baselines (session_id, file_path, pre_hash, captured_at)"
+            " VALUES ('S1', 'image.bin', ?, ?)",
+            (pre_hash, now_ms),
+        )
+        tracer.conn.commit()
+        tracer.track_write("S1", "image.bin", binary_content)
+        row = tracer.conn.execute(
+            "SELECT diff_hash FROM snapshots WHERE session_id='S1' AND file_path='image.bin'"
+        ).fetchone()
+        assert row is not None
+        assert row[0] is None  # binary content → no diff stored
+
     def test_no_baseline_returns_empty(self, tracer: contAInedTracer) -> None:
         tracer.open_task("S1", "task")
         diff = tracer.diff_task("S1", "untouched.py")
@@ -1480,6 +1501,18 @@ class TestExtractNarrativeFromTranscript:
         transcript.write_text("\n\n" + json.dumps(entry) + "\n\n")
         assert extract_narrative_from_transcript(str(transcript)) == "Hi."
 
+    def test_skips_invalid_json_lines(self, tmp_path: Path) -> None:
+        """Invalid JSON lines in the transcript are skipped without error."""
+        from contained.tracer import extract_narrative_from_transcript
+
+        transcript = tmp_path / "session.jsonl"
+        entry = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Hello."}]},
+        }
+        transcript.write_text("not valid json\n{broken}\n" + json.dumps(entry))
+        assert extract_narrative_from_transcript(str(transcript)) == "Hello."
+
 
 # ---------------------------------------------------------------------------
 # Unit — GC edge cases
@@ -1642,6 +1675,45 @@ class TestExtractSessionNarrative:
             "reasoning_steps",
             "closings",
         }
+
+    def test_skips_invalid_json_lines(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_session_narrative
+
+        good = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Done."}]},
+        }
+        p = tmp_path / "s.jsonl"
+        p.write_text("not json\n{broken}\n" + json.dumps(good))
+        result = extract_session_narrative(str(p))
+        assert "Done." in result.get("closings", [])
+
+    def test_skips_non_dict_content_blocks(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_session_narrative
+
+        entry = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    "just a string",  # non-dict block
+                    {"type": "text", "text": "Final."},
+                ]
+            },
+        }
+        path = self._write(tmp_path, [entry])
+        result = extract_session_narrative(path)
+        assert "Final." in result.get("closings", [])
+
+    def test_non_list_content_skipped(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_session_narrative
+
+        entry = {
+            "type": "assistant",
+            "message": {"content": "not a list"},
+        }
+        path = self._write(tmp_path, [entry])
+        result = extract_session_narrative(path)
+        assert result == {}
 
 
 # ---------------------------------------------------------------------------
@@ -2011,3 +2083,43 @@ class TestExtractToolOutputs:
         path = self._write(tmp_path, entries)
         results = extract_tool_outputs_from_transcript(path)
         assert results[0]["exit_code"] is None
+
+    def test_invalid_json_lines_skipped(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        transcript = tmp_path / "session.jsonl"
+        entry = self._tool_use("t1", "Read", {"file_path": "a.py"})
+        result = self._tool_result("t1", "content")
+        transcript.write_text(
+            "not valid json\n" + json.dumps(entry) + "\n{broken\n" + json.dumps(result)
+        )
+        results = extract_tool_outputs_from_transcript(str(transcript))
+        assert len(results) == 1
+
+    def test_non_dict_content_blocks_skipped(self, tmp_path: Path) -> None:
+        from contained.tracer import extract_tool_outputs_from_transcript
+
+        # Content block is a string, not a dict — should be skipped gracefully
+        assistant_entry = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    "not a dict block",  # non-dict — should be skipped
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+                ]
+            },
+        }
+        result_entry = {
+            "type": "user",
+            "message": {
+                "content": [
+                    "not a dict block",  # non-dict in user turn — should be skipped
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+                ]
+            },
+        }
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text(json.dumps(assistant_entry) + "\n" + json.dumps(result_entry))
+        results = extract_tool_outputs_from_transcript(str(transcript))
+        assert len(results) == 1
+        assert results[0]["output"] == "ok"

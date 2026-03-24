@@ -817,10 +817,37 @@ def _build_manifest(
     approved_skills: list[str] | None = None,
     sigstore_enabled: bool = True,
 ) -> str:
-    """Return a YAML string for the complete manifest based on wizard choices."""
+    """Return a YAML string for the complete manifest based on wizard choices.
+
+    Parses POLICY_MANIFEST as the canonical source of all rule/pattern data and
+    applies wizard overrides on top — no rule data is duplicated here.
+    """
     import yaml
 
-    default_qa = {
+    from contained.templates import POLICY_MANIFEST
+
+    manifest: dict = yaml.safe_load(POLICY_MANIFEST) or {}
+    policy = manifest.setdefault("policy", {})
+
+    # ── Wizard overrides ───────────────────────────────────────────────────────
+    manifest.setdefault("agent", {})["model"] = model
+
+    sg = policy.setdefault("sigstore", {})
+    sg["enabled"] = sigstore_enabled
+    if not sigstore_enabled:
+        sg.pop("rekor_url", None)
+        sg.pop("fulcio_url", None)
+
+    base_domains = ["api.anthropic.com", "code.claude.com", "docs.anthropic.com"]
+    net = policy.setdefault("network", {})
+    net["enabled"] = network_enabled
+    net["allowed_domains"] = base_domains + (network_extra_domains or [])
+
+    policy.setdefault("mcp", {})["approved_servers"] = mcp_approved_servers or []
+    policy.setdefault("skills", {})["approved_skills"] = approved_skills or []
+
+    # ── QA checks — filter template checks by wizard booleans ─────────────────
+    default_qa: dict = {
         "syntax": True,
         "lint": True,
         "format": True,
@@ -830,58 +857,118 @@ def _build_manifest(
         "coverage_threshold": 80,
     }
     qa = {**default_qa, **(qa_choices or {})}
+    threshold = qa.get("coverage_threshold", 80)
 
-    sigstore: dict = {"enabled": sigstore_enabled}
-    if sigstore_enabled:
-        sigstore["rekor_url"] = "https://rekor.sigstore.dev"
-        sigstore["fulcio_url"] = "https://fulcio.sigstore.dev"
-
-    manifest: dict = {
-        "runtime": {},
-        "agent": {
-            "model": model,
-        },
-        "policy": {
-            "sigstore": sigstore,
-            "secrets": {
-                "reads": "block",
-                "writes": "block",
-                "bash_reads": "block",
-                "safe_variants": "allow",
-            },
-            "bash": {
-                "destructive": "block",
-                "privilege_escalation": "block",
-                "network_exfiltration": "block",
-                "git_mutations": "escalate",
-                "package_publish": "block",
-            },
-            "audit": {"enabled": True},
-            "network": {
-                "enabled": network_enabled,
-                "allowed_domains": ["api.anthropic.com", "code.claude.com", "docs.anthropic.com"]
-                + (network_extra_domains or []),
-            },
-            "mcp": {
-                "approved_servers": mcp_approved_servers or [],
-            },
-            "skills": {
-                "approved_skills": approved_skills or [],
-            },
-            "qa": qa,
-        },
+    # wizard key → template check name mapping
+    wizard_to_name: dict[str, str] = {
+        "lint": "lint",
+        "format": "format",
+        "type": "types",
+        "test": "tests",
+        "coverage": "coverage",
     }
+    enabled_names = {name for key, name in wizard_to_name.items() if qa.get(key, True)}
 
+    checks: list = []
+    # syntax has no template entry — prepend if enabled
+    if qa.get("syntax", True):
+        checks.append(
+            {
+                "name": "syntax",
+                "command": ["python", "-m", "compileall", "-q", "src/"],
+                "when_changed": ["*.py"],
+            }
+        )
+    for check in policy.get("qa", {}).get("checks", []):
+        name = check.get("name", "")
+        if name not in enabled_names:
+            continue
+        if name == "coverage":
+            # apply operator-chosen threshold
+            cmd = list(check.get("command", []))
+            cmd = [
+                c if not c.startswith("--cov-fail-under") else f"--cov-fail-under={threshold}"
+                for c in cmd
+            ]
+            checks.append({**check, "command": cmd})
+        else:
+            checks.append(check)
+    policy.setdefault("qa", {})["checks"] = checks
+
+    # ── Docker runtime ─────────────────────────────────────────────────────────
+    rt = manifest.setdefault("runtime", {})
     if docker_config:
-        manifest["runtime"]["docker"] = {
+        rt["docker"] = {
             "image": docker_config["image"],
             "memory": docker_config["memory"],
             "cpus": docker_config["cpus"],
             "network": docker_config["network"],
             "agent_config_volume": docker_config["agent_config_volume"],
         }
+    else:
+        # No docker config — strip the template default so the manifest only
+        # carries the mainlined section (docker is set later by contAIned init).
+        rt.pop("docker", None)
 
     return yaml.dump(manifest, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+
+def _is_old_manifest_format(parsed: dict) -> bool:
+    """Return True if manifest uses the pre-generalization schema."""
+    bash = parsed.get("policy", {}).get("bash", {})
+    secrets = parsed.get("policy", {}).get("secrets", {})
+    return "destructive" in bash or "reads" in secrets
+
+
+def _migrate_manifest(manifest_content: str) -> str:
+    """Rewrite an old-format manifest to the new schema, preserving user settings.
+
+    Extracts preserved settings (model, network, sigstore, mcp, skills, qa
+    booleans) from the old manifest and rebuilds via _build_manifest() using
+    POLICY_MANIFEST as the canonical rule source.
+    """
+    import yaml
+
+    old = yaml.safe_load(manifest_content) or {}
+    pol = old.get("policy", {})
+
+    docker_cfg = old.get("runtime", {}).get("docker") or None
+    model = old.get("agent", {}).get("model", "claude-sonnet-4-6")
+
+    net = pol.get("network", {})
+    network_enabled = net.get("enabled", True)
+    base = {"api.anthropic.com", "code.claude.com", "docs.anthropic.com"}
+    extra_domains = [d for d in net.get("allowed_domains", []) if d not in base]
+
+    # sigstore may live at top-level (legacy) or under policy
+    sg = pol.get("sigstore") or old.get("sigstore", {})
+    sigstore_enabled = bool(sg.get("enabled", True))
+
+    mcp_servers = pol.get("mcp", {}).get("approved_servers", [])
+    skills = pol.get("skills", {}).get("approved_skills", [])
+
+    old_qa = pol.get("qa", {})
+    qa_choices = {
+        "syntax": bool(old_qa.get("syntax", True)),
+        "lint": bool(old_qa.get("lint", True)),
+        "format": bool(old_qa.get("format", True)),
+        "type": bool(old_qa.get("type", True)),
+        "test": bool(old_qa.get("test", True)),
+        "coverage": bool(old_qa.get("coverage", True)),
+        "coverage_threshold": int(old_qa.get("coverage_threshold", 80)),
+    }
+
+    console.print("  [yellow]Old manifest format detected — rewriting to new schema.[/yellow]")
+    return _build_manifest(
+        docker_config=docker_cfg,
+        model=model,
+        qa_choices=qa_choices,
+        network_enabled=network_enabled,
+        network_extra_domains=extra_domains,
+        mcp_approved_servers=mcp_servers,
+        approved_skills=skills,
+        sigstore_enabled=sigstore_enabled,
+    )
 
 
 # ── Provenance ────────────────────────────────────────────────────────────────
@@ -995,6 +1082,17 @@ def run_init(
                 "A policy manifest is required — running the setup wizard now.\n"
             )
             manifest_content = _run_wizard(docker_config)
+        _manifest_migrated = False
+        try:
+            import yaml as _yaml
+
+            _parsed_existing = _yaml.safe_load(manifest_content) or {}
+            if _is_old_manifest_format(_parsed_existing):
+                manifest_content = _migrate_manifest(manifest_content)
+                _parsed_existing = _yaml.safe_load(manifest_content) or {}
+                _manifest_migrated = True
+        except Exception:
+            pass
         manifest_content = _policy_pull(manifest_content)
         try:
             import yaml as _yaml
@@ -1109,8 +1207,10 @@ def run_init(
 
     # ── Manifest ──────────────────────────────────────────────────────────────
     if manifest_content is not None:
-        # First-time init or --force: write wizard-generated manifest
-        status = _write_file(manifest_new, manifest_content, overwrite=force)
+        # First-time init, --force, or schema migration: write manifest.
+        # _manifest_migrated is only set in path B (already_init); default False.
+        _migrated = locals().get("_manifest_migrated", False)
+        status = _write_file(manifest_new, manifest_content, overwrite=force or _migrated)
         results.append((".contAIned/manifest.yaml", status))
     elif manifest_old.exists() and not manifest_new.exists():
         # Migrate old path → new path, preserving content

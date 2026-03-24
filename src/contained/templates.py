@@ -37,12 +37,16 @@ runtime:
     cpus: 2
     network: contAIned-net
     agent_config_volume: contAIned-agent-config
+  # Work unit payloads are POSTed to mainlined.url at git push time.
+  # MAINLINED_API_KEY is injected as an environment variable (not stored here).
+  mainlined:
+    url: ""   # e.g. https://mainlined.example.com
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
 agent:
   # Model passed via --model to the claude CLI. Leave blank to use claude's default.
   model: claude-sonnet-4-6
-    budget_tokens: 1024
+  budget_tokens: 1024
 
 policy:
 
@@ -150,8 +154,8 @@ policy:
   #   - WebFetch / WebSearch: requests to these domains are auto-approved.
   #     Requests to any other domain surface an operator confirmation prompt and
   #     are logged as exceptions.
-  #   - Bash subprocesses: HTTP traffic is routed through the Claude Code sandbox
-  #     proxy; requests to non-allowed domains are blocked (HTTP 403).
+  #   - Bash subprocesses: HTTP traffic is filtered by the Claude Code sandbox;
+  #     requests to non-allowed domains are blocked.
   #
   # api.anthropic.com must remain in allowed_domains — the agent cannot function
   # without it.  Add project-specific domains (package registries, APIs) as needed.
@@ -194,11 +198,11 @@ policy:
         when_changed: ["*.py"]
 
       - name: tests
-        command: ["uv", "run", "--no-sync", "pytest", "tests/", "-x", "--tb=short", "-q"]
+        command: ["python", "-m", "pytest", "tests/", "-x", "--tb=short", "-q"]
         when_changed: ["*.py"]
 
       - name: coverage
-        command: ["uv", "run", "--no-sync", "pytest", "tests/", "--cov", "--cov-report=term-missing", "--cov-fail-under=80", "-q"]
+        command: ["python", "-m", "pytest", "tests/", "--cov", "--cov-report=term-missing", "--cov-fail-under=80", "-q"]
         when_changed: ["*.py"]
 
   # ── MCP server approvals ──────────────────────────────────────────────────────
@@ -242,13 +246,6 @@ sandbox:
   filesystem:
     denyWrite:
       - .contAIned   # protect the control-plane directory from subprocess writes
-
-# ── Mainlined ──────────────────────────────────────────────────────────────────
-# Work unit payloads are POSTed to runtime.mainlined.url at git push time.
-# MAINLINED_API_KEY is injected as an environment variable (not stored here).
-runtime:
-  mainlined:
-    url: ""   # e.g. https://mainlined.example.com
 """
 
 POLICY_LOADER_HOOK = '''\
@@ -1798,7 +1795,7 @@ if _prov_log:
     _rekor = _latest.get("rekor_log_index")
     _prov_line = f"\\nProvenance: {_digest_short}… · {_operator}" + (f" · Rekor #{_rekor}" if _rekor else "")
 
-_summary_msg = f"QA: {_qa_line}\\n\\nChanged:\\n{_files_line}{_prov_line}\\n\\nUse /contained:tracer to inspect the full diff and narrative."
+_summary_msg = f"QA: {_qa_line}\\n\\nChanged:\\n{_files_line}{_prov_line}\\n"
 print(json.dumps({"decision": "block", "reason": _summary_msg}))
 sys.exit(0)
 '''

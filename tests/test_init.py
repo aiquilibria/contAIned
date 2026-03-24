@@ -19,7 +19,11 @@ from contained.init import (
     _git_root,
     _init_git_repo,
     _is_git_repo,
+    _is_old_manifest_format,
     _managed_files,
+    _migrate_manifest,
+    _migrate_settings_json,
+    _policy_pull,
     _sync_manifest,
     _touch,
     _update_gitignore,
@@ -290,16 +294,14 @@ class TestBuildManifest:
 
     def test_default_qa_all_true(self):
         data = self._parse(docker_config=None, model="m")
-        qa = data["policy"]["qa"]
-        assert qa == {
-            "syntax": True,
-            "lint": True,
-            "format": True,
-            "type": True,
-            "test": True,
-            "coverage": True,
-            "coverage_threshold": 80,
-        }
+        checks = data["policy"]["qa"]["checks"]
+        names = [c["name"] for c in checks]
+        assert "syntax" in names
+        assert "lint" in names
+        assert "format" in names
+        assert "types" in names
+        assert "tests" in names
+        assert "coverage" in names
 
     def test_qa_choices_override_defaults(self):
         data = self._parse(
@@ -307,10 +309,11 @@ class TestBuildManifest:
             model="m",
             qa_choices={"lint": False, "type": False},
         )
-        qa = data["policy"]["qa"]
-        assert qa["lint"] is False
-        assert qa["type"] is False
-        assert qa["syntax"] is True  # default kept
+        checks = data["policy"]["qa"]["checks"]
+        names = [c["name"] for c in checks]
+        assert "lint" not in names
+        assert "types" not in names
+        assert "syntax" in names  # default kept
 
     def test_anthropic_always_in_allowed_domains(self):
         data = self._parse(docker_config=None, model="m", network_enabled=True)
@@ -346,9 +349,9 @@ class TestBuildManifest:
         assert rt["memory"] == "4g"
         assert rt["cpus"] == 4
 
-    def test_no_docker_config_leaves_runtime_empty(self):
+    def test_no_docker_config_omits_docker_key(self):
         data = self._parse(docker_config=None, model="m")
-        assert data["runtime"] == {}
+        assert "docker" not in data.get("runtime", {})
 
     def test_sigstore_enabled_by_default(self):
         data = self._parse(docker_config=None, model="m")
@@ -673,3 +676,224 @@ class TestBuildManagedSettings:
         data = self._settings()
         assert data["sandbox"]["enabled"] is True
         assert data["sandbox"]["enableWeakerNestedSandbox"] is True
+
+
+# ── _is_old_manifest_format ───────────────────────────────────────────────────
+
+
+class TestIsOldManifestFormat:
+    def test_new_format_returns_false(self):
+        parsed = {
+            "policy": {
+                "bash": {"rules": [{"name": "destructive", "action": "block"}]},
+                "secrets": {"rules": []},
+            }
+        }
+        assert _is_old_manifest_format(parsed) is False
+
+    def test_old_bash_destructive_returns_true(self):
+        parsed = {
+            "policy": {
+                "bash": {"destructive": {"patterns": [r"^rm\s"]}},
+                "secrets": {"reads": {}},
+            }
+        }
+        assert _is_old_manifest_format(parsed) is True
+
+    def test_old_secrets_reads_returns_true(self):
+        parsed = {"policy": {"bash": {}, "secrets": {"reads": {"patterns": []}}}}
+        assert _is_old_manifest_format(parsed) is True
+
+    def test_empty_dict_returns_false(self):
+        assert _is_old_manifest_format({}) is False
+
+
+# ── _migrate_manifest ─────────────────────────────────────────────────────────
+
+_OLD_MANIFEST = """\
+runtime:
+  docker:
+    image: contained:latest
+    memory: 2g
+    cpus: 2
+    network: contAIned-net
+    agent_config_volume: contAIned-agent-config
+agent:
+  model: claude-opus-4-6
+policy:
+  bash:
+    destructive:
+      patterns:
+        - '^rm\\s'
+    safe_variants:
+      patterns: []
+  secrets:
+    reads:
+      patterns: []
+    writes:
+      patterns: []
+  network:
+    enabled: false
+    allowed_domains:
+      - api.anthropic.com
+      - code.claude.com
+      - docs.anthropic.com
+  qa:
+    syntax: true
+    lint: true
+    format: false
+    type: false
+    test: true
+    coverage: false
+    coverage_threshold: 80
+"""
+
+
+class TestMigrateManifest:
+    def test_returns_valid_yaml(self):
+        result = _migrate_manifest(_OLD_MANIFEST)
+        parsed = yaml.safe_load(result)
+        assert isinstance(parsed, dict)
+
+    def test_preserves_model(self):
+        result = _migrate_manifest(_OLD_MANIFEST)
+        parsed = yaml.safe_load(result)
+        assert parsed["agent"]["model"] == "claude-opus-4-6"
+
+    def test_preserves_docker_config(self):
+        result = _migrate_manifest(_OLD_MANIFEST)
+        parsed = yaml.safe_load(result)
+        assert parsed["runtime"]["docker"]["image"] == "contained:latest"
+
+    def test_new_schema_has_rules_list(self):
+        result = _migrate_manifest(_OLD_MANIFEST)
+        parsed = yaml.safe_load(result)
+        assert "rules" in parsed["policy"]["bash"]
+        assert "rules" in parsed["policy"]["secrets"]
+
+    def test_old_schema_keys_removed(self):
+        result = _migrate_manifest(_OLD_MANIFEST)
+        parsed = yaml.safe_load(result)
+        assert "destructive" not in parsed["policy"]["bash"]
+        assert "reads" not in parsed["policy"]["secrets"]
+
+    def test_qa_choices_preserved(self):
+        result = _migrate_manifest(_OLD_MANIFEST)
+        parsed = yaml.safe_load(result)
+        checks = parsed["policy"]["qa"]["checks"]
+        names = [c["name"] for c in checks]
+        # format and type were False in old manifest
+        assert "format" not in names
+        assert "types" not in names
+        # syntax, lint, test were True
+        assert "syntax" in names
+        assert "lint" in names
+        assert "tests" in names
+
+
+# ── _policy_pull ──────────────────────────────────────────────────────────────
+
+
+class TestPolicyPull:
+    def _manifest_with_mainlined(self, url: str = "", policy_name: str = "") -> str:
+        return yaml.dump(
+            {
+                "policy": {
+                    "mainlined": {
+                        "url": url,
+                        "policy_name": policy_name,
+                        "policy_ref": "",
+                        "policy_version": "",
+                    }
+                }
+            }
+        )
+
+    def test_no_url_returns_unchanged(self):
+        content = self._manifest_with_mainlined(url="", policy_name="")
+        assert _policy_pull(content) == content
+
+    def test_url_but_no_policy_name_returns_unchanged(self):
+        content = self._manifest_with_mainlined(url="https://example.com", policy_name="")
+        assert _policy_pull(content) == content
+
+    def test_network_error_returns_unchanged(self):
+        content = self._manifest_with_mainlined(
+            url="https://127.0.0.1:1", policy_name="test-policy"
+        )
+        result = _policy_pull(content)
+        # On network failure, returns original (possibly re-serialised but semantically equal)
+        parsed = yaml.safe_load(result)
+        assert parsed["policy"]["mainlined"]["policy_ref"] == ""
+
+    def test_empty_response_fields_returns_unchanged(self):
+        import json
+        from unittest.mock import MagicMock, patch
+
+        content = self._manifest_with_mainlined(
+            url="https://mainlined.example.com", policy_name="acme-python"
+        )
+        fake_response = MagicMock()
+        fake_response.read.return_value = json.dumps({}).encode()  # no ref/version
+        fake_response.__enter__ = lambda s: s
+        fake_response.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=fake_response):
+            result = _policy_pull(content)
+
+        parsed = yaml.safe_load(result)
+        assert parsed["policy"]["mainlined"]["policy_ref"] == ""
+
+    def test_writes_policy_ref_and_version_on_success(self):
+        import json
+        from unittest.mock import MagicMock, patch
+
+        content = self._manifest_with_mainlined(
+            url="https://mainlined.example.com", policy_name="acme-python"
+        )
+        fake_response = MagicMock()
+        fake_response.read.return_value = json.dumps(
+            {"policy_ref": "abc123", "policy_version": "1.2.3"}
+        ).encode()
+        fake_response.__enter__ = lambda s: s
+        fake_response.__exit__ = MagicMock(return_value=False)
+
+        with patch("urllib.request.urlopen", return_value=fake_response):
+            result = _policy_pull(content)
+
+        parsed = yaml.safe_load(result)
+        assert parsed["policy"]["mainlined"]["policy_ref"] == "abc123"
+        assert parsed["policy"]["mainlined"]["policy_version"] == "1.2.3"
+
+
+# ── _migrate_settings_json ────────────────────────────────────────────────────
+
+
+class TestMigrateSettingsJson:
+    def test_no_settings_files_returns_exists(self, tmp_path):
+        result = _migrate_settings_json(tmp_path)
+        assert result == "exists"
+
+    def test_settings_json_present_returns_migrated(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text('{"hooks": []}')
+        result = _migrate_settings_json(tmp_path)
+        assert result == "migrated"
+
+    def test_settings_json_is_renamed_not_deleted(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text('{"hooks": []}')
+        _migrate_settings_json(tmp_path)
+        assert not (claude_dir / "settings.json").exists()
+        bak_files = list(claude_dir.glob("settings.json.bak.*"))
+        assert len(bak_files) == 1
+
+    def test_settings_local_json_also_migrated(self, tmp_path):
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.local.json").write_text("{}")
+        result = _migrate_settings_json(tmp_path)
+        assert result == "migrated"
+        assert not (claude_dir / "settings.local.json").exists()

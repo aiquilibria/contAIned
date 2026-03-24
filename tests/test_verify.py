@@ -80,6 +80,43 @@ class TestRunVerifyMissingFiles:
         assert exc.value.code == 1
 
 
+class TestRunVerifyDockerErrors:
+    def test_exits_1_when_docker_not_found(self, tmp_path):
+        ws = _make_workspace(tmp_path)
+        _add_provenance(ws)
+        err = FileNotFoundError("docker not found")
+        with (
+            patch("contained.verify._find_docker", side_effect=err),
+            pytest.raises(SystemExit) as exc,
+        ):
+            run_verify(ws)
+        assert exc.value.code == 1
+
+    def test_exits_1_when_image_id_fails(self, tmp_path):
+        ws = _make_workspace(tmp_path)
+        _add_provenance(ws)
+        with (
+            patch("contained.verify._find_docker", return_value="/usr/bin/docker"),
+            patch("contained.verify._get_image_id", side_effect=RuntimeError("inspect failed")),
+            pytest.raises(SystemExit) as exc,
+        ):
+            run_verify(ws)
+        assert exc.value.code == 1
+
+    def test_exits_1_when_cosign_not_found(self, tmp_path):
+        ws = _make_workspace(tmp_path)
+        _add_provenance(ws, digest="sha256:abc123")
+        err = FileNotFoundError("cosign not found")
+        with (
+            patch("contained.verify._find_docker", return_value="/usr/bin/docker"),
+            patch("contained.verify._get_image_id", return_value="sha256:abc123"),
+            patch("contained.verify._find_cosign", side_effect=err),
+            pytest.raises(SystemExit) as exc,
+        ):
+            run_verify(ws)
+        assert exc.value.code == 1
+
+
 class TestRunVerifyDigestMismatch:
     def test_exits_1_on_digest_mismatch(self, tmp_path):
         ws = _make_workspace(tmp_path)
