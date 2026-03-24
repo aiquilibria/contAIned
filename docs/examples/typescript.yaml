@@ -1,0 +1,115 @@
+# contAIned manifest — TypeScript / Node.js project
+#
+# QA checks: ESLint, tsc type-checking, vitest (or jest).
+# All checks are gated on *.ts / *.tsx file changes.
+
+runtime:
+  docker:
+    image: contained:latest
+    memory: 2g
+    cpus: 2
+    network: contAIned-net
+    agent_config_volume: contAIned-agent-config
+
+agent:
+  model: claude-sonnet-4-6
+
+policy:
+
+  sigstore:
+    enabled: false
+
+  secrets:
+    rules:
+      - name: safe-variants
+        patterns: ['\.(example|sample|template)']
+        action: allow
+      - name: dotenv
+        patterns: ['(^|[/\\])\.env(\.[^/\\]+)?$']
+        reason: "Secret files may not be accessed."
+        action: block
+      - name: keys
+        patterns: ['\.(pem|key|p12|pfx|jks|keystore)$']
+        reason: "Secret files may not be accessed."
+        action: block
+      - name: ssh-keys
+        patterns: ['(^|[/\\])id_(rsa|dsa|ecdsa|ed25519)$']
+        reason: "Secret files may not be accessed."
+        action: block
+      - name: credential-files
+        patterns: ['(^|[/\\])(credentials|secrets|service_account)\.(json|yaml|yml)$']
+        reason: "Secret files may not be accessed."
+        action: block
+
+  bash:
+    rules:
+      - name: safe-git-reads
+        patterns:
+          - '^git\s+status\b'
+          - '^git\s+log\b'
+          - '^git\s+diff\b'
+          - '^git\s+show\b'
+          - '^git\s+branch\b'
+          - '^git\s+stash\s+list\b'
+          - '^git\s+remote\b'
+        action: allow
+      - name: safe-read-only
+        patterns: ['^ls\b', '^pwd\b', '^echo\s', '^which\s', '^grep\b', '^rg\b', '^find\b', '^cat\b', '^wc\b']
+        action: allow
+      - name: safe-node-read
+        patterns: ['^(node|npx)\s', '^npm\s+(run|test|ls|list)\b']
+        action: allow
+      - name: destructive
+        patterns: ['^rm\s', '.*\brm\s+-rf\b.*']
+        reason: "Destructive file deletion is not permitted."
+        action: block
+      - name: privilege_escalation
+        patterns: ['^sudo\s']
+        reason: "Privilege escalation is not permitted."
+        action: block
+      - name: network_exfiltration
+        patterns: ['^(curl|wget|nc|ncat)\s']
+        reason: "Outbound network calls from Bash are not permitted."
+        action: block
+      - name: package_publish
+        patterns: ['^npm\s+publish\b']
+        reason: "Package publishing requires explicit operator approval."
+        action: block
+
+  qa:
+    checks:
+      - name: ts-build
+        command: ["npx", "tsc", "--noEmit"]
+        when_changed: ["*.ts", "*.tsx"]
+
+      - name: lint
+        command: ["npx", "eslint", "src/", "--max-warnings=0"]
+        when_changed: ["*.ts", "*.tsx", "*.js"]
+
+      # Replace "vitest" with "jest" if your project uses jest
+      - name: tests
+        command: ["npx", "vitest", "run", "--reporter=verbose"]
+        when_changed: ["*.ts", "*.tsx"]
+
+  network:
+    enabled: false
+    allowed_domains:
+      - api.anthropic.com
+      - code.claude.com
+      - docs.anthropic.com
+
+  audit:
+    enabled: true
+    jsonl_export: false
+
+  mcp:
+    approved_servers: []
+
+  skills:
+    approved_skills: []
+
+sandbox:
+  enabled: true
+  filesystem:
+    denyWrite:
+      - .contAIned

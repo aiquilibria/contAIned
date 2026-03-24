@@ -133,7 +133,7 @@ def start_repl(root: Path) -> None:
 
             try:
                 _verify_workspace(root)
-                console.print("[dim][contAIned] Sigstore: provenance verified ✓[/dim]")
+                console.print("[dim][contAIned] sigstore: provenance verified ✓[/dim]")
             except RuntimeError as exc:
                 console.print(
                     f"[red][contAIned] Sigstore verification failed — session blocked.[/red]\n"

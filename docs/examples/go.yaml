@@ -1,0 +1,111 @@
+# contAIned manifest — Go project
+#
+# QA checks: go vet, staticcheck (skipped if not installed), go test.
+# All checks are gated on *.go file changes.
+
+runtime:
+  docker:
+    image: contained:latest
+    memory: 2g
+    cpus: 2
+    network: contAIned-net
+    agent_config_volume: contAIned-agent-config
+
+agent:
+  model: claude-sonnet-4-6
+
+policy:
+
+  sigstore:
+    enabled: false
+
+  secrets:
+    rules:
+      - name: safe-variants
+        patterns: ['\.(example|sample|template)']
+        action: allow
+      - name: dotenv
+        patterns: ['(^|[/\\])\.env(\.[^/\\]+)?$']
+        reason: "Secret files may not be accessed."
+        action: block
+      - name: keys
+        patterns: ['\.(pem|key|p12|pfx|jks|keystore)$']
+        reason: "Secret files may not be accessed."
+        action: block
+      - name: ssh-keys
+        patterns: ['(^|[/\\])id_(rsa|dsa|ecdsa|ed25519)$']
+        reason: "Secret files may not be accessed."
+        action: block
+      - name: credential-files
+        patterns: ['(^|[/\\])(credentials|secrets|service_account)\.(json|yaml|yml)$']
+        reason: "Secret files may not be accessed."
+        action: block
+
+  bash:
+    rules:
+      - name: safe-git-reads
+        patterns:
+          - '^git\s+status\b'
+          - '^git\s+log\b'
+          - '^git\s+diff\b'
+          - '^git\s+show\b'
+          - '^git\s+branch\b'
+          - '^git\s+stash\s+list\b'
+          - '^git\s+remote\b'
+        action: allow
+      - name: safe-read-only
+        patterns: ['^ls\b', '^pwd\b', '^echo\s', '^which\s', '^grep\b', '^rg\b', '^find\b', '^cat\b', '^wc\b']
+        action: allow
+      - name: safe-go-read
+        patterns: ['^go\s+(build|vet|test|mod\s+tidy|mod\s+download|list)\b']
+        action: allow
+      - name: destructive
+        patterns: ['^rm\s', '.*\brm\s+-rf\b.*']
+        reason: "Destructive file deletion is not permitted."
+        action: block
+      - name: privilege_escalation
+        patterns: ['^sudo\s']
+        reason: "Privilege escalation is not permitted."
+        action: block
+      - name: network_exfiltration
+        patterns: ['^(curl|wget|nc|ncat)\s']
+        reason: "Outbound network calls from Bash are not permitted."
+        action: block
+
+  qa:
+    checks:
+      - name: go-vet
+        command: ["go", "vet", "./..."]
+        when_changed: ["*.go"]
+
+      # staticcheck is skipped automatically if not installed
+      - name: staticcheck
+        command: ["staticcheck", "./..."]
+        when_changed: ["*.go"]
+
+      - name: go-test
+        command: ["go", "test", "./...", "-count=1", "-timeout=120s"]
+        when_changed: ["*.go"]
+
+  network:
+    enabled: false
+    allowed_domains:
+      - api.anthropic.com
+      - code.claude.com
+      - docs.anthropic.com
+
+  audit:
+    enabled: true
+    jsonl_export: false
+
+  mcp:
+    approved_servers: []
+
+  skills:
+    approved_skills: []
+
+sandbox:
+  enabled: true
+  filesystem:
+    denyWrite:
+      - .contAIned

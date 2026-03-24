@@ -377,6 +377,72 @@ The image is automatically rebuilt when the manifest hash changes — running `c
 
 > **Do not edit hook files directly.** Files under `.contAIned/hooks/` are generated from internal templates and will be overwritten by `contAIned init`. Hook registration, sandbox rules, and permission patterns are managed by `/etc/claude-code/managed-settings.json` baked into the Docker image — they cannot be overridden at runtime. Policy customisation belongs in `manifest.yaml`; structural hook changes should be raised as feature requests.
 
+### Policy schema overview
+
+All governance settings live under the `policy:` key in `manifest.yaml`. The full reference is in [docs/policy-reference.md](./docs/policy-reference.md); examples for common project types are in [docs/examples/](./docs/examples/). The key sections are:
+
+#### `policy.secrets.rules` — secret-file protection
+
+A single ordered list of rules controlling which file paths are treated as secrets. Each rule has `name`, `patterns` (regex list, case-insensitive), `action` (`allow` or `block`), and an optional `reason`. **First match wins** — list `allow` rules before `block` rules to create safe-variant exemptions.
+
+```yaml
+policy:
+  secrets:
+    rules:
+      - name: safe-variants
+        patterns: ['\.(example|sample|template)']
+        action: allow                               # .env.example is always permitted
+
+      - name: dotenv
+        patterns: ['(^|[/\\])\.env(\.[^/\\]+)?$']
+        reason: "Secret files may not be accessed."
+        action: block
+```
+
+#### `policy.bash.rules` — Bash command restrictions
+
+An ordered list of rules governing what Bash commands the agent may run. Each rule supports `action: allow` (auto-approve), `action: block` (deny outright), or `action: escalate` (surface an operator prompt). First match wins — list `allow` rules first so safe commands are not caught by later block rules.
+
+```yaml
+policy:
+  bash:
+    rules:
+      - name: safe-reads
+        patterns: ['^git\s+status\b', '^ls\b', '^cat\b']
+        action: allow
+
+      - name: destructive
+        patterns: ['^rm\s', '.*\brm\s+-rf\b.*']
+        reason: "Destructive deletion is not permitted."
+        action: block
+
+      - name: docker-run
+        patterns: ['^docker\s+run\b']
+        reason: "docker run requires operator approval."
+        action: escalate
+```
+
+#### `policy.qa.checks` — QA gate
+
+A list of commands run when the agent signals completion. Each entry is either a bare exec-form array (name inferred from `command[0]`) or a named object with an optional `when_changed` glob guard. If `checks` is empty, QA passes trivially.
+
+```yaml
+policy:
+  qa:
+    checks:
+      - ["ruff", "check", "."]                    # bare — name inferred as "ruff"
+
+      - name: tests
+        command: ["pytest", "tests/", "-x", "-q"]
+        when_changed: ["*.py"]                    # skip if no .py files were touched
+
+      - name: go-vet
+        command: ["go", "vet", "./..."]
+        when_changed: ["*.go"]
+```
+
+Commands run with `shell=False` using exec-form arrays. A check whose binary is not installed is skipped automatically. Exit code 5 (no tests collected) is treated as a pass.
+
 ---
 
 ## Known gaps
@@ -391,7 +457,7 @@ The `UserPromptSubmit` hook may receive `!` commands — Claude Code's documenta
 
 ### QA hook coverage
 
-The built-in `qa.py` Stop hook ships with quality checks for Python projects (linting, type checking, tests). There are no pre-built QA checks for other languages — Go, JavaScript, TypeScript, etc. Projects using those languages must write their own checks in `qa.py`, which requires Python knowledge and is not guided by the current tooling. Broader language coverage is planned.
+QA checks are now fully language-agnostic. The `policy.qa.checks` list accepts any exec-form command array — `go vet`, `npx tsc --noEmit`, `cargo clippy`, or any other tool. No Python knowledge is required; see [docs/examples/](./docs/examples/) for ready-to-use manifests for Go, TypeScript, and mixed projects.
 
 ### Garbage collection (`tracer.db`)
 

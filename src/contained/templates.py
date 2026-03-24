@@ -58,18 +58,90 @@ policy:
     fulcio_url: https://fulcio.sigstore.dev
 
   # ── Secret-file protection ──────────────────────────────────────────────────
+  # rules — evaluated in order; first matching pattern wins.
+  #   action: allow — permit unconditionally (use for safe variants like .env.example)
+  #   action: block — deny the operation; agent receives the reason string
+  # List allow rules before block rules so safe variants are exempted first.
+  # Patterns are compiled with re.IGNORECASE.
   secrets:
-    reads:         block    # Read / Glob / Grep on secret files
-    writes:        block    # Write / Edit / MultiEdit on secret files
-    bash_reads:    block    # cat / head / tail / etc. targeting secret files
-    safe_variants: allow    # .env.example / .env.sample / .env.template exemption
+    rules:
+      - name: safe-variants
+        patterns: ['\\.(example|sample|template)']
+        action: allow
+
+      - name: dotenv
+        patterns: ['(^|[/\\\\])\\.env(\\.[^/\\\\]+)?$']
+        reason: "Secret files (credentials, keys, .env) may not be accessed."
+        action: block
+
+      - name: keys
+        patterns: ['\\.(pem|key|p12|pfx|jks|keystore)$']
+        reason: "Secret files (credentials, keys, .env) may not be accessed."
+        action: block
+
+      - name: ssh-keys
+        patterns: ['(^|[/\\\\])id_(rsa|dsa|ecdsa|ed25519)$']
+        reason: "Secret files (credentials, keys, .env) may not be accessed."
+        action: block
+
+      - name: credential-files
+        patterns: ['(^|[/\\\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$']
+        reason: "Secret files (credentials, keys, .env) may not be accessed."
+        action: block
+
+      - name: secret-extension
+        patterns: ['\\.(secret|secrets)$']
+        reason: "Secret files (credentials, keys, .env) may not be accessed."
+        action: block
+
+      # add project-specific rules here, e.g.:
+      # - name: vault-token
+      #   patterns: ['(^|[/\\])vault-token(\\..*)?$']
+      #   reason: "Vault tokens may not be accessed."
+      #   action: block
 
   # ── Bash command restrictions ────────────────────────────────────────────────
+  # rules — evaluated in order; first matching pattern wins.
+  #   action: allow    — auto-approve without prompting the operator
+  #   action: block    — deny outright; agent receives the reason string
+  #   action: escalate — surface operator approval prompt; logged as exception
+  # List allow rules before block rules so safe commands are exempted first.
   bash:
-    destructive:          block     # rm / rm -rf
-    privilege_escalation: block     # sudo
-    network_exfiltration: block     # curl / wget / nc / ncat
-    package_publish:      block     # npm publish / pip upload / twine upload
+    rules:
+      - name: safe-git-reads
+        patterns:
+          - '^git\\s+status\\b'
+          - '^git\\s+log\\b'
+          - '^git\\s+diff\\b'
+          - '^git\\s+show\\b'
+          - '^git\\s+branch\\b'
+          - '^git\\s+stash\\s+list\\b'
+          - '^git\\s+remote\\b'
+        action: allow
+
+      - name: safe-read-only
+        patterns: ['^ls\\b', '^pwd\\b', '^echo\\s', '^which\\s', '^grep\\b', '^rg\\b', '^find\\b', '^cat\\b', '^wc\\b']
+        action: allow
+
+      - name: destructive
+        patterns: ['^rm\\s', '.*\\brm\\s+-rf\\b.*']
+        reason: "Destructive file deletion is not permitted."
+        action: block
+
+      - name: privilege_escalation
+        patterns: ['^sudo\\s']
+        reason: "Privilege escalation is not permitted."
+        action: block
+
+      - name: network_exfiltration
+        patterns: ['^(curl|wget|nc|ncat)\\s']
+        reason: "Outbound network calls from Bash are not permitted."
+        action: block
+
+      - name: package_publish
+        patterns: ['^(npm\\s+publish|pip\\s+upload|twine\\s+upload)\\b']
+        reason: "Package publishing requires explicit operator approval."
+        action: block
 
   # ── Network policy ────────────────────────────────────────────────────────────
   # Controls outbound network access for both Claude Code tools and subprocesses.
@@ -97,14 +169,37 @@ policy:
     jsonl_export: false  # set true to also write .contAIned/audit/pipeline.jsonl
 
   # ── QA gate (stop hook) ───────────────────────────────────────────────────────
+  # checks — list of commands to run when the agent signals it is done.
+  # Each entry is either a bare exec-form array or a named object:
+  #
+  #   - ["ruff", "check", "."]                    # bare — name inferred from command[0]
+  #   - name: tests
+  #     command: ["pytest", "tests/", "-x", "-q"]
+  #     when_changed: ["*.py"]                    # skip if no .py files were touched
+  #
+  # If checks is empty, QA passes trivially.
+  # Commands run with shell=False; use exec-form arrays, not shell strings.
   qa:
-    syntax:             true   # py_compile
-    lint:               true   # ruff check
-    format:             true   # ruff format --check
-    type:               true   # pyright
-    test:               true   # pytest tests/
-    coverage:           true   # pytest --cov --cov-fail-under (requires pytest-cov)
-    coverage_threshold: 80     # minimum % line coverage when coverage is true
+    checks:
+      - name: lint
+        command: ["ruff", "check", "."]
+        when_changed: ["*.py"]
+
+      - name: format
+        command: ["ruff", "format", "--check", "."]
+        when_changed: ["*.py"]
+
+      - name: types
+        command: ["pyright"]
+        when_changed: ["*.py"]
+
+      - name: tests
+        command: ["uv", "run", "--no-sync", "pytest", "tests/", "-x", "--tb=short", "-q"]
+        when_changed: ["*.py"]
+
+      - name: coverage
+        command: ["uv", "run", "--no-sync", "pytest", "tests/", "--cov", "--cov-report=term-missing", "--cov-fail-under=80", "-q"]
+        when_changed: ["*.py"]
 
   # ── MCP server approvals ──────────────────────────────────────────────────────
   # List of approved MCP server names.  Each entry generates an allow rule for
@@ -119,6 +214,18 @@ policy:
   # confirmation prompt and are logged as exceptions.
   skills:
     approved_skills: []    # e.g. [commit, review-pr]
+
+  # ── m<AI>nlined policy coordination ──────────────────────────────────────────
+  # When url is set, `contAIned init` pulls the resolved policy from m<AI>nlined
+  # and bakes it into this manifest.  policy_ref and policy_version are written
+  # by `policy pull` and must not be edited manually — they are cargo-carried
+  # into invocation_hash so every proof is bound to a specific central policy
+  # version.  Leave url empty to operate fully offline with local policy only.
+  mainlined:
+    url: ""              # e.g. https://mainlined.example.com
+    policy_name: ""      # human-readable policy identity used in m<AI>nlined
+    policy_ref: ""       # written by `policy pull`; SHA-256 of the policy at pull time
+    policy_version: ""   # written by `policy pull`; semantic version from m<AI>nlined
 
 # ── Sandbox ───────────────────────────────────────────────────────────────────
 # Claude Code's built-in OS-level sandbox (Seatbelt on macOS, bubblewrap on
@@ -149,9 +256,10 @@ POLICY_LOADER_HOOK = '''\
 """Shared policy loader for contAIned hooks.
 
 Reads the policy: section from /etc/contained/manifest.yaml (baked into the
-container image by contAIned init) and merges it with built-in defaults so
-that every key is always present.  If the manifest cannot be read the defaults
-are returned unchanged — hooks degrade gracefully to the hardcoded behaviour.
+container image by contAIned init) and merges it with structural defaults so
+that every key is always present.  The manifest is the sole source of rule
+data — if it cannot be read, hooks receive empty pattern lists and apply no
+secret-file checks.
 
 Manifest location:
   /etc/contained/manifest.yaml  — baked into the image by contAIned init
@@ -164,29 +272,17 @@ from pathlib import Path
 
 _DEFAULTS = {
     "secrets": {
-        "reads":         "block",
-        "writes":        "block",
-        "bash_reads":    "block",
-        "safe_variants": "allow",
+        "rules": [],
     },
     "bash": {
-        "destructive":          "block",
-        "privilege_escalation": "block",
-        "network_exfiltration": "block",
-        "package_publish":      "block",
+        "rules": [],
     },
     "audit": {
         "enabled": True,
         "jsonl_export": False,
     },
     "qa": {
-        "syntax":             True,
-        "lint":               True,
-        "format":             True,
-        "type":               True,
-        "test":               True,
-        "coverage":           True,
-        "coverage_threshold": 80,
+        "checks": [],
     },
     "network": {
         "enabled":        False,
@@ -216,20 +312,53 @@ def _deep_merge(base, override):
     return result
 
 
-def load_policy(cwd="."):
-    """Return the fully-merged policy dict.
+def _compile_patterns(policy):
+    """Compile all manifest pattern strings into regex objects in-place.
 
-    Always succeeds: if the manifest is unreadable the built-in defaults
-    are returned so hooks continue to enforce the current behaviour.
+    Populates:
+      policy["secrets"]["_compiled_rules"] — list[(action, [re.Pattern], reason)]
+      policy["bash"]["_compiled_rules"]    — list[(action, [re.Pattern], reason)]
+
+    Called once per load_policy() invocation.  All rule data comes
+    exclusively from the manifest; there are no hardcoded built-ins.
+    First-match-wins: list allow rules before block rules in the manifest.
+    """
+    import re as _re
+
+    def _compile_rules(rules, flags=0):
+        return [
+            (
+                rule["action"],
+                [_re.compile(p, flags) for p in rule.get("patterns", [])],
+                rule.get("reason", ""),
+            )
+            for rule in rules
+        ]
+
+    policy["secrets"]["_compiled_rules"] = _compile_rules(
+        policy["secrets"].get("rules", []), _re.IGNORECASE
+    )
+    policy["bash"]["_compiled_rules"] = _compile_rules(
+        policy["bash"].get("rules", [])
+    )
+
+
+def load_policy(cwd="."):
+    """Return the fully-merged policy dict with all patterns pre-compiled.
+
+    Always succeeds: if the manifest is unreadable the structural defaults
+    are returned (empty pattern lists — no checks applied).
     """
     try:
         import yaml
         manifest_path = Path("/etc/contained/manifest.yaml")
         with manifest_path.open() as fh:
             manifest = yaml.safe_load(fh) or {}
-        return _deep_merge(_DEFAULTS, manifest.get("policy", {}))
+        policy = _deep_merge(_DEFAULTS, manifest.get("policy", {}))
     except Exception:
-        return dict(_DEFAULTS)
+        policy = dict(_DEFAULTS)
+    _compile_patterns(policy)
+    return policy
 
 
 '''
@@ -250,30 +379,12 @@ Exits 0 to allow, 2 to deny (reason on stderr fed back to agent).
 Denials are written to the audit log before blocking.
 """
 import json
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _policy import load_policy  # noqa: E402
-
-
-SECRET_FILE_PATTERNS = [
-    re.compile(r\'(^|[/\\\\])\\.env(\\.[^/\\\\]+)?$\', re.IGNORECASE),
-    re.compile(r\'\\.(pem|key|p12|pfx|jks|keystore)$\', re.IGNORECASE),
-    re.compile(r\'(^|[/\\\\])id_(rsa|dsa|ecdsa|ed25519)$\', re.IGNORECASE),
-    re.compile(r\'(^|[/\\\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$\', re.IGNORECASE),
-    re.compile(r\'\\.(secret|secrets)$\', re.IGNORECASE),
-]
-SAFE_VARIANT_RE = re.compile(r\'\\.(example|sample|template)\', re.IGNORECASE)
-
-
-def is_secret_file(path):
-    """Return True if path refers to a secret file that should not be written."""
-    if SAFE_VARIANT_RE.search(Path(path).name):
-        return False
-    return any(pattern.search(path) for pattern in SECRET_FILE_PATTERNS)
 
 
 def log_denial(event, target, reason):
@@ -363,12 +474,15 @@ if resolved == claude_settings:
     sys.exit(2)
 
 # ── Check 3: secret file ───────────────────────────────────────────────────────
-if is_secret_file(str(resolved)):
-    enforce(
-        policy["secrets"]["writes"], event, target,
-        f"Write denied: \\'{target}\\' looks like a secret file.\\n"
-        "Writing to credentials, keys, and .env files is not permitted.",
-    )
+for _action, _patterns, _reason in policy["secrets"]["_compiled_rules"]:
+    if any(p.search(str(resolved)) for p in _patterns):
+        if _action == "allow":
+            break  # safe variant — permit
+        enforce(
+            _action, event, target,
+            _reason or f"Write denied: \\'{target}\\' looks like a secret file.",
+        )
+        break
 
 sys.exit(0)
 '''
@@ -393,33 +507,12 @@ Exits 0 to allow, 2 to deny (reason on stderr fed back to agent).
 Denials are written to the audit log before blocking.
 """
 import json
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _policy import load_policy  # noqa: E402
-
-
-SECRET_FILE_PATTERNS = [
-    re.compile(r\'(^|[/\\\\])\\.env(\\.[^/\\\\]+)?$\', re.IGNORECASE),
-    re.compile(r\'\\.(pem|key|p12|pfx|jks|keystore)$\', re.IGNORECASE),
-    re.compile(r\'(^|[/\\\\])id_(rsa|dsa|ecdsa|ed25519)$\', re.IGNORECASE),
-    re.compile(r\'(^|[/\\\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$\', re.IGNORECASE),
-    re.compile(r\'\\.(secret|secrets)$\', re.IGNORECASE),
-]
-SAFE_VARIANT_RE = re.compile(r\'\\.(example|sample|template)\', re.IGNORECASE)
-
-
-def matches_secret_pattern(path):
-    """Return True if path matches a secret file pattern (ignoring safe-variant exception)."""
-    return any(pattern.search(path) for pattern in SECRET_FILE_PATTERNS)
-
-
-def is_safe_variant(path):
-    """Return True if path looks like a safe template/example variant."""
-    return bool(SAFE_VARIANT_RE.search(Path(path).name))
 
 
 def log_denial(event, target, reason):
@@ -485,20 +578,16 @@ else:
 if not target:
     sys.exit(0)
 
-# ── Secret file (with safe-variant override) ──────────────────────────────────
-if matches_secret_pattern(target):
-    if is_safe_variant(target):
+# ── Secret file ───────────────────────────────────────────────────────────────
+for _action, _patterns, _reason in policy["secrets"]["_compiled_rules"]:
+    if any(p.search(target) for p in _patterns):
+        if _action == "allow":
+            break  # safe variant — permit
         enforce(
-            policy["secrets"]["safe_variants"], event, target,
-            f"Access denied: \\'{target}\\' is a secret file "
-            "(safe-variant exemption is disabled by policy).",
+            _action, event, target,
+            _reason or "Access denied: secret files (credentials, keys, .env) may not be read.",
         )
-    else:
-        enforce(
-            policy["secrets"]["reads"], event, target,
-            "Access denied: secret files (credentials, keys, .env) may not be read. "
-            "Only example/sample/template variants (e.g. .env.example) are permitted.",
-        )
+        break
 
 sys.exit(0)
 '''
@@ -508,29 +597,22 @@ RESTRICT_BASH_HOOK = '''\
 """
 PreToolUse hook — restricts Bash tool calls.
 
-All checks are driven by the policy: section of .contAIned/policy/manifest.yaml.
+All checks are driven by manifest.yaml (baked into the container image).
 
 Checks applied in order:
-  1. policy.secrets.bash_reads        — read cmds (cat, head, ...) on secret files
-  2. policy.bash.destructive          — rm / rm -rf
-  3. policy.bash.privilege_escalation — sudo
-  4. policy.bash.network_exfiltration — curl / wget / nc / ncat
-  5. policy.bash.package_publish      — npm publish / pip upload / twine upload
-
-Safe read-only commands (git status/log/diff, ls, etc.) are auto-approved via
-the managed-settings allow list and never reach this hook.  Side-effect commands
-(git commit/push, etc.) are not in the allow list and fall through to the
-permission system, which prompts the operator for approval.
+  1. policy.secrets.rules — read cmds targeting secret files (first match wins)
+  2. policy.bash.rules    — ordered rule list; first match wins
+     Each rule: {name, patterns, reason, action: allow|block|escalate}
 
 For each command this hook outputs one of three JSON decisions:
-  permissionDecision: "deny"  — blocked outright (secrets, destructive ops, etc.)
-  permissionDecision: "allow" — safe read-only command (mirrors the allow list)
-  permissionDecision: "ask"   — side-effect command; operator prompt fires
+  permissionDecision: "deny"  — blocked by a bash rule or secret-file check
+  permissionDecision: "allow" — matches an action:allow rule in policy.bash.rules
+  permissionDecision: "ask"   — no rule matched; operator prompt fires
 
 The "allow" and "ask" paths exist because a PreToolUse hook returning "ask"
-overrides the managed-settings allow list.  Safe patterns are therefore matched
-explicitly here so they are not accidentally caught by the "ask" fallback.
-Keep _SAFE_PATTERNS in sync with the allow list in managed-settings.json.
+overrides the managed-settings allow list.  Safe commands must therefore be
+listed first in policy.bash.rules with action:allow so they are not accidentally
+caught by the "ask" fallback.
 
 Outputs JSON to stdout; denials also written to the audit log.
 """
@@ -545,66 +627,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _policy import load_policy  # noqa: E402
 
 
-SECRET_FILE_PATTERNS = [
-    re.compile(r\'(^|[/\\\\])\\.env(\\.[^/\\\\]+)?$\', re.IGNORECASE),
-    re.compile(r\'\\.(pem|key|p12|pfx|jks|keystore)$\', re.IGNORECASE),
-    re.compile(r\'(^|[/\\\\])id_(rsa|dsa|ecdsa|ed25519)$\', re.IGNORECASE),
-    re.compile(r\'(^|[/\\\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$\', re.IGNORECASE),
-    re.compile(r\'\\.(secret|secrets)$\', re.IGNORECASE),
-]
-SAFE_VARIANT_RE = re.compile(r\'\\.(example|sample|template)\', re.IGNORECASE)
-READ_CMD_RE     = re.compile(r\'^\\s*(cat|head|tail|less|more|bat|pg|view)\\s\', re.IGNORECASE)
+READ_CMD_RE = re.compile(
+    r\'^\\s*(cat|head|tail|less|more|bat|pg|view|grep|egrep|fgrep|rg|ag|ack|sed|awk)\\s\',
+    re.IGNORECASE,
+)
 
-# Read-only commands that mirror the managed-settings allow list.
-# Commands matching these patterns are auto-approved (permissionDecision: "allow").
-# Keep in sync with the "allow" list in managed-settings.json.
-_SAFE_PATTERNS = [
-    re.compile(r\'^git\\s+status\\b\'),
-    re.compile(r\'^git\\s+log\\b\'),
-    re.compile(r\'^git\\s+diff\\b\'),
-    re.compile(r\'^git\\s+show\\b\'),
-    re.compile(r\'^git\\s+branch\\b\'),
-    re.compile(r\'^git\\s+stash\\s+list\\b\'),
-    re.compile(r\'^git\\s+remote\\b\'),
-    re.compile(r\'^ls\\b\'),
-    re.compile(r\'^pwd\\b\'),
-    re.compile(r\'^echo\\s\'),
-    re.compile(r\'^which\\s\'),
-    # grep/rg via Bash are read-only — mirror the Grep tool\'s auto-approval.
-    re.compile(r\'^grep\\b\'),
-    re.compile(r\'^rg\\b\'),
-]
-
-# (policy key, compiled patterns, denial reason)
-_BASH_RULES = [
-    (
-        "destructive",
-        [re.compile(r\'^rm\\s\'), re.compile(r\'.*\\brm\\s+-rf\\b.*\')],
-        "Destructive file deletion is not permitted.",
-    ),
-    (
-        "privilege_escalation",
-        [re.compile(r\'^sudo\\s\')],
-        "Privilege escalation is not permitted.",
-    ),
-    (
-        "network_exfiltration",
-        [re.compile(r\'^(curl|wget|nc|ncat)\\s\')],
-        "Outbound network calls from Bash are not permitted.",
-    ),
-    (
-        "package_publish",
-        [re.compile(r\'^(npm\\s+publish|pip\\s+upload|twine\\s+upload)\\b\')],
-        "Package publishing requires explicit operator approval.",
-    ),
-]
-
-
-def is_secret_file(path):
-    """Return True if path refers to a secret file."""
-    if SAFE_VARIANT_RE.search(Path(path).name):
-        return False
-    return any(pattern.search(path) for pattern in SECRET_FILE_PATTERNS)
 
 
 def abs_path_tokens(command):
@@ -687,34 +714,36 @@ cwd    = event.get("cwd", ".")
 policy = load_policy(cwd)
 
 # ── Check 1: secret file reads ────────────────────────────────────────────────
+_sec_rules = policy["secrets"]["_compiled_rules"]
 if READ_CMD_RE.match(command):
     for token in command.split():
-        if is_secret_file(token):
-            enforce(
-                policy["secrets"]["bash_reads"], event, command,
-                f"Bash denied: \\'{token}\\' looks like a secret file.\\n"
-                "Secret files (credentials, keys, .env) may not be read.",
-            )
+        for _action, _patterns, _reason in _sec_rules:
+            if any(p.search(token) for p in _patterns):
+                if _action == "allow":
+                    break  # safe variant token — skip
+                enforce(
+                    _action, event, command,
+                    _reason or f"Bash denied: \\'{token}\\' looks like a secret file.",
+                )
+                break  # first matching rule for this token wins
 
-# ── Checks 2–5: bash command rules ────────────────────────────────────────────
-for rule_key, patterns, reason in _BASH_RULES:
-    action = policy["bash"][rule_key]
-    if action == "allow":
-        continue
-    if any(pat.search(command) for pat in patterns):
-        enforce(action, event, command, reason)
+# ── Bash command rules (allow / block / escalate) ────────────────────────────
+for _action, _patterns, _reason in policy["bash"]["_compiled_rules"]:
+    if any(pat.search(command) for pat in _patterns):
+        if _action == "allow":
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            }))
+            sys.exit(0)
+        elif _action == "block":
+            enforce(_action, event, command, _reason)
+        else:  # escalate
+            _ask()
 
-# ── Safe read-only commands (mirrors managed-settings allow list) ──────────────
-if any(pat.match(command) for pat in _SAFE_PATTERNS):
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "allow",
-        }
-    }))
-    sys.exit(0)
-
-# Side-effect command — ask the operator for explicit approval.
+# No rule matched — ask the operator for explicit approval.
 _ask()
 '''
 
@@ -907,19 +936,18 @@ QA_HOOK = '''\
 """
 Stop hook — runs QA checks when the agent signals it is done.
 
-Which checks run is controlled by policy.qa.* flags in manifest.yaml:
-  syntax      — py_compile on all Python files
-  lint        — ruff check
-  format      — ruff format --check
-  type        — pyright
-  test        — pytest tests/  (skipped silently if no tests/ directory exists)
-  coverage    — pytest tests/ --cov --cov-fail-under=<threshold>
-                requires pytest-cov; skipped silently if not installed
-                threshold is policy.qa.coverage_threshold (default 80)
+Which checks run is controlled by policy.qa.checks in manifest.yaml.
+Each entry is either a bare exec-form array or a named object:
 
-If all enabled checks pass  → exits 0, agent stops cleanly.
-If any enabled check fails  → prints JSON with decision:block, agent receives feedback.
+  - ["ruff", "check", "."]
+  - name: tests
+    command: ["pytest", "tests/", "-x", "-q"]
+    when_changed: ["*.py"]   # skip if no matching files were touched
+
+If checks is empty, QA passes trivially.
+If any check fails → prints JSON with decision:block, agent receives feedback.
 """
+import fnmatch
 import json
 import subprocess
 import sys
@@ -936,160 +964,87 @@ except (json.JSONDecodeError, EOFError):
 cwd      = event.get("cwd", ".")
 TASK_DIR = Path(cwd).resolve()
 policy   = load_policy(cwd)
-qa       = policy["qa"]
+checks   = policy["qa"].get("checks", [])
 
-# ── Skip QA if no Python source files were written this session ───────────────
+# ── Fetch touched files for when_changed evaluation ───────────────────────────
+_touched: list[str] = []
 _session_id = event.get("session_id")
 if _session_id:
     try:
-        from contained.tracer import contAInedTracer
-        _tracer = contAInedTracer(str(Path(cwd) / ".contAIned" / "tracer.db"))
+        from contained.tracer import contAInedTracer  # noqa: PLC0415
+        _tracer  = contAInedTracer(str(Path(cwd) / ".contAIned" / "tracer.db"))
         _touched = _tracer.list_touched_files(_session_id)
-        if not any(f.endswith(".py") for f in _touched):
-            sys.exit(0)
     except Exception:
-        pass  # tracer unavailable — fall through and run checks normally
+        pass  # tracer unavailable — when_changed guards will not filter
 
 
-def run(cmd):
-    result = subprocess.run(
-        cmd,
-        cwd=TASK_DIR,
-        capture_output=True,
-        text=True,
-    )
+def run(cmd: list) -> tuple[int, str]:
+    result = subprocess.run(cmd, cwd=TASK_DIR, capture_output=True, text=True)
     return result.returncode, result.stdout + result.stderr
 
 
-# Dev dependencies (pytest, pytest-cov, pyright, ruff) are pre-installed in
-# the container image.  No uv sync needed — and uv sync would fail inside the
-# container because PyPI is blocked by the network proxy.
+def _expand(entry) -> dict:
+    """Normalise a bare array or named-object check entry into a uniform dict."""
+    if isinstance(entry, list):
+        return {"name": entry[0], "command": entry, "when_changed": []}
+    return {
+        "name":         entry.get("name", (entry.get("command") or ["?"])[0]),
+        "command":      entry.get("command", []),
+        "when_changed": entry.get("when_changed", []),
+    }
 
 
-# ── Collect Python files (skip generated/tool directories) ────────────────────
-_SKIP_DIRS = {".venv", "__pycache__", ".git", "node_modules", ".contAIned", "pytest-of-agent"}
-py_files = [
-    f
-    for f in TASK_DIR.rglob("**/*.py")
-    if not _SKIP_DIRS.intersection(f.parts)
-]
+def _files_match(touched: list[str], patterns: list[str]) -> bool:
+    """Return True if any touched filename matches any fnmatch glob pattern."""
+    return any(
+        fnmatch.fnmatch(Path(f).name, pat)
+        for f in touched
+        for pat in patterns
+    )
 
-check_results: list = []  # {"name": str, "status": "pass"|"fail"|"skip", "output": str}
-failures: list = []       # {"check": str, "file": str, "output": str}
+
+check_results: list = []
+failures: list = []
 
 
 def record(name: str, status: str, output: str = "") -> None:
     check_results.append({"name": name, "status": status, "output": output})
 
 
-# ── Syntax check ──────────────────────────────────────────────────────────────
-if qa["syntax"]:
-    syntax_out_parts = []
-    for f in py_files:
-        code, out = run(["uv", "run", "--no-sync", "python", "-m", "py_compile", str(f)])
-        if code != 0:
-            failures.append({"check": "syntax", "file": str(f.relative_to(TASK_DIR)), "output": out})
-            syntax_out_parts.append(f"{f.relative_to(TASK_DIR)}: {out}")
-    if syntax_out_parts:
-        record("syntax", "fail", "\\n".join(syntax_out_parts))
-    else:
-        record("syntax", "pass")
-else:
-    record("syntax", "skip")
+# ── Run checks ────────────────────────────────────────────────────────────────
+for _entry in checks:
+    _check = _expand(_entry)
+    _name  = _check["name"]
+    _cmd   = _check["command"]
+    _when  = _check["when_changed"]
 
-# ── ruff check (linting) ──────────────────────────────────────────────────────
-if qa["lint"] and py_files:
+    if not _cmd:
+        record(_name, "skip", "no command specified")
+        continue
+
+    if _when and not _files_match(_touched, _when):
+        record(_name, "skip", "no matching files touched")
+        continue
+
     try:
-        code, out = run(["ruff", "check"] + [str(f) for f in py_files])
-        if code != 0:
-            failures.append({"check": "ruff check", "file": "python files", "output": out})
-            record("ruff check", "fail", out)
-        else:
-            record("ruff check", "pass")
+        _code, _out = run(_cmd)
     except FileNotFoundError:
-        record("ruff check", "skip", "ruff not installed")
-else:
-    record("ruff check", "skip")
+        record(_name, "skip", f"{_cmd[0]!r} not found")
+        continue
 
-# ── ruff format --check ───────────────────────────────────────────────────────
-if qa["format"] and py_files:
-    try:
-        code, out = run(["ruff", "format", "--check"] + [str(f) for f in py_files])
-        if code != 0:
-            failures.append({"check": "ruff format", "file": "python files", "output": out})
-            record("ruff format", "fail", out)
-        else:
-            record("ruff format", "pass")
-    except FileNotFoundError:
-        record("ruff format", "skip", "ruff not installed")
-else:
-    record("ruff format", "skip")
-
-# ── pyright (type checking) ───────────────────────────────────────────────────
-if qa["type"] and py_files:
-    try:
-        code, out = run(["pyright"])
-        if code != 0:
-            failures.append({"check": "pyright", "file": "python files", "output": out})
-            record("pyright", "fail", out)
-        else:
-            record("pyright", "pass")
-    except FileNotFoundError:
-        record("pyright", "skip", "pyright not installed")
-else:
-    record("pyright", "skip")
-
-# ── pytest (unit tests) ───────────────────────────────────────────────────────
-if qa["test"]:
-    tests_dir = TASK_DIR / "tests"
-    if tests_dir.is_dir():
-        code, out = run(["uv", "run", "--no-sync", "pytest", str(tests_dir),
-                         "-x", "--tb=short", "-q"])
-        # Exit code 5 means pytest collected no tests — not a failure.
-        if code not in (0, 5):
-            failures.append({"check": "pytest", "file": "tests/", "output": out})
-            record("pytest", "fail", out)
-        else:
-            record("pytest", "pass")
+    # Exit code 5 from pytest means no tests collected — treat as pass.
+    if _code not in (0, 5):
+        failures.append({"check": _name, "output": _out})
+        record(_name, "fail", _out)
     else:
-        record("pytest", "skip", "no tests/ directory")
-else:
-    record("pytest", "skip")
-
-# ── pytest coverage ───────────────────────────────────────────────────────────
-if qa["coverage"]:
-    tests_dir = TASK_DIR / "tests"
-    if tests_dir.is_dir():
-        # Check that pytest-cov is available before attempting the run.
-        probe_code, _ = run(["uv", "run", "--no-sync", "python", "-c", "import pytest_cov"])
-        if probe_code != 0:
-            record("coverage", "skip", "pytest-cov not installed")
-        else:
-            threshold = int(qa.get("coverage_threshold", 80))
-            code, out = run([
-                "uv", "run", "--no-sync", "pytest", str(tests_dir),
-                "--cov", "--cov-report=term-missing",
-                f"--cov-fail-under={threshold}",
-                "-q",
-            ])
-            # Exit code 5 = no tests collected; treat as pass.
-            if code not in (0, 5):
-                failures.append({"check": f"coverage (threshold: {threshold}%)",
-                                  "file": "tests/", "output": out})
-                record(f"coverage (≥{threshold}%)", "fail", out)
-            else:
-                record(f"coverage (≥{threshold}%)", "pass")
-    else:
-        record("coverage", "skip", "no tests/ directory")
-else:
-    record("coverage", "skip")
+        record(_name, "pass")
 
 # ── Emit result JSON (always) ─────────────────────────────────────────────────
 result: dict = {"checks": check_results}
 if failures:
     feedback = "QA failed — fix the following issues before finishing:\\n\\n"
     for item in failures:
-        feedback += f"### {item[\'check\']} error in `{item[\'file\']}`\\n```\\n{item[\'output\']}\\n```\\n\\n"
+        feedback += f"### {item[\'check\']}\\n```\\n{item[\'output\']}\\n```\\n\\n"
     result["decision"] = "block"
     result["reason"] = feedback
 print(json.dumps(result))
@@ -1773,15 +1728,15 @@ try:
                         import yaml as _yaml  # noqa: PLC0415
                         _manifest = _yaml.safe_load(_manifest_path.read_text()) or {}
                         _mainlined_url = _manifest.get("runtime", {}).get("mainlined", {}).get("url")
-                    _atp_key = os.environ.get("MAINLINED_API_KEY")
-                    if _mainlined_url and _atp_key:
+                    _mainlined_key = os.environ.get("MAINLINED_API_KEY")
+                    if _mainlined_url and _mainlined_key:
                         import urllib.request  # noqa: PLC0415
                         _req = urllib.request.Request(
-                            _atp_url,
+                            _mainlined_url,
                             data=json.dumps(_payload).encode("utf-8"),
                             headers={
                                 "Content-Type": "application/json",
-                                "Authorization": f"Bearer {_atp_key}",
+                                "Authorization": f"Bearer {_mainlined_key}",
                             },
                             method="POST",
                         )

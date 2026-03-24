@@ -321,6 +321,60 @@ def _sync_manifest(path: Path, template_content: str) -> str:
     return "updated"
 
 
+def _policy_pull(manifest_content: str) -> str:
+    """Attempt to pull policy_ref + policy_version from a m<AI>nlined instance.
+
+    Reads ``policy.mainlined.url`` and ``policy.mainlined.policy_name`` from
+    the manifest.  If both are set, calls::
+
+        GET {url}/policy/{policy_name}
+
+    and writes the returned ``policy_ref`` + ``policy_version`` back into the
+    manifest so they are cargo-carried into ``invocation_hash`` via
+    ``manifest_hash`` — binding every proof to the exact central policy version
+    that was active at build time.
+
+    Falls back to the original manifest content on any failure (network
+    unreachable, server error, missing fields) so that offline or pre-Phase-1
+    workflows are unaffected.
+    """
+    try:
+        import json
+        import urllib.request
+
+        import yaml
+
+        parsed: dict = yaml.safe_load(manifest_content) or {}
+        mainlined = parsed.get("policy", {}).get("mainlined", {})
+        url = (mainlined.get("url") or "").rstrip("/")
+        policy_name = (mainlined.get("policy_name") or "").strip()
+        if not url or not policy_name:
+            return manifest_content
+
+        endpoint = f"{url}/policy/{policy_name}"
+        console.print(
+            f"  Pulling policy from m\u003cAI\u003enlined … [dim]{endpoint}[/dim]",
+            end="",
+        )
+        req = urllib.request.Request(endpoint, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data: dict = json.loads(resp.read())
+
+        policy_ref = str(data.get("policy_ref") or "")
+        policy_version = str(data.get("policy_version") or "")
+        if not policy_ref and not policy_version:
+            console.print(" [yellow]no ref returned[/yellow]")
+            return manifest_content
+
+        parsed["policy"]["mainlined"]["policy_ref"] = policy_ref
+        parsed["policy"]["mainlined"]["policy_version"] = policy_version
+        console.print(" [green]done[/green]")
+        return yaml.dump(parsed, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    except Exception as exc:
+        console.print(f" [yellow]warning — policy pull skipped: {exc}[/yellow]")
+        return manifest_content
+
+
 # Directory markers
 def _markers(target: Path) -> list[Path]:
     return [
@@ -914,6 +968,7 @@ def run_init(
         except Exception:
             pass
         console.print(f"  Using manifest: [dim]{manifest_path}[/dim]")
+        manifest_content = _policy_pull(manifest_content)
         try:
             image_rebuilt = _docker_setup(
                 docker_config,
@@ -940,6 +995,7 @@ def run_init(
                 "A policy manifest is required — running the setup wizard now.\n"
             )
             manifest_content = _run_wizard(docker_config)
+        manifest_content = _policy_pull(manifest_content)
         try:
             import yaml as _yaml
 
@@ -963,6 +1019,7 @@ def run_init(
             )
         console.print("Welcome to contAIned.\n")
         manifest_content = _run_wizard(docker_config)
+        manifest_content = _policy_pull(manifest_content)
 
         try:
             import yaml as _yaml
