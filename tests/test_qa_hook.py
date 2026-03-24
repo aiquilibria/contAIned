@@ -18,7 +18,9 @@ import json
 import sys
 from pathlib import Path
 
-from contained.templates import POLICY_LOADER_HOOK, QA_HOOK
+_HOOKS_DIR = Path(__file__).parent.parent / ".contAIned" / "hooks"
+POLICY_LOADER_HOOK = (_HOOKS_DIR / "_policy.py").read_text()
+QA_HOOK = (_HOOKS_DIR / "qa.py").read_text()
 
 # ── Inline mirror of _expand / _files_match (keeps tests independent) ─────────
 

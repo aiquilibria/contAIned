@@ -121,11 +121,21 @@ contAIned uses native settings for what they do well — hook registration, sand
 
 ## Install
 
+**macOS / Linux — Homebrew:**
+
 ```bash
-uv add contAIned
-# or
-pip install contAIned
+brew install lab-v2/tap/contained
 ```
+
+**macOS / Linux — curl installer:**
+
+```bash
+curl -fsSL https://github.com/lab-v2/contAIned/releases/latest/download/install.sh | sh
+```
+
+**Direct download:** grab the binary for your platform from [GitHub Releases](https://github.com/lab-v2/contAIned/releases), make it executable, and place it on your `$PATH`.
+
+The `contained` binary is a single self-contained executable with no runtime dependencies beyond Docker.
 
 **Prerequisites:** Docker must be installed and running. `cosign` is optional — required only if you enable build provenance (Sigstore) during `contAIned init`. Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/
 
@@ -135,10 +145,29 @@ pip install contAIned
 # 1. Go to your project
 cd my-project
 
-# 2. Initialize the contAIned workspace (builds the Docker image, wires hooks)
-contAIned init
+# 2. Write a manifest (see docs/policy-reference.md for the full schema)
+cat > policy.yaml << 'EOF'
+runtime:
+  docker:
+    image: contained:latest
+    memory: 2g
+    cpus: 2
+    network: contAIned-net
+    agent_config_volume: contAIned-agent-config
+agent:
+  model: claude-sonnet-4-6
+policy:
+  network:
+    enabled: true
+    allowed_domains:
+      - api.anthropic.com
+      - code.claude.com
+EOF
 
-# 3. Start a session
+# 3. Initialize the contAIned workspace (builds the Docker image, wires hooks)
+contAIned init --manifest policy.yaml
+
+# 4. Start a session
 contAIned
 ```
 
@@ -163,14 +192,16 @@ All input is forwarded verbatim to the agent. Use the **`/contained:tracer`** sk
 Scaffolds the contAIned workspace in the target directory (default: current directory).
 
 ```bash
-contAIned init                         # initialize with interactive wizard
-contAIned init ./myrepo                # initialize in a specific directory
-contAIned init --force                 # re-run setup wizard (reconfigure model, docker, etc.)
-contAIned init --rebuild               # force-rebuild the Docker image without re-running wizard
-contAIned init --manifest policy.yaml  # non-interactive: bake a pre-written manifest into the image
+contAIned init --manifest policy.yaml                      # bake a local manifest into the image
+contAIned init --mainlined https://mainlined.example.com   # fetch manifest from a Mainlined policy URL
+contAIned init ./myrepo --manifest policy.yaml             # initialize in a specific directory
+contAIned init --manifest policy.yaml --force              # re-initialise an existing workspace
+contAIned init --manifest policy.yaml --rebuild            # force-rebuild the Docker image
 ```
 
-Runs an interactive wizard to collect Docker and policy settings, then bakes those settings into the Docker image. Pass `--manifest` to skip the wizard and bake a pre-written `manifest.yaml` directly — suitable for CI/CD pipelines or reproducible team setups.
+A manifest must be provided via `--manifest` (local file) or `--mainlined` (Mainlined URL). Running without either flag prints a starter manifest and exits. See [docs/policy-reference.md](docs/policy-reference.md) for the full manifest schema.
+
+Bakes the manifest into the Docker image at build time — policy is enforced at the image layer.
 
 **Policy is enforced at the image layer.** Hook registration and sandbox rules live in `/etc/claude-code/managed-settings.json`, which is copied into the Docker image at build time. Claude Code treats this file as operator-managed policy: hooks registered there cannot be overridden or removed by the agent at runtime. The operator manifest is baked into `/etc/contained/manifest.yaml` inside the image; hooks read policy parameters from that path exclusively.
 
@@ -218,7 +249,7 @@ Checks:
 1. The current `contained:latest` image digest matches the digest recorded at init time — detects image replacement between sessions.
 2. The Sigstore signature in the Rekor transparency log is still valid for the recorded operator identity.
 
-Requires `docker` and `cosign` on the host. Run this before `contAIned` when operating in environments where image integrity matters.
+Requires `docker` on the host. Run this before `contAIned` when operating in environments where image integrity matters.
 
 ---
 

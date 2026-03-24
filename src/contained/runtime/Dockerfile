@@ -20,9 +20,11 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 # Install uv for fast Python package management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Install contAIned from the distributed package
+# Install contAIned into an isolated venv so it never contaminates the
+# workspace Python environment, regardless of what the agent installs.
 COPY . /opt/contAIned
-RUN uv pip install --system --python python3.13 --no-cache --break-system-packages "/opt/contAIned[dev]"
+RUN uv venv --python python3.13 /opt/contained-venv \
+    && uv pip install --python /opt/contained-venv/bin/python3 --no-cache "/opt/contAIned[dev]"
 
 # Create a non-root user whose UID/GID matches the host operator.
 # The GID may already exist in the base image (e.g., macOS staff group is 20,
@@ -33,6 +35,8 @@ RUN uv pip install --system --python python3.13 --no-cache --break-system-packag
 # present, eliminating the circular self-protection problem.
 RUN mkdir -p /etc/claude-code /etc/contained /run/contained
 COPY src/contained/runtime/statusline.py /etc/contained/statusline.py
+COPY src/contained/runtime/entrypoint.sh /etc/contained/entrypoint.sh
+RUN chmod +x /etc/contained/entrypoint.sh
 
 # Bake managed-settings.json into the image.
 # MANAGED_SETTINGS_CONTENT must be passed as a base64-encoded build arg by
@@ -75,4 +79,4 @@ RUN git config --global --add safe.directory /workspace
 
 WORKDIR /workspace
 
-ENTRYPOINT ["contained"]
+ENTRYPOINT ["/etc/contained/entrypoint.sh"]

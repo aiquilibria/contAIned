@@ -8,6 +8,27 @@ This document covers `policy` in full. For a quick orientation see the
 
 ---
 
+## Providing a manifest to `contained init`
+
+`contained init` requires a manifest via one of two flags:
+
+| Flag | Description |
+|---|---|
+| `--manifest <path>` | Local `manifest.yaml` file |
+| `--mainlined <url>` | Mainlined policy URL — fetched, validated, and written to `.contAIned/manifest.yaml` before scaffolding |
+
+Running without either flag prints a starter manifest to stderr and exits non-zero.
+
+**`--mainlined` flow:**
+
+1. Fetches the manifest YAML from the URL (HTTP GET). Set `MAINLINED_TOKEN` in the environment for private policies.
+2. Validates the fetched YAML against the manifest schema.
+3. Writes it to `.contAIned/manifest.yaml`.
+4. Records the URL in the manifest under `policy.mainlined.url` so that future sessions can detect drift if the remote policy is updated.
+5. Proceeds with normal scaffolding as if `--manifest` had been passed.
+
+---
+
 ## Rule evaluation — first match wins
 
 Both `secrets.rules` and `bash.rules` use **first-match-wins** ordering.

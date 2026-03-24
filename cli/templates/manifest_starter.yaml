@@ -1,0 +1,153 @@
+# contAIned policy manifest
+#
+# Three sections:
+#   1. runtime — Docker container resource settings.
+#   2. agent   — model selection passed to the claude CLI.
+#   3. policy  — all governance settings read by the hook scripts,
+#                including build-time provenance (sigstore).
+#
+# Action values accepted by policy settings:
+#   block    — deny the operation outright; agent receives a clear reason
+#   allow    — permit unconditionally
+#   escalate — pass through to the SDK's canUseTool callback for operator approval
+#
+# Note: writes to .contAIned/ are always denied regardless of policy settings —
+# control-plane protection is hardcoded and not configurable.
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+runtime:
+  docker:
+    image: contained:latest
+    memory: 2g
+    cpus: 2
+    network: contAIned-net
+    agent_config_volume: contAIned-agent-config
+  mainlined:
+    url: ""   # e.g. https://mainlined.example.com
+
+# ── Agent ─────────────────────────────────────────────────────────────────────
+agent:
+  model: claude-sonnet-4-6
+  budget_tokens: 1024
+
+policy:
+
+  # ── Sigstore provenance ──────────────────────────────────────────────────────
+  sigstore:
+    enabled: true
+    rekor_url: https://rekor.sigstore.dev
+    fulcio_url: https://fulcio.sigstore.dev
+
+  # ── Secret-file protection ──────────────────────────────────────────────────
+  secrets:
+    rules:
+      - name: safe-variants
+        patterns: ['\\.(example|sample|template)']
+        action: allow
+      - name: dotenv
+        patterns: ['(^|[/\\\\])\\.env(\\.[^/\\\\]+)?$']
+        reason: "Secret files (credentials, keys, .env) may not be accessed."
+        action: block
+      - name: keys
+        patterns: ['\\.(pem|key|p12|pfx|jks|keystore)$']
+        reason: "Secret files (credentials, keys, .env) may not be accessed."
+        action: block
+      - name: ssh-keys
+        patterns: ['(^|[/\\\\])id_(rsa|dsa|ecdsa|ed25519)$']
+        reason: "Secret files (credentials, keys, .env) may not be accessed."
+        action: block
+      - name: credential-files
+        patterns: ['(^|[/\\\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$']
+        reason: "Secret files (credentials, keys, .env) may not be accessed."
+        action: block
+      - name: secret-extension
+        patterns: ['\\.(secret|secrets)$']
+        reason: "Secret files (credentials, keys, .env) may not be accessed."
+        action: block
+
+  # ── Bash command restrictions ────────────────────────────────────────────────
+  bash:
+    rules:
+      - name: safe-git-reads
+        patterns:
+          - '^git\s+status\b'
+          - '^git\s+log\b'
+          - '^git\s+diff\b'
+          - '^git\s+show\b'
+          - '^git\s+branch\b'
+          - '^git\s+stash\s+list\b'
+          - '^git\s+remote\b'
+        action: allow
+      - name: safe-read-only
+        patterns: ['^ls\b', '^pwd\b', '^echo\s', '^which\s', '^grep\b', '^rg\b', '^find\b', '^cat\b', '^wc\b']
+        action: allow
+      - name: destructive
+        patterns: ['^rm\s', '.*\brm\s+-rf\b.*']
+        reason: "Destructive file deletion is not permitted."
+        action: block
+      - name: privilege_escalation
+        patterns: ['^sudo\s']
+        reason: "Privilege escalation is not permitted."
+        action: block
+      - name: network_exfiltration
+        patterns: ['^(curl|wget|nc|ncat)\s']
+        reason: "Outbound network calls from Bash are not permitted."
+        action: block
+      - name: package_publish
+        patterns: ['^(npm\s+publish|pip\s+upload|twine\s+upload)\b']
+        reason: "Package publishing requires explicit operator approval."
+        action: block
+
+  # ── Network policy ────────────────────────────────────────────────────────────
+  network:
+    enabled: true
+    allowed_domains:
+      - api.anthropic.com
+      - code.claude.com
+      - docs.anthropic.com
+
+  # ── Audit logging ─────────────────────────────────────────────────────────────
+  audit:
+    enabled: true
+    jsonl_export: false
+
+  # ── QA gate ───────────────────────────────────────────────────────────────────
+  qa:
+    checks:
+      - name: lint
+        command: ["ruff", "check", "."]
+        when_changed: ["*.py"]
+      - name: format
+        command: ["ruff", "format", "--check", "."]
+        when_changed: ["*.py"]
+      - name: types
+        command: ["pyright"]
+        when_changed: ["*.py"]
+      - name: tests
+        command: ["python", "-m", "pytest", "tests/", "-x", "--tb=short", "-q"]
+        when_changed: ["*.py"]
+      - name: coverage
+        command: ["python", "-m", "pytest", "tests/", "--cov", "--cov-report=term-missing", "--cov-fail-under=80", "-q"]
+        when_changed: ["*.py"]
+
+  # ── MCP server approvals ──────────────────────────────────────────────────────
+  mcp:
+    approved_servers: []
+
+  # ── Skill approvals ───────────────────────────────────────────────────────────
+  skills:
+    approved_skills: []
+
+  # ── Mainlined policy coordination ─────────────────────────────────────────────
+  mainlined:
+    url: ""
+    policy_name: ""
+    policy_ref: ""
+    policy_version: ""
+
+# ── Sandbox ───────────────────────────────────────────────────────────────────
+sandbox:
+  enabled: true
+  filesystem:
+    denyWrite:
+      - .contAIned
