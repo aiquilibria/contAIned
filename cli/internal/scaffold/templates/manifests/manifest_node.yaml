@@ -1,0 +1,20 @@
+# contAIned repo manifest — Node.js ecosystem
+#
+# Commit this file to .contAIned_manifest.yaml in your repository root.
+# Only runtime.docker.toolchains and policy.qa.checks are permitted here;
+# all policy settings are owned by the Mainlined or operator manifest.
+#
+# `contained init` merges this file on top of the operator manifest at
+# image build time. Any change here triggers an image rebuild.
+
+runtime:
+  docker:
+    toolchains:
+      node: "20"   # pin your project's Node major version here
+
+policy:
+  qa:
+    checks:
+      - name: test
+        command: [npm, test]
+        when_changed: ["*.js", "*.ts", "*.mjs", "*.cjs"]

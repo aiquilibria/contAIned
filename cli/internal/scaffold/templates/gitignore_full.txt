@@ -23,5 +23,5 @@ node_modules/
 
 # ── contAIned — control plane ─────────────────────────────────────────────────────
 # The .contAIned/ directory contains hooks, policy, and audit logs managed by contAIned.
-# Keep it out of version control.
+# Keep it out of version control. The repo manifest lives at .contAIned_manifest.yaml.
 .contAIned/

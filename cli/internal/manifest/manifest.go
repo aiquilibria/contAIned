@@ -27,11 +27,12 @@ type MainlinedRuntimeConfig struct {
 }
 
 type DockerConfig struct {
-	Image             string `yaml:"image"`
-	Memory            string `yaml:"memory"`
-	CPUs              int    `yaml:"cpus"`
-	Network           string `yaml:"network"`
-	AgentConfigVolume string `yaml:"agent_config_volume"`
+	Image             string            `yaml:"image"`
+	Memory            string            `yaml:"memory"`
+	CPUs              int               `yaml:"cpus"`
+	Network           string            `yaml:"network"`
+	AgentConfigVolume string            `yaml:"agent_config_volume"`
+	Toolchains        map[string]string `yaml:"toolchains,omitempty"`
 }
 
 type AgentConfig struct {

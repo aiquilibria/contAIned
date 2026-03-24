@@ -41,7 +41,7 @@ func UpdateGitignore(repoRoot string) (string, error) {
 	// Already fully covered.
 	for _, line := range strings.Split(text, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == ".contAIned/" || trimmed == ".contAIned" {
+		if trimmed == ".contAIned/" || trimmed == ".contAIned" || trimmed == ".contAIned/*" {
 			return "already configured", nil
 		}
 	}

@@ -253,7 +253,7 @@ func DockerSetup(
 		}
 
 		// Determine build context and CONTAINED_PACKAGE arg.
-		buildContext, containedPkg, err := prepareBuildContext(source)
+		buildContext, containedPkg, err := prepareBuildContext(source, cfg.Toolchains)
 		if err != nil {
 			return false, err
 		}
@@ -261,6 +261,8 @@ func DockerSetup(
 			// Temp dir — clean up after build.
 			defer os.RemoveAll(buildContext)
 		}
+		// Always clean up the temp toolchains.sh written into the source tree.
+		defer os.Remove(filepath.Join(buildContext, "toolchains.sh"))
 
 		printf("  Building image %s …", image)
 
@@ -312,36 +314,102 @@ func DockerSetup(
 	return needsBuild, nil
 }
 
+// GenerateToolchainsScript returns a shell script that installs each toolchain
+// in the provided map using its official method. Returns a no-op script when
+// the map is empty. The script runs as root inside the Docker build context.
+//
+// Supported toolchains: go, node, ruby, java.
+func GenerateToolchainsScript(toolchains map[string]string) string {
+	if len(toolchains) == 0 {
+		return "#!/bin/sh\n# no toolchains declared\n"
+	}
+
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\nset -eu\n\n")
+	b.WriteString("# Detect architecture once.\n")
+	b.WriteString("ARCH=$(uname -m)\n")
+	b.WriteString("case \"$ARCH\" in\n")
+	b.WriteString("  x86_64)  ARCH=amd64 ;;\n")
+	b.WriteString("  aarch64) ARCH=arm64 ;;\n")
+	b.WriteString("  *) echo \"Unsupported architecture: $ARCH\" >&2; exit 1 ;;\n")
+	b.WriteString("esac\n\n")
+
+	if ver, ok := toolchains["go"]; ok {
+		fmt.Fprintf(&b, "# Go %s\n", ver)
+		fmt.Fprintf(&b, "curl -fsSL \"https://go.dev/dl/go%s.linux-${ARCH}.tar.gz\" | tar -C /usr/local -xzf -\n\n", ver)
+	}
+
+	if ver, ok := toolchains["node"]; ok {
+		// NodeSource uses the major version number only.
+		major := strings.SplitN(ver, ".", 2)[0]
+		fmt.Fprintf(&b, "# Node.js %s\n", ver)
+		fmt.Fprintf(&b, "curl -fsSL \"https://deb.nodesource.com/setup_%s.x\" | bash -\n", major)
+		b.WriteString("apt-get install -y --no-install-recommends nodejs\n")
+		b.WriteString("rm -rf /var/lib/apt/lists/*\n\n")
+	}
+
+	if ver, ok := toolchains["ruby"]; ok {
+		fmt.Fprintf(&b, "# Ruby %s via ruby-build\n", ver)
+		b.WriteString("apt-get update && apt-get install -y --no-install-recommends ruby-build\n")
+		b.WriteString("rm -rf /var/lib/apt/lists/*\n")
+		fmt.Fprintf(&b, "ruby-build \"%s\" /usr/local/ruby\n\n", ver)
+	}
+
+	if ver, ok := toolchains["java"]; ok {
+		// Eclipse Temurin; use the major version (e.g., "21" from "21.0.3").
+		major := strings.SplitN(ver, ".", 2)[0]
+		fmt.Fprintf(&b, "# Java %s (Eclipse Temurin)\n", ver)
+		b.WriteString("apt-get update && apt-get install -y --no-install-recommends wget apt-transport-https gnupg\n")
+		b.WriteString("mkdir -p /etc/apt/keyrings\n")
+		b.WriteString("wget -qO /etc/apt/keyrings/adoptium.asc https://packages.adoptium.net/artifactory/api/gpg/key/public\n")
+		b.WriteString("echo \"deb [signed-by=/etc/apt/keyrings/adoptium.asc] " +
+			"https://packages.adoptium.net/artifactory/deb " +
+			"$(awk -F= '/^VERSION_CODENAME/{print$2}' /etc/os-release) main\" " +
+			"| tee /etc/apt/sources.list.d/adoptium.list\n")
+		fmt.Fprintf(&b, "apt-get update && apt-get install -y --no-install-recommends temurin-%s-jdk\n", major)
+		b.WriteString("rm -rf /var/lib/apt/lists/*\n\n")
+	}
+
+	return b.String()
+}
+
 // prepareBuildContext returns (contextDir, containedPackageArg, error).
 // If source is non-empty (local source tree), it is used as the context.
 // Otherwise a temp dir is created containing just the embedded Dockerfile,
 // and containedPackageArg is "contained[dev]" for PyPI install.
-func prepareBuildContext(source string) (string, string, error) {
+// toolchains.sh is always written to the build context (no-op when empty).
+func prepareBuildContext(source string, toolchains map[string]string) (string, string, error) {
 	dockerfileContent, err := scaffold.TemplateContent("templates/Dockerfile")
 	if err != nil {
 		return "", "", err
 	}
 
+	toolchainsScript := GenerateToolchainsScript(toolchains)
+
 	if source != "" {
 		// Local source mode: use the source tree as the build context so
-		// COPY . /opt/contAIned works. Write the Dockerfile into it temporarily;
-		// the caller is responsible for removing the temp file after the build.
-		// We use a unique name to avoid colliding with any existing Dockerfile.
+		// COPY . /opt/contAIned works. Write temp files; caller removes them.
 		dfPath := filepath.Join(source, ".contained-build.Dockerfile")
 		if err := os.WriteFile(dfPath, []byte(dockerfileContent), 0o644); err != nil {
 			return "", "", fmt.Errorf("writing Dockerfile to source: %w", err)
 		}
-		// Signal to caller: context is source (don't RemoveAll), but Dockerfile
-		// is the temp file we just wrote.
+		tcPath := filepath.Join(source, "toolchains.sh")
+		if err := os.WriteFile(tcPath, []byte(toolchainsScript), 0o755); err != nil {
+			return "", "", fmt.Errorf("writing toolchains.sh to source: %w", err)
+		}
 		return source, "/opt/contAIned[dev]", nil
 	}
 
-	// PyPI mode: temp dir with just the Dockerfile.
+	// PyPI mode: temp dir with Dockerfile and toolchains.sh.
 	tmp, err := os.MkdirTemp("", "contained-build-")
 	if err != nil {
 		return "", "", fmt.Errorf("creating build temp dir: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(tmp, "Dockerfile"), []byte(dockerfileContent), 0o644); err != nil {
+		os.RemoveAll(tmp)
+		return "", "", err
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "toolchains.sh"), []byte(toolchainsScript), 0o755); err != nil {
 		os.RemoveAll(tmp)
 		return "", "", err
 	}

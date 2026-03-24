@@ -19,6 +19,16 @@ This document covers `policy` in full. For a quick orientation see the
 
 Running without either flag prints a starter manifest to stderr and exits non-zero.
 
+Use `--ecosystem` to print a pre-filled **repo manifest** starter (toolchains + QA only) for a specific stack:
+
+```bash
+contained init --ecosystem go     # Go: go test + go vet
+contained init --ecosystem node   # Node.js: npm test
+contained init --ecosystem python # Python: ruff + pyright + pytest
+```
+
+Save the output to `.contAIned_manifest.yaml` in your repository root. `contained init` merges it on top of the operator manifest at build time. See [repo-manifest-composition.md](repo-manifest-composition.md) for the merge rules and version constraint syntax.
+
 **`--mainlined` flow:**
 
 1. Fetches the manifest YAML from the URL (HTTP GET). Set `MAINLINED_TOKEN` in the environment for private policies.
@@ -26,6 +36,31 @@ Running without either flag prints a starter manifest to stderr and exits non-ze
 3. Writes it to `.contAIned/manifest.yaml`.
 4. Records the URL in the manifest under `policy.mainlined.url` so that future sessions can detect drift if the remote policy is updated.
 5. Proceeds with normal scaffolding as if `--manifest` had been passed.
+
+---
+
+## `runtime.docker.toolchains`
+
+Installs additional language runtimes into the container image at build time.
+Supported names: `go`, `node`, `ruby`, `java`.
+
+```yaml
+runtime:
+  docker:
+    toolchains:
+      go: "1.22.5"     # exact version (Mainlined) or pinned version (repo)
+      node: "20"       # major version for Node.js
+      java: "21"       # major version for Eclipse Temurin JDK
+```
+
+**Constraint syntax** (Mainlined manifest only):
+
+| Format | Meaning |
+|---|---|
+| `1.22.5` or `==1.22.5` | Exact version required |
+| `>=1.22` | Repo version must be ≥ this floor |
+
+When a repo manifest also declares a toolchain, its version must satisfy the Mainlined constraint or `contained init` fails. The repo's pinned version is used as the install target.
 
 ---
 

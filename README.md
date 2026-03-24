@@ -197,9 +197,39 @@ contAIned init --mainlined https://mainlined.example.com   # fetch manifest from
 contAIned init ./myrepo --manifest policy.yaml             # initialize in a specific directory
 contAIned init --manifest policy.yaml --force              # re-initialise an existing workspace
 contAIned init --manifest policy.yaml --rebuild            # force-rebuild the Docker image
+contAIned init --ecosystem go                              # print a Go repo manifest starter and exit
 ```
 
 A manifest must be provided via `--manifest` (local file) or `--mainlined` (Mainlined URL). Running without either flag prints a starter manifest and exits. See [docs/policy-reference.md](docs/policy-reference.md) for the full manifest schema.
+
+#### Repo manifest
+
+Repositories may commit a `.contAIned_manifest.yaml` at the repo root that declares toolchains and QA checks. This file is merged into the operator manifest at `contained init` time — the image is the single merged artifact. Only two fields are permitted; any others cause `contained init` to fail.
+
+```yaml
+# .contAIned_manifest.yaml — committed to the repository root
+runtime:
+  docker:
+    toolchains:
+      go: "1.22.5"    # installed at image build time
+
+policy:
+  qa:
+    checks:
+      - name: test
+        command: [go, test, ./...]
+        when_changed: ["*.go"]
+```
+
+Use `--ecosystem` to print a pre-filled starter for your stack:
+
+```bash
+contAIned init --ecosystem go     > .contAIned_manifest.yaml
+contAIned init --ecosystem node   > .contAIned_manifest.yaml
+contAIned init --ecosystem python > .contAIned_manifest.yaml
+```
+
+See [docs/repo-manifest-composition.md](docs/repo-manifest-composition.md) for the full schema and version constraint rules.
 
 Bakes the manifest into the Docker image at build time — policy is enforced at the image layer.
 

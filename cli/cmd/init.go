@@ -5,11 +5,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
 
 	"contained.dev/cli/internal/docker"
 	"contained.dev/cli/internal/manifest"
@@ -33,7 +35,9 @@ Examples:
   contained init --manifest policy.yaml
   contained init --mainlined https://mainlined.example.com
   contained init --manifest policy.yaml --rebuild
-  contained init ./myrepo --manifest policy.yaml`,
+  contained init ./myrepo --manifest policy.yaml
+  contained init --ecosystem go
+  contained init --ecosystem go,python`,
 	Args:         cobra.MaximumNArgs(1),
 	RunE:         runInit,
 	SilenceUsage: true,
@@ -42,6 +46,7 @@ Examples:
 var (
 	initManifestPath string
 	initMainlinedURL string
+	initEcosystem    []string
 	initForce        bool
 	initRebuild      bool
 )
@@ -49,6 +54,7 @@ var (
 func init() {
 	initCmd.Flags().StringVar(&initManifestPath, "manifest", "", "Path to manifest.yaml to bake into the image")
 	initCmd.Flags().StringVar(&initMainlinedURL, "mainlined", "", "Mainlined URL to fetch manifest from")
+	initCmd.Flags().StringSliceVar(&initEcosystem, "ecosystem", nil, "Print a repo manifest starter for these ecosystem(s) and exit (go, node, python; comma-separated or repeated)")
 	initCmd.Flags().BoolVarP(&initForce, "force", "f", false, "Re-initialise even if workspace already exists")
 	initCmd.Flags().BoolVarP(&initRebuild, "rebuild", "r", false, "Force Docker image rebuild")
 	rootCmd.AddCommand(initCmd)
@@ -66,7 +72,12 @@ func runInit(_ *cobra.Command, args []string) error {
 	bold.Printf("\ncontAIned init")
 	dim.Printf(" — %s\n\n", target)
 
-	// Require --manifest or --mainlined. Neither → print starter and exit.
+	// --ecosystem → print repo manifest starter for those ecosystems and exit.
+	if len(initEcosystem) > 0 {
+		return printEcosystemStarterAndExit(initEcosystem)
+	}
+
+	// Require --manifest or --mainlined. Neither → print generic starter and exit.
 	if initManifestPath == "" && initMainlinedURL == "" {
 		return printStarterAndExit()
 	}
@@ -103,6 +114,30 @@ func runInit(_ *cobra.Command, args []string) error {
 		}
 		manifestContent = string(raw)
 		dim.Printf("  Using manifest: %s\n\n", initManifestPath)
+	}
+
+	// Merge repo-level manifest (toolchains + QA checks) if present.
+	repoManifest, err := manifest.LoadRepoManifest(target)
+	if err != nil {
+		return fmt.Errorf("repo manifest: %w", err)
+	}
+	if repoManifest != nil {
+		if err := manifest.ValidateRepoManifest(repoManifest); err != nil {
+			return fmt.Errorf("repo manifest validation: %w", err)
+		}
+		m, err = manifest.MergeRepoManifest(m, repoManifest)
+		if err != nil {
+			return fmt.Errorf("merging repo manifest: %w", err)
+		}
+		// Re-serialise so the merged state is what gets baked into the image.
+		manifestContent, err = manifest.Serialise(m)
+		if err != nil {
+			return err
+		}
+		dim.Printf("  Repo manifest merged: %d toolchain(s), %d QA check(s).\n",
+			len(repoManifest.Runtime.Docker.Toolchains),
+			len(repoManifest.Policy.QA.Checks),
+		)
 	}
 
 	// Pull policy_ref/version from mainlined if configured.
@@ -192,6 +227,16 @@ func runInit(_ *cobra.Command, args []string) error {
 		results = append(results, result{mf.RelPath, status})
 	}
 
+	// Report merged toolchains and QA checks in the results table.
+	if repoManifest != nil {
+		for name, version := range repoManifest.Runtime.Docker.Toolchains {
+			results = append(results, result{"toolchain: " + name, version})
+		}
+		for _, check := range repoManifest.Policy.QA.Checks {
+			results = append(results, result{"qa check: " + check.Name, "merged"})
+		}
+	}
+
 	// Manifest — write only on first init or --force; never overwrite on refresh.
 	manifestDest := filepath.Join(target, ".contAIned", "manifest.yaml")
 	manifestStatus, err := scaffold.WriteFile(manifestDest, manifestContent, false, initForce)
@@ -259,7 +304,7 @@ func resolveInitTarget(args []string) (string, error) {
 }
 
 func printStarterAndExit() error {
-	starter, err := scaffold.TemplateContent("templates/manifest_starter.yaml")
+	starter, err := scaffold.TemplateContent("templates/manifests/manifest_generic.yaml")
 	if err != nil {
 		return err
 	}
@@ -270,6 +315,11 @@ it for your project, then re-run:
 
   contained init --manifest policy.yaml
 
+For a repo-level manifest (toolchains + QA only), use --ecosystem:
+
+  contained init --ecosystem go             # or: node, python
+  contained init --ecosystem go,python     # multiple ecosystems
+
 ──────────────────────────────────────────────────────────────────────────────
 %s
 ──────────────────────────────────────────────────────────────────────────────
@@ -277,6 +327,75 @@ it for your project, then re-run:
 See docs/policy-reference.md for full schema documentation.
 `, starter)
 	os.Exit(1)
+	return nil
+}
+
+var ecosystemTemplates = map[string]string{
+	"go":     "templates/manifests/manifest_go.yaml",
+	"node":   "templates/manifests/manifest_node.yaml",
+	"python": "templates/manifests/manifest_python.yaml",
+}
+
+func printEcosystemStarterAndExit(ecosystems []string) error {
+	supported := make([]string, 0, len(ecosystemTemplates))
+	for k := range ecosystemTemplates {
+		supported = append(supported, k)
+	}
+	sort.Strings(supported)
+
+	for _, name := range ecosystems {
+		if _, ok := ecosystemTemplates[name]; !ok {
+			fmt.Fprintf(os.Stderr, "Error: unknown ecosystem %q. Supported: %s\n", name, strings.Join(supported, ", "))
+			os.Exit(1)
+		}
+	}
+
+	var starter string
+	if len(ecosystems) == 1 {
+		// Single ecosystem: print template verbatim to preserve comments.
+		content, err := scaffold.TemplateContent(ecosystemTemplates[ecosystems[0]])
+		if err != nil {
+			return err
+		}
+		starter = content
+	} else {
+		// Multiple ecosystems: merge toolchains (union) and QA checks (concatenated).
+		merged := &manifest.RepoManifest{}
+		merged.Runtime.Docker.Toolchains = make(map[string]string)
+		for _, name := range ecosystems {
+			raw, err := scaffold.TemplateContent(ecosystemTemplates[name])
+			if err != nil {
+				return err
+			}
+			var r manifest.RepoManifest
+			if err := yaml.Unmarshal([]byte(raw), &r); err != nil {
+				return fmt.Errorf("parsing %s template: %w", name, err)
+			}
+			for k, v := range r.Runtime.Docker.Toolchains {
+				merged.Runtime.Docker.Toolchains[k] = v
+			}
+			merged.Policy.QA.Checks = append(merged.Policy.QA.Checks, r.Policy.QA.Checks...)
+		}
+		out, err := yaml.Marshal(merged)
+		if err != nil {
+			return fmt.Errorf("serialising merged manifest: %w", err)
+		}
+		starter = "# merged from: " + strings.Join(ecosystems, ", ") + "\n" + string(out)
+	}
+
+	label := strings.Join(ecosystems, ", ")
+	fmt.Fprintf(os.Stderr, `Repo manifest starter for ecosystem: %s
+
+Save this to .contAIned_manifest.yaml in your repository root and commit it.
+It will be merged into the operator manifest on the next `+"`contained init`"+`.
+
+──────────────────────────────────────────────────────────────────────────────
+%s
+──────────────────────────────────────────────────────────────────────────────
+
+See docs/repo-manifest-composition.md for full schema documentation.
+`, label, starter)
+	os.Exit(0)
 	return nil
 }
 
@@ -330,14 +449,14 @@ func printResultTable(results []result) {
 		switch r.status {
 		case "created", "migrated":
 			statusStr = green.Sprint(r.status)
-		case "updated":
+		case "updated", "merged":
 			statusStr = yellow.Sprint(r.status)
 		case "exists", "already configured":
 			statusStr = dim.Sprint(r.status + " — skipped")
 		case "failed":
 			statusStr = red.Sprint(r.status)
 		default:
-			statusStr = r.status
+			statusStr = dim.Sprint(r.status)
 		}
 		fmt.Fprintf(w, "  %s\t%s\n", dim.Sprint(r.file), statusStr)
 	}
