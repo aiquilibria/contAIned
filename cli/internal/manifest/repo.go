@@ -3,6 +3,7 @@ package manifest
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,7 @@ func LoadRepoManifest(root string) (*RepoManifest, error) {
 	var r RepoManifest
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
-	if err := dec.Decode(&r); err != nil {
+	if err := dec.Decode(&r); err != nil && err != io.EOF {
 		return nil, fmt.Errorf("repo manifest contains disallowed fields "+
 			"(only runtime.docker.toolchains and policy.qa.checks are permitted): %w", err)
 	}

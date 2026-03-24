@@ -31,8 +31,8 @@ policy:
         command: [pytest, tests/, --cov, --cov-report=term-missing, --cov-fail-under=80, -q]
         when_changed: ["*.py"]
       - name: go-test
-        command: [go, test, ./...]
+        command: [sh, -c, "cd cli && go test ./..."]
         when_changed: ["*.go"]
       - name: go-vet
-        command: [go, vet, ./...]
+        command: [sh, -c, "cd cli && go vet ./..."]
         when_changed: ["*.go"]
