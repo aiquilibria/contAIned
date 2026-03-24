@@ -81,9 +81,9 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 
 	settings := map[string]any{
 		"permissions": map[string]any{
-			"allow":                       allowRules,
-			"ask":                         []string{"WebFetch", "WebSearch"},
-			"disableBypassPermissionsMode": "disable",
+			"allow":                           allowRules,
+			"ask":                             []string{"WebFetch", "WebSearch"},
+			"disableBypassPermissionsMode":    "disable",
 			"allowManagedPermissionRulesOnly": true,
 		},
 		"hooks": map[string]any{
@@ -97,18 +97,18 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 				map[string]any{"matcher": "Bash", "hooks": []any{h("push_hook")}},
 				map[string]any{"matcher": "*", "hooks": []any{h("audit")}},
 			},
-			"SubagentStart":   []any{map[string]any{"hooks": []any{h("subagent_start")}}},
-			"SubagentStop":    []any{map[string]any{"hooks": []any{h("subagent_stop")}}},
-			"Stop":            []any{map[string]any{"hooks": []any{h("summarizer")}}},
-			"UserPromptSubmit": []any{map[string]any{"hooks": []any{h("user_prompt_submit")}}},
+			"SubagentStart":     []any{map[string]any{"hooks": []any{h("subagent_start")}}},
+			"SubagentStop":      []any{map[string]any{"hooks": []any{h("subagent_stop")}}},
+			"Stop":              []any{map[string]any{"hooks": []any{h("summarizer")}}},
+			"UserPromptSubmit":  []any{map[string]any{"hooks": []any{h("user_prompt_submit")}}},
 			"PermissionRequest": []any{map[string]any{"hooks": []any{h("permission_request")}}},
 		},
 		"sandbox": map[string]any{
-			"enabled":                  true,
+			"enabled":                   true,
 			"enableWeakerNestedSandbox": true,
-			"allowUnsandboxedCommands": false,
+			"allowUnsandboxedCommands":  false,
 			"network": map[string]any{
-				"allowedDomains":        allowedDomains,
+				"allowedDomains":          allowedDomains,
 				"allowManagedDomainsOnly": true,
 			},
 			"filesystem": map[string]any{
@@ -134,7 +134,7 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 }
 
 // PolicyPull attempts to fetch policy_ref and policy_version from the
-// Mainlined instance and write them back into the manifest YAML.
+// mAInlined instance and write them back into the manifest YAML.
 // Falls back to the original content on any error (network unavailable,
 // missing fields) so offline workflows are unaffected.
 func PolicyPull(manifestContent string) string {
@@ -143,9 +143,9 @@ func PolicyPull(manifestContent string) string {
 		return manifestContent
 	}
 
-	mainlined, _ := nestedMap(parsed, "policy", "mainlined")
-	url := strings.TrimRight(stringVal(mainlined["url"]), "/")
-	policyName := strings.TrimSpace(stringVal(mainlined["policy_name"]))
+	mAInlined, _ := nestedMap(parsed, "policy", "mAInlined")
+	url := strings.TrimRight(stringVal(mAInlined["url"]), "/")
+	policyName := strings.TrimSpace(stringVal(mAInlined["policy_name"]))
 	if url == "" || policyName == "" {
 		return manifestContent
 	}
@@ -170,15 +170,15 @@ func PolicyPull(manifestContent string) string {
 		return manifestContent
 	}
 
-	if mainlined == nil {
-		mainlined = map[string]any{}
+	if mAInlined == nil {
+		mAInlined = map[string]any{}
 	}
-	mainlined["policy_ref"] = policyRef
-	mainlined["policy_version"] = policyVersion
+	mAInlined["policy_ref"] = policyRef
+	mAInlined["policy_version"] = policyVersion
 
 	// Write back into the parsed map.
 	if pol, ok := parsed["policy"].(map[string]any); ok {
-		pol["mainlined"] = mainlined
+		pol["mAInlined"] = mAInlined
 	}
 
 	out, err := yaml.Marshal(parsed)

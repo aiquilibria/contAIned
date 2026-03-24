@@ -2,10 +2,10 @@
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
 # Only runtime.docker.toolchains and policy.qa.checks are permitted here;
-# all policy settings are owned by the Mainlined or operator manifest.
+# all policy settings are owned by the mAInlined manifest.
 #
 # Python is pre-installed in the base image — no toolchain entry needed.
-# `contained init` merges this file on top of the operator manifest at
+# `contained init` merges this file on top of the mAInlined manifest at
 # image build time. Any change here triggers an image rebuild.
 
 policy:

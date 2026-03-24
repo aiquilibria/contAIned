@@ -1,9 +1,8 @@
-# contAIned repo manifest — TypeScript / Node.js project
+# contAIned repo manifest — TypeScript ecosystem
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
 # Only runtime.docker.toolchains and policy.qa.checks are permitted here;
-# all policy settings (secrets, bash rules, network, sigstore, etc.) are
-# owned by the mAInlined manifest.
+# all policy settings are owned by the mAInlined manifest.
 #
 # `contained init` merges this file on top of the mAInlined manifest at
 # image build time. Any change here triggers an image rebuild.
@@ -11,20 +10,17 @@
 runtime:
   docker:
     toolchains:
-      node: "20"   # pin your project's Node.js version here
+      node: "20"   # TypeScript runs on Node.js — pin your project's major version here
 
 policy:
   qa:
     checks:
-      - name: ts-build
+      - name: typecheck
         command: [npx, tsc, --noEmit]
         when_changed: ["*.ts", "*.tsx"]
-
       - name: lint
-        command: [npx, eslint, src/, --max-warnings=0]
+        command: [npx, eslint, .]
         when_changed: ["*.ts", "*.tsx", "*.js"]
-
-      # Replace "vitest" with "jest" if your project uses jest
-      - name: tests
-        command: [npx, vitest, run, --reporter=verbose]
-        when_changed: ["*.ts", "*.tsx"]
+      - name: test
+        command: [npm, test]
+        when_changed: ["*.ts", "*.tsx", "*.js"]

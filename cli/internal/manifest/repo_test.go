@@ -153,7 +153,7 @@ func TestValidateRepoManifest_QACheckMissingCommand(t *testing.T) {
 
 // ── MergeRepoManifest ─────────────────────────────────────────────────────────
 
-func TestMergeRepoManifest_NilRepo_ReturnsCopyOfMainlined(t *testing.T) {
+func TestMergeRepoManifest_NilRepo_ReturnsCopyOfmAInlined(t *testing.T) {
 	m := validManifest()
 	m.Policy.QA.Checks = []QACheck{{Name: "lint", Command: []string{"ruff", "check", "."}}}
 
@@ -166,7 +166,7 @@ func TestMergeRepoManifest_NilRepo_ReturnsCopyOfMainlined(t *testing.T) {
 	}
 }
 
-func TestMergeRepoManifest_RepoToolchain_AddedWhenNoMainlinedConstraint(t *testing.T) {
+func TestMergeRepoManifest_RepoToolchain_AddedWhenNomAInlinedConstraint(t *testing.T) {
 	m := validManifest()
 	repo := &RepoManifest{}
 	repo.Runtime.Docker.Toolchains = map[string]string{"go": "1.22.5"}
@@ -237,7 +237,7 @@ func TestMergeRepoManifest_RepoVersionViolatesExactConstraint(t *testing.T) {
 
 func TestMergeRepoManifest_QAChecks_Concatenated(t *testing.T) {
 	m := validManifest()
-	m.Policy.QA.Checks = []QACheck{{Name: "mainlined-check", Command: []string{"echo", "ok"}}}
+	m.Policy.QA.Checks = []QACheck{{Name: "mAInlined-check", Command: []string{"echo", "ok"}}}
 
 	repo := &RepoManifest{}
 	repo.Policy.QA.Checks = []QACheck{
@@ -252,8 +252,8 @@ func TestMergeRepoManifest_QAChecks_Concatenated(t *testing.T) {
 	if len(merged.Policy.QA.Checks) != 3 {
 		t.Fatalf("expected 3 checks, got %d: %+v", len(merged.Policy.QA.Checks), merged.Policy.QA.Checks)
 	}
-	if merged.Policy.QA.Checks[0].Name != "mainlined-check" {
-		t.Errorf("first check should be mainlined-check, got %q", merged.Policy.QA.Checks[0].Name)
+	if merged.Policy.QA.Checks[0].Name != "mAInlined-check" {
+		t.Errorf("first check should be mAInlined-check, got %q", merged.Policy.QA.Checks[0].Name)
 	}
 }
 
@@ -270,7 +270,7 @@ func TestMergeRepoManifest_BothQAEmpty_Valid(t *testing.T) {
 	}
 }
 
-func TestMergeRepoManifest_DoesNotMutateMainlined(t *testing.T) {
+func TestMergeRepoManifest_DoesNotMutatemAInlined(t *testing.T) {
 	m := validManifest()
 	m.Runtime.Docker.Toolchains = map[string]string{"node": "20"}
 
@@ -282,7 +282,7 @@ func TestMergeRepoManifest_DoesNotMutateMainlined(t *testing.T) {
 	}
 
 	if _, ok := m.Runtime.Docker.Toolchains["go"]; ok {
-		t.Error("MergeRepoManifest must not mutate the mainlined manifest")
+		t.Error("MergeRepoManifest must not mutate the mAInlined manifest")
 	}
 }
 

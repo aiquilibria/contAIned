@@ -22,12 +22,39 @@ Running without either flag prints a starter manifest to stderr and exits non-ze
 Use `--ecosystem` to print a pre-filled **repo manifest** starter (toolchains + QA only) for a specific stack:
 
 ```bash
-contained init --ecosystem go     # Go: go test + go vet
-contained init --ecosystem node   # Node.js: npm test
-contained init --ecosystem python # Python: ruff + pyright + pytest
+contained init --ecosystem go         # Go: go test + go vet
+contained init --ecosystem node       # Node.js: npm test
+contained init --ecosystem python     # Python: ruff + pyright + pytest
+contained init --ecosystem typescript # TypeScript: tsc --noEmit + eslint + npm test
 ```
 
-Save the output to `.contAIned_manifest.yaml` in your repository root. `contained init` merges it on top of the operator manifest at build time. See [repo-manifest-composition.md](repo-manifest-composition.md) for the merge rules and version constraint syntax.
+Save the output to `.contAIned_manifest.yaml` in your repository root. `contained init` merges it on top of the Mainlined manifest at build time.
+
+### Repo manifest schema
+
+Only two top-level keys are permitted in `.contAIned_manifest.yaml`. Any other field causes `contained init` to fail with an actionable error.
+
+```yaml
+runtime:
+  docker:
+    toolchains:
+      go: "1.22.5"      # installs Go at image build time
+      node: "20"        # installs Node at image build time
+      # ruby: "3.3"
+      # java: "21"
+
+policy:
+  qa:
+    checks:
+      - name: test
+        command: [go, test, ./...]
+        when_changed: ["*.go"]   # omit to run on every stop
+```
+
+**Merge rules:**
+- **Toolchains**: if the Mainlined manifest specifies a constraint for a toolchain the repo also declares, the repo version must satisfy it (see `runtime.docker.toolchains` below) or `contained init` fails. The repo's pinned version is used as the install target.
+- **QA checks**: concatenated — operator checks run first, then repo checks. Either or both may be empty.
+- **Everything else** (policy, network, secrets, bash rules) is owned by the Mainlined manifest and cannot be overridden by the repo manifest.
 
 **`--mainlined` flow:**
 

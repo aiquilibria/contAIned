@@ -253,7 +253,7 @@ func TestGenerateToolchainsScript_StartsWithShebang(t *testing.T) {
 
 // ── PolicyPull ────────────────────────────────────────────────────────────────
 
-func TestPolicyPull_NoMainlinedURL_ReturnsOriginal(t *testing.T) {
+func TestPolicyPull_NomAInlinedURL_ReturnsOriginal(t *testing.T) {
 	original := "runtime:\n  docker:\n    image: x\n    network: n\n"
 	got := PolicyPull(original)
 	if got != original {
@@ -268,7 +268,7 @@ func TestPolicyPull_ServerReturnsRefs_MergedIntoYAML(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	original := "policy:\n  mainlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
+	original := "policy:\n  mAInlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
 	got := PolicyPull(original)
 
 	if !strings.Contains(got, "abc123") {
@@ -285,7 +285,7 @@ func TestPolicyPull_ServerError_ReturnsOriginal(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	original := "policy:\n  mainlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
+	original := "policy:\n  mAInlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
 	got := PolicyPull(original)
 	if got != original {
 		t.Errorf("expected original on server error, got: %q", got)
@@ -298,7 +298,7 @@ func TestPolicyPull_InvalidJSON_ReturnsOriginal(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	original := "policy:\n  mainlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
+	original := "policy:\n  mAInlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
 	got := PolicyPull(original)
 	if got != original {
 		t.Errorf("expected original on invalid JSON, got: %q", got)

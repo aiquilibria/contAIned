@@ -33,7 +33,7 @@ flag to see a starter manifest you can save and customise.
 
 Examples:
   contained init --manifest policy.yaml
-  contained init --mainlined https://mainlined.example.com
+  contained init --mainlined https://mAInlined.example.com
   contained init --manifest policy.yaml --rebuild
   contained init ./myrepo --manifest policy.yaml
   contained init --ecosystem go
@@ -45,7 +45,7 @@ Examples:
 
 var (
 	initManifestPath string
-	initMainlinedURL string
+	initmAInlinedURL string
 	initEcosystem    []string
 	initForce        bool
 	initRebuild      bool
@@ -53,8 +53,8 @@ var (
 
 func init() {
 	initCmd.Flags().StringVar(&initManifestPath, "manifest", "", "Path to manifest.yaml to bake into the image")
-	initCmd.Flags().StringVar(&initMainlinedURL, "mainlined", "", "Mainlined URL to fetch manifest from")
-	initCmd.Flags().StringSliceVar(&initEcosystem, "ecosystem", nil, "Print a repo manifest starter for these ecosystem(s) and exit (go, node, python; comma-separated or repeated)")
+	initCmd.Flags().StringVar(&initmAInlinedURL, "mAInlined", "", "mAInlined URL to fetch manifest from")
+	initCmd.Flags().StringSliceVar(&initEcosystem, "ecosystem", nil, "Print a repo manifest starter for these ecosystem(s) and exit (go, node, python, typescript; comma-separated or repeated)")
 	initCmd.Flags().BoolVarP(&initForce, "force", "f", false, "Re-initialise even if workspace already exists")
 	initCmd.Flags().BoolVarP(&initRebuild, "rebuild", "r", false, "Force Docker image rebuild")
 	rootCmd.AddCommand(initCmd)
@@ -78,7 +78,7 @@ func runInit(_ *cobra.Command, args []string) error {
 	}
 
 	// Require --manifest or --mainlined. Neither → print generic starter and exit.
-	if initManifestPath == "" && initMainlinedURL == "" {
+	if initManifestPath == "" && initmAInlinedURL == "" {
 		return printStarterAndExit()
 	}
 
@@ -87,10 +87,10 @@ func runInit(_ *cobra.Command, args []string) error {
 	var m *manifest.Manifest
 
 	switch {
-	case initMainlinedURL != "":
-		token := os.Getenv("MAINLINED_TOKEN")
-		dim.Printf("  Fetching manifest from %s …\n", initMainlinedURL)
-		m, err = manifest.FetchFromURL(initMainlinedURL, token)
+	case initmAInlinedURL != "":
+		token := os.Getenv("mAInlined_TOKEN")
+		dim.Printf("  Fetching manifest from %s …\n", initmAInlinedURL)
+		m, err = manifest.FetchFromURL(initmAInlinedURL, token)
 		if err != nil {
 			return fmt.Errorf("fetching manifest: %w", err)
 		}
@@ -140,7 +140,7 @@ func runInit(_ *cobra.Command, args []string) error {
 		)
 	}
 
-	// Pull policy_ref/version from mainlined if configured.
+	// Pull policy_ref/version from mAInlined if configured.
 	manifestContent = docker.PolicyPull(manifestContent)
 
 	// Build managed-settings.json from the manifest.
@@ -317,7 +317,7 @@ it for your project, then re-run:
 
 For a repo-level manifest (toolchains + QA only), use --ecosystem:
 
-  contained init --ecosystem go             # or: node, python
+  contained init --ecosystem go             # or: node, python, typescript
   contained init --ecosystem go,python     # multiple ecosystems
 
 ──────────────────────────────────────────────────────────────────────────────
@@ -331,9 +331,10 @@ See docs/policy-reference.md for full schema documentation.
 }
 
 var ecosystemTemplates = map[string]string{
-	"go":     "templates/manifests/manifest_go.yaml",
-	"node":   "templates/manifests/manifest_node.yaml",
-	"python": "templates/manifests/manifest_python.yaml",
+	"go":         "templates/manifests/manifest_go.yaml",
+	"node":       "templates/manifests/manifest_node.yaml",
+	"python":     "templates/manifests/manifest_python.yaml",
+	"typescript": "templates/manifests/manifest_typescript.yaml",
 }
 
 func printEcosystemStarterAndExit(ecosystems []string) error {
@@ -387,13 +388,13 @@ func printEcosystemStarterAndExit(ecosystems []string) error {
 	fmt.Fprintf(os.Stderr, `Repo manifest starter for ecosystem: %s
 
 Save this to .contAIned_manifest.yaml in your repository root and commit it.
-It will be merged into the operator manifest on the next `+"`contained init`"+`.
+It will be merged into the mAInlined manifest on the next `+"`contained init`"+`.
 
 ──────────────────────────────────────────────────────────────────────────────
 %s
 ──────────────────────────────────────────────────────────────────────────────
 
-See docs/repo-manifest-composition.md for full schema documentation.
+See docs/policy-reference.md for full schema documentation.
 `, label, starter)
 	os.Exit(0)
 	return nil

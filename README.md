@@ -193,18 +193,18 @@ Scaffolds the contAIned workspace in the target directory (default: current dire
 
 ```bash
 contAIned init --manifest policy.yaml                      # bake a local manifest into the image
-contAIned init --mainlined https://mainlined.example.com   # fetch manifest from a Mainlined policy URL
+contAIned init --mainlined https://mainlined.example.com   # fetch manifest from a mAInlined policy URL
 contAIned init ./myrepo --manifest policy.yaml             # initialize in a specific directory
 contAIned init --manifest policy.yaml --force              # re-initialise an existing workspace
 contAIned init --manifest policy.yaml --rebuild            # force-rebuild the Docker image
 contAIned init --ecosystem go                              # print a Go repo manifest starter and exit
 ```
 
-A manifest must be provided via `--manifest` (local file) or `--mainlined` (Mainlined URL). Running without either flag prints a starter manifest and exits. See [docs/policy-reference.md](docs/policy-reference.md) for the full manifest schema.
+A manifest must be provided via `--manifest` (local file) or `--mainlined` (mAInlined URL). Running without either flag prints a starter manifest and exits. See [docs/policy-reference.md](docs/policy-reference.md) for the full manifest schema.
 
 #### Repo manifest
 
-Repositories may commit a `.contAIned_manifest.yaml` at the repo root that declares toolchains and QA checks. This file is merged into the operator manifest at `contained init` time — the image is the single merged artifact. Only two fields are permitted; any others cause `contained init` to fail.
+Repositories may commit a `.contAIned_manifest.yaml` at the repo root that declares toolchains and QA checks. This file is merged into the mAInlined manifest at `contained init` time — the image is the single merged artifact. Only two fields are permitted; any others cause `contained init` to fail.
 
 ```yaml
 # .contAIned_manifest.yaml — committed to the repository root
@@ -224,16 +224,17 @@ policy:
 Use `--ecosystem` to print a pre-filled starter for your stack:
 
 ```bash
-contAIned init --ecosystem go     > .contAIned_manifest.yaml
-contAIned init --ecosystem node   > .contAIned_manifest.yaml
-contAIned init --ecosystem python > .contAIned_manifest.yaml
+contAIned init --ecosystem go         > .contAIned_manifest.yaml
+contAIned init --ecosystem node       > .contAIned_manifest.yaml
+contAIned init --ecosystem python     > .contAIned_manifest.yaml
+contAIned init --ecosystem typescript > .contAIned_manifest.yaml
 ```
 
-See [docs/repo-manifest-composition.md](docs/repo-manifest-composition.md) for the full schema and version constraint rules.
+See [docs/policy-reference.md](docs/policy-reference.md) for the full schema and version constraint rules.
 
 Bakes the manifest into the Docker image at build time — policy is enforced at the image layer.
 
-**Policy is enforced at the image layer.** Hook registration and sandbox rules live in `/etc/claude-code/managed-settings.json`, which is copied into the Docker image at build time. Claude Code treats this file as operator-managed policy: hooks registered there cannot be overridden or removed by the agent at runtime. The operator manifest is baked into `/etc/contained/manifest.yaml` inside the image; hooks read policy parameters from that path exclusively.
+**Policy is enforced at the image layer.** Hook registration and sandbox rules live in `/etc/claude-code/managed-settings.json`, which is copied into the Docker image at build time. Claude Code treats this file as operator-managed policy: hooks registered there cannot be overridden or removed by the agent at runtime. The Mainlined manifest is baked into `/etc/contained/manifest.yaml` inside the image; hooks read policy parameters from that path exclusively.
 
 Creates (in the workspace):
 

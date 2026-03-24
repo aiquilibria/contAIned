@@ -18,11 +18,11 @@ type Manifest struct {
 }
 
 type RuntimeConfig struct {
-	Mainlined MainlinedRuntimeConfig `yaml:"mainlined"`
+	mAInlined mAInlinedRuntimeConfig `yaml:"mAInlined"`
 	Docker    DockerConfig           `yaml:"docker"`
 }
 
-type MainlinedRuntimeConfig struct {
+type mAInlinedRuntimeConfig struct {
 	URL string `yaml:"url"`
 }
 
@@ -49,7 +49,7 @@ type PolicyConfig struct {
 	QA        QAConfig        `yaml:"qa"`
 	MCP       MCPConfig       `yaml:"mcp"`
 	Skills    SkillsConfig    `yaml:"skills"`
-	Mainlined MainlinedPolicy `yaml:"mainlined"`
+	mAInlined mAInlinedPolicy `yaml:"mAInlined"`
 }
 
 type SigstoreConfig struct {
@@ -102,7 +102,7 @@ type SkillsConfig struct {
 	ApprovedSkills []string `yaml:"approved_skills"`
 }
 
-type MainlinedPolicy struct {
+type mAInlinedPolicy struct {
 	URL           string `yaml:"url"`
 	PolicyName    string `yaml:"policy_name"`
 	PolicyRef     string `yaml:"policy_ref"`

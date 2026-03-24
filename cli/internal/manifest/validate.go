@@ -107,7 +107,7 @@ func supportedToolchainNames() string {
 
 // satisfiesConstraint reports whether repoVersion satisfies constraint.
 //
-// Constraint formats (Mainlined): ">=X.Y.Z" (floor), "==X.Y.Z" or bare "X.Y.Z" (exact).
+// Constraint formats (mAInlined): ">=X.Y.Z" (floor), "==X.Y.Z" or bare "X.Y.Z" (exact).
 // Repo version formats: "==X.Y.Z" or bare "X.Y.Z".
 func satisfiesConstraint(constraint, repoVersion string) (bool, error) {
 	op := "=="

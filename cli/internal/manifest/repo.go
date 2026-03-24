@@ -13,7 +13,7 @@ import (
 
 // RepoManifest is the restricted manifest a repository may commit to
 // .contAIned_manifest.yaml at the repo root. Only toolchains and QA checks are permitted;
-// all policy fields are owned by the Mainlined manifest.
+// all policy fields are owned by the mAInlined manifest.
 type RepoManifest struct {
 	Runtime RepoRuntimeConfig `yaml:"runtime"`
 	Policy  RepoPolicy        `yaml:"policy"`
@@ -82,23 +82,23 @@ func ValidateRepoManifest(r *RepoManifest) error {
 	return nil
 }
 
-// MergeRepoManifest merges the repository manifest into the Mainlined manifest and
+// MergeRepoManifest merges the repository manifest into the mAInlined manifest and
 // returns the merged result. The original manifests are not modified.
 //
-// Toolchains: if Mainlined specifies a constraint for a toolchain the repo also
+// Toolchains: if mAInlined specifies a constraint for a toolchain the repo also
 // declares, the repo version must satisfy that constraint — otherwise an error is
 // returned. The repo's pinned version is used as the install target.
 //
-// QA checks: concatenated (Mainlined first, repo second). Either or both may be empty.
+// QA checks: concatenated (mAInlined first, repo second). Either or both may be empty.
 //
-// If repo is nil the function returns a copy of mainlined unchanged.
-func MergeRepoManifest(mainlined *Manifest, repo *RepoManifest) (*Manifest, error) {
-	// Shallow-copy the mainlined manifest.
-	merged := *mainlined
+// If repo is nil the function returns a copy of mAInlined unchanged.
+func MergeRepoManifest(mAInlined *Manifest, repo *RepoManifest) (*Manifest, error) {
+	// Shallow-copy the mAInlined manifest.
+	merged := *mAInlined
 
 	// Deep-copy toolchains so we don't mutate the original.
 	merged.Runtime.Docker.Toolchains = make(map[string]string)
-	for k, v := range mainlined.Runtime.Docker.Toolchains {
+	for k, v := range mAInlined.Runtime.Docker.Toolchains {
 		merged.Runtime.Docker.Toolchains[k] = v
 	}
 
@@ -107,24 +107,24 @@ func MergeRepoManifest(mainlined *Manifest, repo *RepoManifest) (*Manifest, erro
 	}
 
 	for name, repoVer := range repo.Runtime.Docker.Toolchains {
-		if mainlinedConstraint, exists := mainlined.Runtime.Docker.Toolchains[name]; exists {
-			ok, err := satisfiesConstraint(mainlinedConstraint, repoVer)
+		if mAInlinedConstraint, exists := mAInlined.Runtime.Docker.Toolchains[name]; exists {
+			ok, err := satisfiesConstraint(mAInlinedConstraint, repoVer)
 			if err != nil {
 				return nil, fmt.Errorf("toolchain %q: %w", name, err)
 			}
 			if !ok {
 				return nil, fmt.Errorf(
-					"toolchain %q: repo version %q does not satisfy mainlined constraint %q",
-					name, repoVer, mainlinedConstraint,
+					"toolchain %q: repo version %q does not satisfy mAInlined constraint %q",
+					name, repoVer, mAInlinedConstraint,
 				)
 			}
 		}
 		merged.Runtime.Docker.Toolchains[name] = repoVer
 	}
 
-	// Concatenate QA checks: mainlined (expected empty) then repo.
+	// Concatenate QA checks: mAInlined (expected empty) then repo.
 	merged.Policy.QA.Checks = append(
-		append([]QACheck{}, mainlined.Policy.QA.Checks...),
+		append([]QACheck{}, mAInlined.Policy.QA.Checks...),
 		repo.Policy.QA.Checks...,
 	)
 

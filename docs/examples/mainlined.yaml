@@ -1,18 +1,18 @@
-# contAIned policy manifest
+# contAIned mAInlined manifest — example
 #
-# Three sections:
-#   1. runtime — Docker container resource settings.
-#   2. agent   — model selection passed to the claude CLI.
-#   3. policy  — all governance settings read by the hook scripts,
-#                including build-time provenance (sigstore).
+# This is the manifest enforced by the mAInlined operator. It controls all
+# policy settings: container resources, model selection, security rules,
+# network policy, audit logging, sigstore provenance, and toolchain floor
+# constraints. Repositories cannot override these settings — they can only
+# add toolchains (subject to the floor constraint) and QA checks via their
+# own .contAIned_manifest.yaml.
 #
-# Action values accepted by policy settings:
-#   block    — deny the operation outright; agent receives a clear reason
-#   allow    — permit unconditionally
-#   escalate — pass through to the SDK's canUseTool callback for operator approval
+# Deploy this via:
+#   contained init --mainlined https://mainlined.example.com
+# or:
+#   contained init --manifest policy.yaml
 #
-# Note: writes to .contAIned/ are always denied regardless of policy settings —
-# control-plane protection is hardcoded and not configurable.
+# See docs/policy-reference.md for full schema documentation.
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 runtime:
@@ -22,8 +22,12 @@ runtime:
     cpus: 2
     network: contAIned-net
     agent_config_volume: contAIned-agent-config
+    # Toolchain floor constraints: repos may pin any version satisfying these.
+    toolchains:
+      go: ">=1.22"
+      node: ">=18"
   mAInlined:
-    url: ""   # e.g. https://mAInlined.example.com
+    url: "https://mainlined.example.com"
 
 # ── Agent ─────────────────────────────────────────────────────────────────────
 agent:
@@ -42,26 +46,26 @@ policy:
   secrets:
     rules:
       - name: safe-variants
-        patterns: ['\\.(example|sample|template)']
+        patterns: ['\.(example|sample|template)']
         action: allow
       - name: dotenv
-        patterns: ['(^|[/\\\\])\\.env(\\.[^/\\\\]+)?$']
+        patterns: ['(^|[/\\])\.env(\.[^/\\]+)?$']
         reason: "Secret files (credentials, keys, .env) may not be accessed."
         action: block
       - name: keys
-        patterns: ['\\.(pem|key|p12|pfx|jks|keystore)$']
+        patterns: ['\.(pem|key|p12|pfx|jks|keystore)$']
         reason: "Secret files (credentials, keys, .env) may not be accessed."
         action: block
       - name: ssh-keys
-        patterns: ['(^|[/\\\\])id_(rsa|dsa|ecdsa|ed25519)$']
+        patterns: ['(^|[/\\])id_(rsa|dsa|ecdsa|ed25519)$']
         reason: "Secret files (credentials, keys, .env) may not be accessed."
         action: block
       - name: credential-files
-        patterns: ['(^|[/\\\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$']
+        patterns: ['(^|[/\\])(credentials|secrets|service_account)\.(json|yaml|yml)$']
         reason: "Secret files (credentials, keys, .env) may not be accessed."
         action: block
       - name: secret-extension
-        patterns: ['\\.(secret|secrets)$']
+        patterns: ['\.(secret|secrets)$']
         reason: "Secret files (credentials, keys, .env) may not be accessed."
         action: block
 
@@ -112,23 +116,11 @@ policy:
     jsonl_export: false
 
   # ── QA gate ───────────────────────────────────────────────────────────────────
+  # Leave empty here — repositories define their own QA checks via
+  # .contAIned_manifest.yaml. The mAInlined manifest may add shared checks
+  # that run in addition to the repo's checks.
   qa:
-    checks:
-      - name: lint
-        command: ["ruff", "check", "."]
-        when_changed: ["*.py"]
-      - name: format
-        command: ["ruff", "format", "--check", "."]
-        when_changed: ["*.py"]
-      - name: types
-        command: ["pyright"]
-        when_changed: ["*.py"]
-      - name: tests
-        command: ["python", "-m", "pytest", "tests/", "-x", "--tb=short", "-q"]
-        when_changed: ["*.py"]
-      - name: coverage
-        command: ["python", "-m", "pytest", "tests/", "--cov", "--cov-report=term-missing", "--cov-fail-under=80", "-q"]
-        when_changed: ["*.py"]
+    checks: []
 
   # ── MCP server approvals ──────────────────────────────────────────────────────
   mcp:
@@ -140,9 +132,9 @@ policy:
 
   # ── mAInlined policy coordination ─────────────────────────────────────────────
   mAInlined:
-    url: ""
-    policy_name: ""
-    policy_ref: ""
+    url: "https://mainlined.example.com"
+    policy_name: "default"
+    policy_ref: "main"
     policy_version: ""
 
 # ── Sandbox ───────────────────────────────────────────────────────────────────

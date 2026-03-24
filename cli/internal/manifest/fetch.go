@@ -11,7 +11,7 @@ import (
 
 // FetchFromURL retrieves a manifest YAML from url, parses and validates it,
 // and returns the result. token is passed as a Bearer token if non-empty
-// (used for private Mainlined policy URLs via MAINLINED_TOKEN env var).
+// (used for private mAInlined policy URLs via mAInlined_TOKEN env var).
 func FetchFromURL(url, token string) (*Manifest, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
 

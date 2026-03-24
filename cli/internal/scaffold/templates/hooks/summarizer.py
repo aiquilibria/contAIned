@@ -309,7 +309,7 @@ summary["action_log"] = action_log
 
 # ── Process any pending git push ───────────────────────────────────────────────
 # Detect a successful git push this session; if found, build the ATP work unit
-# payload, POST it to mainlined, close the work unit, and open the next one.
+# payload, POST it to mAInlined, close the work unit, and open the next one.
 try:
     _wu_id = tracer.get_active_work_unit(session_id)
     if _wu_id:
@@ -372,21 +372,21 @@ try:
 
             if _payload:
                 try:
-                    _mainlined_url = None
+                    _mAInlined_url = None
                     _manifest_path = Path(cwd) / ".contAIned" / "manifest.yaml"
                     if _manifest_path.exists():
                         import yaml as _yaml  # noqa: PLC0415
                         _manifest = _yaml.safe_load(_manifest_path.read_text()) or {}
-                        _mainlined_url = _manifest.get("runtime", {}).get("mainlined", {}).get("url")
-                    _mainlined_key = os.environ.get("MAINLINED_API_KEY")
-                    if _mainlined_url and _mainlined_key:
+                        _mAInlined_url = _manifest.get("runtime", {}).get("mAInlined", {}).get("url")
+                    _mAInlined_key = os.environ.get("mAInlined_API_KEY")
+                    if _mAInlined_url and _mAInlined_key:
                         import urllib.request  # noqa: PLC0415
                         _req = urllib.request.Request(
-                            _mainlined_url,
+                            _mAInlined_url,
                             data=json.dumps(_payload).encode("utf-8"),
                             headers={
                                 "Content-Type": "application/json",
-                                "Authorization": f"Bearer {_mainlined_key}",
+                                "Authorization": f"Bearer {_mAInlined_key}",
                             },
                             method="POST",
                         )
