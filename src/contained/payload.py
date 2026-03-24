@@ -29,12 +29,10 @@ def payload_show_impl(
     output_path: str | None = None,
 ) -> None:
     """Assemble the ATP payload for *work_unit_id* and print or write it."""
-    import click  # noqa: PLC0415
-
     if db is None:
-        click.echo(
+        print(
             "Error: tracer.db not found. Run from inside a contAIned workspace.",
-            err=True,
+            file=sys.stderr,
         )
         sys.exit(1)
 
@@ -44,28 +42,26 @@ def payload_show_impl(
         tracer = contAInedTracer(str(db))
         payload = tracer.assemble_payload(work_unit_id)
     except ValueError as exc:
-        click.echo(f"Error: {exc}", err=True)
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except Exception as exc:
-        click.echo(f"Error assembling payload: {exc}", err=True)
+        print(f"Error assembling payload: {exc}", file=sys.stderr)
         sys.exit(1)
 
     payload_json = json.dumps(payload, indent=2, ensure_ascii=False)
     if output_path:
         Path(output_path).write_text(payload_json, encoding="utf-8")
-        click.echo(f"Payload written to {output_path}")
+        print(f"Payload written to {output_path}")
     else:
-        click.echo(payload_json)
+        print(payload_json)
 
 
 def payload_list_impl(db: Path | None, show_all: bool = False) -> None:
     """List work units in the tracer database."""
-    import click  # noqa: PLC0415
-
     if db is None:
-        click.echo(
+        print(
             "Error: tracer.db not found. Run from inside a contAIned workspace.",
-            err=True,
+            file=sys.stderr,
         )
         sys.exit(1)
 
@@ -83,17 +79,15 @@ def payload_list_impl(db: Path | None, show_all: bool = False) -> None:
             """
         ).fetchall()
     except Exception as exc:
-        click.echo(f"Error: {exc}", err=True)
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
     if not rows:
-        click.echo("No work units found.")
+        print("No work units found.")
         return
 
     for row in rows:
         wu_id, status, branch, base, head, opened_at, prompt = row
         head_short = (head or "")[:8] or "(open)"
         base_short = (base or "")[:8]
-        click.echo(
-            f"[{status}] {wu_id[:8]}… {branch}  {base_short}→{head_short}  {(prompt or '')[:60]}"
-        )
+        print(f"[{status}] {wu_id[:8]}… {branch}  {base_short}→{head_short}  {(prompt or '')[:60]}")

@@ -70,7 +70,7 @@ RUN mkdir -p /home/agent/.local/bin \
     && ln -s /usr/local/bin/claude /home/agent/.local/bin/claude \
     && chown -R agent /home/agent/.local
 
-ENV PATH="/home/agent/.local/bin:$PATH"
+ENV PATH="/opt/contained-venv/bin:/home/agent/.local/bin:$PATH"
 
 USER agent
 

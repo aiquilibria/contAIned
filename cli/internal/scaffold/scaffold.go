@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-//go:embed templates
+//go:embed all:templates
 var Templates embed.FS
 
 // WriteFile writes content to path, creating parent directories as needed.

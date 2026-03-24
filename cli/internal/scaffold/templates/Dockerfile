@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 FROM python:3.13-slim
 
 # Install runtimes and tools the agent may legitimately use
@@ -17,12 +18,6 @@ RUN curl -fsSL https://claude.ai/install.sh | bash \
 # Install uv for fast Python package management
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Install the contAIned Python package (in-container runtime: hooks, tracer, MCP server).
-#
-# CONTAINED_PACKAGE controls where to install from:
-#   - Default "contained[dev]": install from PyPI (release mode).
-#   - "/opt/contAIned[dev]": install from a local source tree (development mode).
-#     In development mode the builder COPYs the source into the image first.
 # Install contAIned into an isolated venv so it never contaminates the
 # workspace Python environment, regardless of what the agent installs.
 #
@@ -63,7 +58,7 @@ RUN if [ -n "$MANIFEST_CONTENT" ]; then \
 
 # Write the in-container entrypoint script.
 # Reads agent.model from the workspace manifest and execs claude directly.
-RUN cat > /etc/contained/entrypoint.sh << 'ENTRYPOINT_EOF'
+RUN cat <<'ENTRYPOINT_EOF' > /etc/contained/entrypoint.sh
 #!/bin/sh
 MODEL=$(/opt/contained-venv/bin/python3 -c "
 import yaml, sys
@@ -95,7 +90,7 @@ RUN mkdir -p /home/agent/.local/bin \
     && ln -s /usr/local/bin/claude /home/agent/.local/bin/claude \
     && chown -R agent /home/agent/.local
 
-ENV PATH="/home/agent/.local/bin:$PATH"
+ENV PATH="/opt/contained-venv/bin:/home/agent/.local/bin:$PATH"
 
 USER agent
 
