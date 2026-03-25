@@ -14,7 +14,6 @@ type Manifest struct {
 	Runtime              RuntimeConfig           `yaml:"runtime"`
 	Agent                AgentConfig             `yaml:"agent"`
 	Policy               PolicyConfig            `yaml:"policy"`
-	Sandbox              SandboxConfig           `yaml:"sandbox"`
 	EcosystemDefinitions map[string]EcosystemDef `yaml:"ecosystem_definitions,omitempty"`
 }
 
@@ -69,6 +68,7 @@ type PolicyConfig struct {
 	QA        QAConfig        `yaml:"qa"`
 	MCP       MCPConfig       `yaml:"mcp"`
 	Skills    SkillsConfig    `yaml:"skills"`
+	Sandbox   SandboxConfig   `yaml:"sandbox"`
 	mAInlined mAInlinedPolicy `yaml:"mAInlined"`
 }
 

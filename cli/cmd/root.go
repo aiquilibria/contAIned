@@ -86,7 +86,7 @@ func printSplash() {
 		green.Sprint("cont["),
 		red.Sprint("AI"),
 		green.Sprint("]ned"),
-		dim.Sprint("take back control of your agent!"),
+		dim.Sprint("take back control of your coding agent!"),
 	)
 }
 

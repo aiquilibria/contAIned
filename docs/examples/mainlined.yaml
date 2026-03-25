@@ -27,6 +27,7 @@ ecosystem_definitions:
       - sum.golang.org
     env:
       GOCACHE: /tmp/claude/go-build
+      GOPATH: /tmp/claude/gopath
   python:
     # Python is pre-installed in the base image; no toolchain key needed.
     network_domains:
@@ -177,9 +178,9 @@ policy:
     policy_ref: "main"
     policy_version: ""
 
-# ── Sandbox ───────────────────────────────────────────────────────────────────
-sandbox:
-  enabled: true
-  filesystem:
-    denyWrite:
-      - .contAIned
+  # ── Sandbox ───────────────────────────────────────────────────────────────────
+  sandbox:
+    enabled: true
+    filesystem:
+      denyWrite:
+        - .contAIned
