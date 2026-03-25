@@ -3,13 +3,13 @@
 
 class Contained < Formula
   desc "contAIned — take back control of your coding agent"
-  homepage "https://github.com/lab-v2/contAIned"
+  homepage "https://github.com/aiquilibria/contAIned"
   version "0.1.0"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/lab-v2/contAIned/releases/download/v#{version}/contained_#{version}_darwin_arm64"
+      url "https://github.com/aiquilibria/contAIned/releases/download/v#{version}/contained_#{version}_darwin_arm64"
       sha256 "REPLACE_WITH_SHA256_darwin_arm64"
 
       def install
@@ -18,7 +18,7 @@ class Contained < Formula
     end
 
     on_intel do
-      url "https://github.com/lab-v2/contAIned/releases/download/v#{version}/contained_#{version}_darwin_amd64"
+      url "https://github.com/aiquilibria/contAIned/releases/download/v#{version}/contained_#{version}_darwin_amd64"
       sha256 "REPLACE_WITH_SHA256_darwin_amd64"
 
       def install
@@ -29,7 +29,7 @@ class Contained < Formula
 
   on_linux do
     on_arm do
-      url "https://github.com/lab-v2/contAIned/releases/download/v#{version}/contained_#{version}_linux_arm64"
+      url "https://github.com/aiquilibria/contAIned/releases/download/v#{version}/contained_#{version}_linux_arm64"
       sha256 "REPLACE_WITH_SHA256_linux_arm64"
 
       def install
@@ -38,7 +38,7 @@ class Contained < Formula
     end
 
     on_intel do
-      url "https://github.com/lab-v2/contAIned/releases/download/v#{version}/contained_#{version}_linux_amd64"
+      url "https://github.com/aiquilibria/contAIned/releases/download/v#{version}/contained_#{version}_linux_amd64"
       sha256 "REPLACE_WITH_SHA256_linux_amd64"
 
       def install

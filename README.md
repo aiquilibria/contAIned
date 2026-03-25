@@ -147,16 +147,16 @@ Claude Code's design makes these extension points available; contAIned is what t
 **macOS / Linux — Homebrew:**
 
 ```bash
-brew install lab-v2/tap/contained
+brew install aiquilibria/tap/contained
 ```
 
 **macOS / Linux — curl installer:**
 
 ```bash
-curl -fsSL https://github.com/lab-v2/contAIned/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/aiquilibria/contAIned/releases/latest/download/install.sh | sh
 ```
 
-**Direct download:** grab the binary for your platform from [GitHub Releases](https://github.com/lab-v2/contAIned/releases), make it executable, and place it on your `$PATH`.
+**Direct download:** grab the binary for your platform from [GitHub Releases](https://github.com/aiquilibria/contAIned/releases), make it executable, and place it on your `$PATH`.
 
 The `contained` binary is a single self-contained executable with no runtime dependencies beyond Docker.
 

@@ -12,7 +12,7 @@ We support the latest released version. Security fixes are not backported to old
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-To report a vulnerability, open a [GitHub Security Advisory](https://github.com/lab-v2/contAIned/security/advisories/new) in this repository. This keeps the report private while we triage and prepare a fix.
+To report a vulnerability, open a [GitHub Security Advisory](https://github.com/aiquilibria/contAIned/security/advisories/new) in this repository. This keeps the report private while we triage and prepare a fix.
 
 Include as much of the following as you can:
 
