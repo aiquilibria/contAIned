@@ -156,6 +156,19 @@ func TestBuildManagedSettings_HooksReferenceVenvPython(t *testing.T) {
 	}
 }
 
+func TestBuildManagedSettings_PostCompactHookRegistered(t *testing.T) {
+	out, err := BuildManagedSettings(baseManifest())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "PostCompact") {
+		t.Error("managed-settings should register a PostCompact hook")
+	}
+	if !strings.Contains(out, "post_compact") {
+		t.Error("PostCompact hook should reference post_compact.py")
+	}
+}
+
 func TestBuildManagedSettings_ContainsRequiredTopLevelKeys(t *testing.T) {
 	settings := parsedSettings(t, baseManifest())
 	for _, key := range []string{"permissions", "hooks", "sandbox", "allowManagedHooksOnly"} {

@@ -2,8 +2,7 @@
 """
 PostToolUse hook — records a structured audit entry for every tool execution.
 
-Primary store : tracer.db via contAInedTracer.log_event() (SQLite, concurrent-safe).
-Optional mirror: .contAIned/audit/pipeline.jsonl, controlled by policy.audit.jsonl_export.
+Primary store: tracer.db via contAInedTracer.log_event() (SQLite, concurrent-safe).
 
 Logging is controlled by policy.audit.enabled in manifest.yaml.
 This hook must never block execution (always exits 0).
@@ -97,29 +96,5 @@ try:
     )
 except Exception:
     pass  # never block execution due to logging failure
-
-# ── Optional JSONL mirror ─────────────────────────────────────────────────────
-if policy["audit"].get("jsonl_export", False):
-    from datetime import datetime, timezone  # noqa: PLC0415
-    entry = {
-        "ts":         datetime.now(timezone.utc).isoformat(),
-        "session_id": actor_id,
-        "tool":       tool,
-        "input":      tool_input,
-        "outcome":    outcome,
-    }
-    if reason:
-        entry["reason"] = reason
-    if approved_exception:
-        entry["approved_exception"] = True
-        if exception_detail:
-            entry["exception_detail"] = exception_detail
-    try:
-        audit_log = Path(cwd) / ".contAIned" / "audit" / "pipeline.jsonl"
-        audit_log.parent.mkdir(parents=True, exist_ok=True)
-        with audit_log.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-    except OSError:
-        pass
 
 sys.exit(0)

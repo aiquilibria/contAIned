@@ -342,7 +342,6 @@ Controls outbound network access for both Claude Code tools and Bash subprocesse
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `true` | Always-on audit log in `tracer.db`; cannot be disabled |
-| `jsonl_export` | bool | `false` | Mirror audit entries to `.contAIned/audit/pipeline.jsonl` |
 
 ---
 

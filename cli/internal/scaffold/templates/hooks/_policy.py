@@ -25,7 +25,6 @@ _DEFAULTS = {
     },
     "audit": {
         "enabled": True,
-        "jsonl_export": False,
     },
     "qa": {
         "checks": [],

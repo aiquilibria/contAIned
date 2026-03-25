@@ -2123,3 +2123,178 @@ class TestExtractToolOutputs:
         results = extract_tool_outputs_from_transcript(str(transcript))
         assert len(results) == 1
         assert results[0]["output"] == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Unit — build_actions (operator_shell, context_compaction, isMeta filtering)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildActions:
+    """Tests for build_actions() — transcript → actions table population."""
+
+    def _setup(self, tracer: contAInedTracer, tmp_path: Path, entries: list) -> tuple[str, str]:
+        """Create a work unit + session and write a transcript. Returns (wu_id, path)."""
+        tracer.open_task("S1", "test task")
+        wu_id = tracer.open_or_find_work_unit(
+            repo_url="https://github.com/test/repo",
+            branch="main",
+            base_commit="abc123",
+            prompt="test task",
+        )
+        tracer.register_session_in_work_unit(wu_id, "S1")
+        transcript = tmp_path / "session.jsonl"
+        transcript.write_text("\n".join(json.dumps({**e, "sessionId": "S1"}) for e in entries))
+        return wu_id, str(transcript)
+
+    def _actions(self, tracer: contAInedTracer, wu_id: str) -> list[dict]:
+        rows = tracer.conn.execute(
+            "SELECT action_type, tool_name, tool_input, tool_outcome, content_short "
+            "FROM actions WHERE work_unit_id = ? ORDER BY seq",
+            (wu_id,),
+        ).fetchall()
+        return [
+            {
+                "action_type": r[0],
+                "tool_name": r[1],
+                "tool_input": json.loads(r[2]) if r[2] else None,
+                "tool_outcome": r[3],
+                "content_short": r[4],
+            }
+            for r in rows
+        ]
+
+    def test_operator_shell_from_bash_input_stdout_pair(
+        self, tracer: contAInedTracer, tmp_path: Path
+    ) -> None:
+        caveat = "<local-command-caveat>ignore</local-command-caveat>"
+        stdout_entry = "<bash-stdout>On branch main</bash-stdout><bash-stderr></bash-stderr>"
+        entries = [
+            {"type": "user", "isMeta": True, "message": {"content": caveat}},
+            {"type": "user", "message": {"content": "<bash-input>git status</bash-input>"}},
+            {"type": "user", "message": {"content": stdout_entry}},
+        ]
+        wu_id, path = self._setup(tracer, tmp_path, entries)
+        tracer.build_actions(wu_id, [path])
+        actions = self._actions(tracer, wu_id)
+        assert len(actions) == 1
+        a = actions[0]
+        assert a["action_type"] == "operator_shell"
+        assert a["tool_name"] == "OperatorShell"
+        assert a["tool_outcome"] == "executed"
+        assert a["tool_input"]["command"] == "git status"
+        assert a["tool_input"]["stdout"] == "On branch main"
+        assert a["tool_input"]["stderr"] == ""
+        assert a["content_short"].startswith("! git status")
+
+    def test_operator_shell_with_stderr(self, tracer: contAInedTracer, tmp_path: Path) -> None:
+        stderr_entry = "<bash-stdout></bash-stdout><bash-stderr>command not found</bash-stderr>"
+        entries = [
+            {"type": "user", "message": {"content": "<bash-input>bad-cmd</bash-input>"}},
+            {"type": "user", "message": {"content": stderr_entry}},
+        ]
+        wu_id, path = self._setup(tracer, tmp_path, entries)
+        tracer.build_actions(wu_id, [path])
+        actions = self._actions(tracer, wu_id)
+        assert len(actions) == 1
+        assert actions[0]["tool_input"]["stderr"] == "command not found"
+        assert "[stderr]" in actions[0]["content_short"]
+
+    def test_operator_shell_flushed_at_end_without_stdout(
+        self, tracer: contAInedTracer, tmp_path: Path
+    ) -> None:
+        """A bash-input with no following bash-stdout is still captured."""
+        entries = [
+            {"type": "user", "message": {"content": "<bash-input>git add .</bash-input>"}},
+        ]
+        wu_id, path = self._setup(tracer, tmp_path, entries)
+        tracer.build_actions(wu_id, [path])
+        actions = self._actions(tracer, wu_id)
+        assert len(actions) == 1
+        assert actions[0]["action_type"] == "operator_shell"
+        assert actions[0]["tool_input"]["command"] == "git add ."
+        assert actions[0]["tool_input"]["stdout"] == ""
+
+    def test_imeta_user_entries_filtered_out(self, tracer: contAInedTracer, tmp_path: Path) -> None:
+        """isMeta=True user entries (caveats, stop-hook feedback) must not appear as actions."""
+        caveat = "<local-command-caveat>ignore me</local-command-caveat>"
+        entries = [
+            {"type": "user", "isMeta": True, "message": {"content": caveat}},
+            {
+                "type": "user",
+                "isMeta": True,
+                "message": {"content": "Stop hook feedback:\nQA: ✓ lint"},
+            },
+            {"type": "user", "message": {"content": "real user message"}},
+        ]
+        wu_id, path = self._setup(tracer, tmp_path, entries)
+        tracer.build_actions(wu_id, [path])
+        actions = self._actions(tracer, wu_id)
+        assert len(actions) == 1
+        assert actions[0]["action_type"] == "user_message"
+        assert actions[0]["content_short"] == "real user message"
+
+    def test_context_compaction_from_compact_boundary(
+        self, tracer: contAInedTracer, tmp_path: Path
+    ) -> None:
+        entries = [
+            {
+                "type": "system",
+                "subtype": "compact_boundary",
+                "content": "Conversation compacted",
+                "compactMetadata": {"trigger": "auto", "preTokens": 150000},
+            },
+        ]
+        wu_id, path = self._setup(tracer, tmp_path, entries)
+        tracer.build_actions(wu_id, [path])
+        actions = self._actions(tracer, wu_id)
+        assert len(actions) == 1
+        a = actions[0]
+        assert a["action_type"] == "context_compaction"
+        assert "trigger=auto" in a["content_short"]
+        assert "preTokens=150000" in a["content_short"]
+
+    def test_other_system_subtypes_ignored(self, tracer: contAInedTracer, tmp_path: Path) -> None:
+        entries = [
+            {"type": "system", "subtype": "stop_hook_summary", "content": "hook ran"},
+            {"type": "system", "subtype": "turn_duration", "durationMs": 1234},
+        ]
+        wu_id, path = self._setup(tracer, tmp_path, entries)
+        tracer.build_actions(wu_id, [path])
+        assert self._actions(tracer, wu_id) == []
+
+    def test_regular_user_message_still_captured(
+        self, tracer: contAInedTracer, tmp_path: Path
+    ) -> None:
+        entries = [
+            {"type": "user", "message": {"content": "hello from operator"}},
+        ]
+        wu_id, path = self._setup(tracer, tmp_path, entries)
+        tracer.build_actions(wu_id, [path])
+        actions = self._actions(tracer, wu_id)
+        assert len(actions) == 1
+        assert actions[0]["action_type"] == "user_message"
+        assert actions[0]["content_short"] == "hello from operator"
+
+    def test_mixed_sequence_correct_order(self, tracer: contAInedTracer, tmp_path: Path) -> None:
+        """Operator shell, regular message, and compaction all appear in seq order."""
+        ls_out = "<bash-stdout>file.py</bash-stdout><bash-stderr></bash-stderr>"
+        entries = [
+            {"type": "user", "message": {"content": "<bash-input>ls</bash-input>"}},
+            {"type": "user", "message": {"content": ls_out}},
+            {"type": "user", "message": {"content": "what does this do?"}},
+            {
+                "type": "system",
+                "subtype": "compact_boundary",
+                "content": "Conversation compacted",
+                "compactMetadata": {"trigger": "manual", "preTokens": 80000},
+            },
+        ]
+        wu_id, path = self._setup(tracer, tmp_path, entries)
+        tracer.build_actions(wu_id, [path])
+        actions = self._actions(tracer, wu_id)
+        assert len(actions) == 3
+        assert actions[0]["action_type"] == "operator_shell"
+        assert actions[1]["action_type"] == "user_message"
+        assert actions[2]["action_type"] == "context_compaction"
+        assert "trigger=manual" in actions[2]["content_short"]

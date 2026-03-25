@@ -93,8 +93,7 @@ type NetworkConfig struct {
 }
 
 type AuditConfig struct {
-	Enabled     bool `yaml:"enabled"`
-	JSONLExport bool `yaml:"jsonl_export"`
+	Enabled bool `yaml:"enabled"`
 }
 
 type QAConfig struct {

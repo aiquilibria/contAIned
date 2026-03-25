@@ -152,7 +152,6 @@ policy:
   # ── Audit logging ─────────────────────────────────────────────────────────────
   audit:
     enabled: true
-    jsonl_export: false
 
   # ── QA gate ───────────────────────────────────────────────────────────────────
   # Leave empty here — repositories define their own QA checks via

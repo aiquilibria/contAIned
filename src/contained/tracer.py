@@ -15,6 +15,7 @@ from __future__ import annotations
 import difflib
 import hashlib
 import json
+import re
 import sqlite3
 import threading as _threading
 import time
@@ -148,6 +149,7 @@ CREATE TABLE IF NOT EXISTS actions (
     ts                 TEXT,               -- ISO-8601
     action_type        TEXT    NOT NULL,
     -- 'user_message' | 'assistant_response' | 'tool_call' | 'skill_use'
+    -- 'operator_shell' | 'context_compaction'
 
     -- tool_call / skill_use fields
     tool_name          TEXT,
@@ -1101,6 +1103,10 @@ class contAInedTracer:
             except OSError:
                 continue
 
+            # Pending operator shell escape — populated by <bash-input>, flushed
+            # by the following <bash-stdout> entry or at end of transcript.
+            pending_shell: dict | None = None
+
             for raw_line in lines:
                 raw_line = raw_line.strip()
                 if not raw_line:
@@ -1116,16 +1122,111 @@ class contAInedTracer:
                 cur_session = entry.get("sessionId") or entry.get("session_id") or default_session
 
                 if entry_type == "user":
+                    # Skip meta entries (caveats, stop-hook feedback, etc.)
+                    if entry.get("isMeta"):
+                        continue
+
                     message = entry.get("message") or {}
                     content = message.get("content") or []
-                    text = ""
+
                     if isinstance(content, str):
+                        # ── Operator shell escape (! command) ─────────────────
+                        if content.startswith("<bash-input>"):
+                            cmd = content[len("<bash-input>") :]
+                            if cmd.endswith("</bash-input>"):
+                                cmd = cmd[: -len("</bash-input>")]
+                            pending_shell = {
+                                "work_unit_id": work_unit_id,
+                                "session_id": cur_session,
+                                "ts": entry_ts,
+                                "command": cmd.strip(),
+                            }
+                            continue
+
+                        if content.startswith("<bash-stdout>") and pending_shell is not None:
+                            stdout_m = re.search(
+                                r"<bash-stdout>(.*?)</bash-stdout>", content, re.DOTALL
+                            )
+                            stderr_m = re.search(
+                                r"<bash-stderr>(.*?)</bash-stderr>", content, re.DOTALL
+                            )
+                            stdout = stdout_m.group(1).strip() if stdout_m else ""
+                            stderr = stderr_m.group(1).strip() if stderr_m else ""
+                            cmd = pending_shell["command"]
+                            out_parts = ["! " + cmd]
+                            if stdout:
+                                out_parts.append(stdout[:400])
+                            if stderr:
+                                out_parts.append("[stderr] " + stderr[:200])
+                            seq += 1
+                            actions.append(
+                                {
+                                    "work_unit_id": pending_shell["work_unit_id"],
+                                    "session_id": pending_shell["session_id"],
+                                    "seq": seq,
+                                    "ts": pending_shell["ts"],
+                                    "action_type": "operator_shell",
+                                    "tool_name": "OperatorShell",
+                                    "tool_input": json.dumps(
+                                        {"command": cmd, "stdout": stdout, "stderr": stderr}
+                                    ),
+                                    "tool_outcome": "executed",
+                                    "content_short": "\n".join(out_parts)[:500],
+                                }
+                            )
+                            pending_shell = None
+                            continue
+
+                        # Flush any pending shell without output (edge case)
+                        if pending_shell is not None:
+                            cmd = pending_shell["command"]
+                            seq += 1
+                            actions.append(
+                                {
+                                    "work_unit_id": pending_shell["work_unit_id"],
+                                    "session_id": pending_shell["session_id"],
+                                    "seq": seq,
+                                    "ts": pending_shell["ts"],
+                                    "action_type": "operator_shell",
+                                    "tool_name": "OperatorShell",
+                                    "tool_input": json.dumps(
+                                        {"command": cmd, "stdout": "", "stderr": ""}
+                                    ),
+                                    "tool_outcome": "executed",
+                                    "content_short": ("! " + cmd)[:500],
+                                }
+                            )
+                            pending_shell = None
+
                         text = content
-                    elif isinstance(content, list):
+                    else:
+                        # Flush pending shell before a non-string user entry
+                        if pending_shell is not None:
+                            cmd = pending_shell["command"]
+                            seq += 1
+                            actions.append(
+                                {
+                                    "work_unit_id": pending_shell["work_unit_id"],
+                                    "session_id": pending_shell["session_id"],
+                                    "seq": seq,
+                                    "ts": pending_shell["ts"],
+                                    "action_type": "operator_shell",
+                                    "tool_name": "OperatorShell",
+                                    "tool_input": json.dumps(
+                                        {"command": cmd, "stdout": "", "stderr": ""}
+                                    ),
+                                    "tool_outcome": "executed",
+                                    "content_short": ("! " + cmd)[:500],
+                                }
+                            )
+                            pending_shell = None
+
+                        text = ""
                         for block in content:
                             if isinstance(block, dict) and block.get("type") == "text":
                                 text = (block.get("text") or "").strip()
                                 break
+
                     if text.strip():
                         seq += 1
                         actions.append(
@@ -1224,6 +1325,46 @@ class contAInedTracer:
                                     action["after_hash"] = snaps[-1]
 
                         actions.append(action)
+
+                elif entry_type == "system":
+                    # ── Context compaction boundary ────────────────────────
+                    if entry.get("subtype") == "compact_boundary":
+                        meta = entry.get("compactMetadata") or {}
+                        trigger = meta.get("trigger", "auto")
+                        pre_tokens = meta.get("preTokens", "?")
+                        seq += 1
+                        actions.append(
+                            {
+                                "work_unit_id": work_unit_id,
+                                "session_id": cur_session,
+                                "seq": seq,
+                                "ts": entry_ts,
+                                "action_type": "context_compaction",
+                                "content_short": (
+                                    f"Conversation compacted "
+                                    f"(trigger={trigger}, preTokens={pre_tokens})"
+                                ),
+                            }
+                        )
+
+            # Flush any pending operator shell at end of transcript
+            if pending_shell is not None:
+                cmd = pending_shell["command"]
+                seq += 1
+                actions.append(
+                    {
+                        "work_unit_id": pending_shell["work_unit_id"],
+                        "session_id": pending_shell["session_id"],
+                        "seq": seq,
+                        "ts": pending_shell["ts"],
+                        "action_type": "operator_shell",
+                        "tool_name": "OperatorShell",
+                        "tool_input": json.dumps({"command": cmd, "stdout": "", "stderr": ""}),
+                        "tool_outcome": "executed",
+                        "content_short": ("! " + cmd)[:500],
+                    }
+                )
+                pending_shell = None
 
         # ── Write actions to DB ─────────────────────────────────────────
         if actions:
