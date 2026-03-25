@@ -9,6 +9,7 @@ the stop hook (summarizer.py) which has the full session transcript available.
 This hook must never block execution (always exits 0).
 """
 import json
+import re
 import sys
 
 try:
@@ -24,7 +25,7 @@ tool_input    = event.get("tool_input") or {}
 tool_response = event.get("tool_response") or {}
 
 cmd = (tool_input.get("command") or "").strip()
-if not ("git" in cmd and "push" in cmd and "--dry-run" not in cmd):
+if not (re.match(r'^git\s+push\b', cmd) and "--dry-run" not in cmd):
     sys.exit(0)
 
 exit_code = tool_response.get("exit_code")
