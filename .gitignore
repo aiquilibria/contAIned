@@ -4,6 +4,7 @@ Thumbs.db
 desktop.ini
 
 # ── Editors ───────────────────────────────────────────────────────────────────
+.idea
 .idea/
 .vscode/
 *.swp
@@ -31,3 +32,15 @@ node_modules/
 docs/internal/
 .claude/*
 pytest-of-agent*
+
+# ── contAIned — container-injected dotfiles ───────────────────────────────────
+# Empty stub files written by the contAIned runtime at container start.
+.bash_profile
+.bashrc
+.gitconfig
+.gitmodules
+.mcp.json
+.profile
+.ripgreprc
+.zprofile
+.zshrc
