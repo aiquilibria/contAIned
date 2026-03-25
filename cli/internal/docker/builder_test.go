@@ -156,16 +156,16 @@ func TestBuildManagedSettings_HooksReferenceVenvPython(t *testing.T) {
 	}
 }
 
-func TestBuildManagedSettings_PostCompactHookRegistered(t *testing.T) {
+func TestBuildManagedSettings_PreCompactHookRegistered(t *testing.T) {
 	out, err := BuildManagedSettings(baseManifest())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(out, "PostCompact") {
-		t.Error("managed-settings should register a PostCompact hook")
+	if !strings.Contains(out, "PreCompact") {
+		t.Error("managed-settings should register a PreCompact hook")
 	}
-	if !strings.Contains(out, "post_compact") {
-		t.Error("PostCompact hook should reference post_compact.py")
+	if !strings.Contains(out, "pre_compact") {
+		t.Error("PreCompact hook should reference pre_compact.py")
 	}
 }
 

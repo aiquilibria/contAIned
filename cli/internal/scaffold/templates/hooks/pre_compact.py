@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-PostCompact hook — records a context compaction event in tracer.db.
+PreCompact hook — records a context compaction event in tracer.db.
 
-Fires after Claude Code automatically compacts the conversation context.
+Fires before Claude Code automatically compacts the conversation context.
 Compaction is an agent-affecting event (context is truncated) that is
 invisible to the PostToolUse audit trail, so it is recorded here as an
-OperatorShell-style audit event to preserve a complete timeline.
+audit event to preserve a complete timeline.
 
 Event fields used:
   session_id        — current session
-  hook_event_name   — always "PostCompact"
+  hook_event_name   — always "PreCompact"
   trigger           — "auto" | "manual" (how compaction was triggered)
   preTokens         — token count before compaction
   postTokens        — token count after compaction (if available)

@@ -99,7 +99,7 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 			"SubagentStart":     []any{map[string]any{"hooks": []any{h("subagent_start")}}},
 			"SubagentStop":      []any{map[string]any{"hooks": []any{h("subagent_stop")}}},
 			"Stop":              []any{map[string]any{"hooks": []any{h("summarizer")}}},
-			"PostCompact":       []any{map[string]any{"hooks": []any{h("post_compact")}}},
+			"PreCompact":        []any{map[string]any{"hooks": []any{h("pre_compact")}}},
 			"UserPromptSubmit":  []any{map[string]any{"hooks": []any{h("user_prompt_submit")}}},
 			"PermissionRequest": []any{map[string]any{"hooks": []any{h("permission_request")}}},
 		},
