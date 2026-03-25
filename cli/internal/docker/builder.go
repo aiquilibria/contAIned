@@ -21,7 +21,7 @@ import (
 var version = ver.Version
 
 // FindSource walks up from cwd looking for the contAIned Python source tree
-// (identified by the presence of src/contained/runtime/Dockerfile).
+// (identified by the presence of pyproject.toml at the repo root).
 // Returns the directory path if found, empty string otherwise.
 func FindSource() string {
 	cwd, err := os.Getwd()
@@ -30,7 +30,7 @@ func FindSource() string {
 	}
 	current := filepath.Clean(cwd)
 	for {
-		candidate := filepath.Join(current, "src", "contained", "runtime", "Dockerfile")
+		candidate := filepath.Join(current, "pyproject.toml")
 		if _, err := os.Stat(candidate); err == nil {
 			return current
 		}

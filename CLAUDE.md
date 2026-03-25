@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```
 cli/                   Go CLI binary (cobra): init, verify, REPL startup
 src/contained/         Python runtime: tracer DB, MCP server, payload assembly
-  runtime/             Dockerfile, entrypoint.sh, statusline.py
+  runtime/             statusline.py, plugin/
 tests/                 pytest tests for tracer and QA hook logic
 .contAIned/            Workspace control plane (hooks, audit log, tracer DB)
   hooks/               Hook scripts registered in managed-settings.json

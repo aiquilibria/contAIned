@@ -31,7 +31,7 @@ The agent operates within a defined workspace inside an isolated Docker containe
 
 ## Why contAIned?
 
-Two existing primitives handle adjacent problems but leave a critical gap:
+Three existing primitives handle adjacent problems but leave a critical gap:
 
 ### Claude Code's `/sandbox`
 
@@ -55,25 +55,36 @@ Additional constraints:
 - MicroVM-based sandboxes require **macOS or Windows** (Linux users fall back to legacy container mode — the same isolation Docker has always provided).
 - No per-tool-call policy hooks, no audit log, no operator review workflow, no QA gates.
 
-### The gap both leave open
+### Claude Code devcontainer
 
-Neither primitive addresses the governance layer: *intercepting, logging, and selectively blocking individual agent tool calls, recording a content-addressed diff of every change, enforcing quality criteria before the agent can declare a task done, and requiring operator sign-off before work is accepted.*
+Anthropic ships a [reference devcontainer](https://github.com/anthropics/claude-code/tree/main/.devcontainer) — a preconfigured Docker environment designed for VS Code's Dev Containers extension. It provides a Node.js environment with a custom firewall that restricts outbound connections to an approved list of services (npm registry, GitHub, the Claude API, etc.). The container boundary isolates the agent from the host, and the firewall provides meaningful egress control for the listed domains.
 
-Neither addresses outbound network control either. An agent can exfiltrate workspace data via `WebFetch`, a Bash `curl`, or a Python script it writes and then executes — three different channels, each bypassing a different set of controls. `/sandbox` blocks some Bash network tools but not Claude Code's own `WebFetch`. Docker Sandboxes place no constraints on outbound traffic at all.
+The intended usage is `claude --dangerously-skip-permissions`, which bypasses all permission prompts to enable unattended operation. This is where the governance gap opens: `--dangerously-skip-permissions` disables the entire Claude Code permissions system — including `PreToolUse` and `PostToolUse` hooks, all `managed-settings.json` rules, and per-tool-call policy enforcement. There is no governance layer at all. Anthropic's own documentation acknowledges the consequence directly: the devcontainer "doesn't prevent a malicious project from exfiltrating anything accessible in the devcontainer including Claude Code credentials."
+
+Additional constraints:
+- **No governance layer.** No per-tool-call interception, no audit log, no QA gate, no operator review workflow.
+- **IDE-coupled.** Designed around VS Code Dev Containers; headless and CI use is possible but not the primary design target.
+- **Static firewall, not a policy manifest.** Network rules live in `init-firewall.sh`. They are not driven by a declarative manifest, not mergeable with repository requirements, and not uniformly enforced across both `WebFetch` and subprocess channels through a single policy source.
+
+### The gap all three leave open
+
+None of these primitives addresses the governance layer: *intercepting, logging, and selectively blocking individual agent tool calls, recording a content-addressed diff of every change, enforcing quality criteria before the agent can declare a task done, and requiring operator sign-off before work is accepted.*
+
+None adequately addresses outbound network control either. An agent can exfiltrate workspace data via `WebFetch`, a Bash `curl`, or a Python script it writes and then executes — three different channels, each bypassing a different set of controls. `/sandbox` blocks some Bash network tools but not Claude Code's own `WebFetch`. Docker Sandboxes place no constraints on outbound traffic at all. The devcontainer firewall covers network egress but cannot prevent credential exfiltration via the Claude Code session itself when `--dangerously-skip-permissions` is active.
 
 contAIned fills that gap:
 
-| Capability | `/sandbox` | Docker Sandbox | **contAIned** |
-|---|:---:|:---:|:---:|
-| Isolates agent from host filesystem | ◑ (subprocess only) | ✓ (microVM) | ✓ (Docker container) |
-| Covers SDK tool calls (`Write`, `Edit`, `Read`) | ✗ | ✗ | ✓ (PreToolUse hooks) |
-| Append-only audit log of every tool call | ✗ | ✗ | ✓ |
-| Content-addressed diff store per task | ✗ | ✗ | ✓ |
-| Operator review before changes are accepted | ✗ | ✗ | ✓ |
-| QA gate blocks agent from finishing prematurely | ✗ | ✗ | ✓ |
-| Policy baked into image; tamper-proof at runtime | ✗ | ✗ | ✓ |
-| Egress filtering — outbound network allowlist | ✗ | ✗ | ◑ (sandbox network + operator approval flow; prevents accidental exfiltration) |
-| Works on Linux in CI/CD | ✓ | ✗ (MicroVM) | ✓ |
+| Capability | `/sandbox` | Docker Sandbox | Devcontainer | **contAIned** |
+|---|:---:|:---:|:---:|:---:|
+| Isolates agent from host filesystem | ◑ (subprocess only) | ✓ (microVM) | ✓ (Docker) | ✓ (Docker container) |
+| Covers SDK tool calls (`Write`, `Edit`, `Read`) | ✗ | ✗ | ✗ (`--dangerously-skip-permissions`) | ✓ (PreToolUse hooks) |
+| Append-only audit log of every tool call | ✗ | ✗ | ✗ | ✓ |
+| Content-addressed diff store per task | ✗ | ✗ | ✗ | ✓ |
+| Operator review before changes are accepted | ✗ | ✗ | ✗ | ✓ |
+| QA gate blocks agent from finishing prematurely | ✗ | ✗ | ✗ | ✓ |
+| Policy baked into image; tamper-proof at runtime | ✗ | ✗ | ✗ | ✓ |
+| Egress filtering — outbound network allowlist | ✗ | ✗ | ◑ (firewall only; no WebFetch control) | ◑ (sandbox network + operator approval flow; prevents accidental exfiltration) |
+| Works on Linux in CI/CD | ✓ | ✗ (MicroVM) | ◑ (VS Code–focused) | ✓ |
 
 contAIned and `/sandbox` are complementary, not competing. Enabling both means subprocess writes are blocked at the OS level *and* SDK tool calls are blocked at the hook level — two independent enforcement layers from two different trust boundaries.
 
@@ -116,6 +127,18 @@ contAIned uses native settings for what they do well — hook registration, sand
 | Task lifecycle, diff store, operator review | ✗ | ✓ |
 | Policy tamper-proof at runtime; Sigstore provenance | ✗ | ✓ |
 | Workspace isolation (agent sees only the project) | ✗ | ✓ |
+
+### Why build on Claude Code CLI?
+
+Claude Code is the right foundation because it exposes exactly the extension points that a governance layer needs — and contAIned makes deliberate, non-trivial use of each of them.
+
+- **Per-tool-call hooks** — synchronous interception at every tool call and at task completion. contAIned uses these to enforce path-based and semantic policy, write a structured append-only audit trail, run QA gates, build content-addressed diffs, and block the agent from declaring success until checks pass.
+- **Immutable operator settings** — a highest-precedence settings layer that the agent cannot read or override. contAIned bakes policy into this layer at image build time and records a manifest hash in the image label, giving operators a tamper-proof policy plane with Sigstore-backed provenance — a chain of custody that survives container rebuilds and multi-turn sessions.
+- **OS-level sandbox** — subprocess isolation for Bash commands. contAIned treats this as a second independent enforcement boundary, enabling a defense-in-depth architecture where subprocess writes are blocked at the kernel level and SDK tool calls are blocked at the hook level — two separate trust boundaries, both active simultaneously.
+- **Native egress control** — per-domain control over Claude Code's own network tool. contAIned unifies this with manifest-driven network policy so that the same `allowed_domains` list governs both the built-in network tool and Bash subprocess traffic, closing the multi-channel exfiltration gap.
+- **Transcripts and context lifecycle events** — durable session context and a signal when the context window fills. contAIned uses this to compact long task narratives back into the tracer database before they exceed the injection budget, keeping the operator's view of session history coherent across long sessions.
+
+Claude Code's design makes these extension points available; contAIned is what turns them into a governance system.
 
 ---
 

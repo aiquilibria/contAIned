@@ -174,7 +174,7 @@ func runInit(_ *cobra.Command, args []string) error {
 	if source != "" {
 		dim.Printf("  Local source detected: %s\n", source)
 	} else {
-		dim.Printf("  No local source found — will install contained from PyPI.\n")
+		dim.Printf("  No local source found — will install contAIned from PyPI.\n")
 	}
 	fmt.Println()
 
