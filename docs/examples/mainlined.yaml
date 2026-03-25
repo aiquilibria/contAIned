@@ -64,6 +64,8 @@ runtime:
     toolchains:
       go: ">=1.22"
       node: ">=18"
+    extra_mounts:
+      - ~/.netrc:/home/agent/.netrc:ro
   mAInlined:
     url: "https://mainlined.example.com"
 
@@ -151,6 +153,9 @@ policy:
       - api.anthropic.com
       - code.claude.com
       - docs.anthropic.com
+      # GitHub
+      - github.com
+      - ssh.github.com
 
   # ── Audit logging ─────────────────────────────────────────────────────────────
   audit:

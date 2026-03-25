@@ -49,6 +49,10 @@ type DockerConfig struct {
 	Network           string            `yaml:"network"`
 	AgentConfigVolume string            `yaml:"agent_config_volume"`
 	Toolchains        map[string]string `yaml:"toolchains,omitempty"`
+	// ExtraMounts lists additional host:container[:options] bind mounts passed
+	// to docker run. A leading ~ is expanded to the operator's home directory.
+	// Example: ["~/.ssh:/home/agent/.ssh:ro"]
+	ExtraMounts []string `yaml:"extra_mounts,omitempty"`
 	// Env holds merged environment variables collected from active ecosystems.
 	// Populated by MergeRepoManifest; not intended for direct YAML authoring.
 	Env map[string]string `yaml:"env,omitempty"`

@@ -102,8 +102,27 @@ func (r *Runner) baseArgs(dockerBin string) ([]string, error) {
 		}
 	}
 
+	for _, m := range r.cfg.ExtraMounts {
+		expanded, err := expandHome(m, home)
+		if err != nil {
+			return nil, fmt.Errorf("expanding extra_mount %q: %w", m, err)
+		}
+		args = append(args, "--volume", expanded)
+	}
+
 	args = append(args, r.cfg.Image)
 	return args, nil
+}
+
+// expandHome replaces a leading ~ in s with the provided home directory.
+func expandHome(s, home string) (string, error) {
+	if len(s) == 0 || s[0] != '~' {
+		return s, nil
+	}
+	if len(s) > 1 && s[1] != '/' {
+		return "", fmt.Errorf("~ expansion only supported for current user (got %q)", s)
+	}
+	return filepath.Join(home, s[2:]), nil
 }
 
 // RunRepl starts an interactive contAIned session inside the container and
