@@ -24,6 +24,12 @@ ecosystem_definitions:
     network_domains:
       - proxy.golang.org
       - sum.golang.org
+    env:
+      # Redirect the Go build cache to a sandbox-writable path.
+      # The default (~/.cache/go-build) is outside the sandbox write-allowlist,
+      # so `go build` fails without this override. /tmp/claude is created in the
+      # Dockerfile and is the same directory the sandbox sets TMPDIR to.
+      GOCACHE: /tmp/claude/go-build
   python:
     # Python is pre-installed in the base image; no toolchain key needed.
     network_domains:

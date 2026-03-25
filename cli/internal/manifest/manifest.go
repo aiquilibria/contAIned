@@ -28,6 +28,10 @@ type EcosystemDef struct {
 	// NetworkDomains lists the outbound domains required for dependency
 	// resolution and package fetching for this ecosystem.
 	NetworkDomains []string `yaml:"network_domains,omitempty"`
+	// Env holds environment variables that must be set inside the container
+	// when this ecosystem is active. These are injected into managed-settings.json
+	// so the Claude Code sandbox propagates them to every Bash subprocess.
+	Env map[string]string `yaml:"env,omitempty"`
 }
 
 type RuntimeConfig struct {
@@ -46,6 +50,9 @@ type DockerConfig struct {
 	Network           string            `yaml:"network"`
 	AgentConfigVolume string            `yaml:"agent_config_volume"`
 	Toolchains        map[string]string `yaml:"toolchains,omitempty"`
+	// Env holds merged environment variables collected from active ecosystems.
+	// Populated by MergeRepoManifest; not intended for direct YAML authoring.
+	Env map[string]string `yaml:"env,omitempty"`
 }
 
 type AgentConfig struct {

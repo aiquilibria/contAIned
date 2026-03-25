@@ -105,7 +105,7 @@ func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error
 		return &merged, nil
 	}
 
-	// Resolve ecosystem declarations to toolchain installs + network domains.
+	// Resolve ecosystem declarations to toolchain installs + network domains + env vars.
 	existing := domainSet(merged.Policy.Network.AllowedDomains)
 	for ecoName, version := range repo.Ecosystems {
 		def, ok := operator.EcosystemDefinitions[ecoName]
@@ -145,6 +145,16 @@ func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error
 					merged.Policy.Network.AllowedDomains = append(merged.Policy.Network.AllowedDomains, domain)
 					existing[domain] = true
 				}
+			}
+		}
+
+		// Merge ecosystem env vars (last writer wins for duplicate keys).
+		if len(def.Env) > 0 {
+			if merged.Runtime.Docker.Env == nil {
+				merged.Runtime.Docker.Env = make(map[string]string)
+			}
+			for k, v := range def.Env {
+				merged.Runtime.Docker.Env[k] = v
 			}
 		}
 	}

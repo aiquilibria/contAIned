@@ -25,6 +25,8 @@ ecosystem_definitions:
     network_domains:
       - proxy.golang.org
       - sum.golang.org
+    env:
+      GOCACHE: /tmp/claude/go-build
   python:
     # Python is pre-installed in the base image; no toolchain key needed.
     network_domains:

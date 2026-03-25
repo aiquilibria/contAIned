@@ -126,6 +126,13 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 		},
 	}
 
+	// Inject ecosystem-derived env vars (e.g. GOCACHE for Go).
+	// These are populated by MergeRepoManifest from the ecosystem_definitions
+	// entries for each active ecosystem declared by the repo manifest.
+	if len(m.Runtime.Docker.Env) > 0 {
+		settings["env"] = m.Runtime.Docker.Env
+	}
+
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshalling managed-settings: %w", err)

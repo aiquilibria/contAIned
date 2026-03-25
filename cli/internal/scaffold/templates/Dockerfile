@@ -50,7 +50,10 @@ RUN uv venv --python python3.13 /opt/contained-venv \
     && uv pip install --python /opt/contained-venv/bin/python3 --no-cache "$CONTAINED_PACKAGE"
 
 # Set up in-container runtime paths
-RUN mkdir -p /etc/claude-code /etc/contained /run/contained
+# /tmp/claude is created here because the Claude Code sandbox sets TMPDIR to
+# this path for Bash subprocesses. Without the directory existing the Go
+# toolchain (and any other tool that calls os.TempDir) cannot create work files.
+RUN mkdir -p /etc/claude-code /etc/contained /run/contained /tmp/claude
 
 # Copy the Claude Code plugin and statusline to fixed paths so the entrypoint
 # can reference them without knowing the Python package install location.
