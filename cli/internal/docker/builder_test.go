@@ -203,6 +203,24 @@ func TestGenerateToolchainsScript_Go_ContainsTarballURL(t *testing.T) {
 	}
 }
 
+func TestGenerateToolchainsScript_Go_NormalizesTwoPartVersion(t *testing.T) {
+	// Go 1.21+ uses explicit patch-zero in archive names; "1.24" must become "1.24.0".
+	script := GenerateToolchainsScript(map[string]string{"go": "1.24"})
+	if !strings.Contains(script, "go1.24.0") {
+		t.Error("Go script should normalize two-part version 1.24 to 1.24.0 in download URL")
+	}
+	if strings.Contains(script, "go1.24.linux") {
+		t.Error("Go script must not use unnormalized go1.24 in the URL")
+	}
+}
+
+func TestGenerateToolchainsScript_Go_ThreePartVersionUnchanged(t *testing.T) {
+	script := GenerateToolchainsScript(map[string]string{"go": "1.24.1"})
+	if !strings.Contains(script, "go1.24.1") {
+		t.Error("Go script should preserve three-part version 1.24.1 unchanged")
+	}
+}
+
 func TestGenerateToolchainsScript_Node_UsesNodeSource(t *testing.T) {
 	script := GenerateToolchainsScript(map[string]string{"node": "20.11.0"})
 	if !strings.Contains(script, "nodesource.com/setup_20.x") {

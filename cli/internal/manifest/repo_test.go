@@ -175,6 +175,22 @@ func operatorWithEcosystems() *Manifest {
 	return m
 }
 
+func TestMergeRepoManifest_NilRepo_InstallsMinVersionFromFloorConstraint(t *testing.T) {
+	m := operatorWithEcosystems()
+	m.Runtime.Docker.Toolchains = map[string]string{"go": ">=1.22", "node": ">=18"}
+
+	merged, err := MergeRepoManifest(m, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged.Runtime.Docker.Toolchains["go"] != "1.22" {
+		t.Errorf("go toolchain: got %q, want %q", merged.Runtime.Docker.Toolchains["go"], "1.22")
+	}
+	if merged.Runtime.Docker.Toolchains["node"] != "18" {
+		t.Errorf("node toolchain: got %q, want %q", merged.Runtime.Docker.Toolchains["node"], "18")
+	}
+}
+
 func TestMergeRepoManifest_NilRepo_ReturnsCopyOfOperator(t *testing.T) {
 	m := validManifest()
 	m.Policy.QA.Checks = []QACheck{{Name: "lint", Command: []string{"ruff", "check", "."}}}

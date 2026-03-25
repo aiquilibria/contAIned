@@ -105,6 +105,19 @@ func supportedToolchainNames() string {
 	return strings.Join(names, ", ")
 }
 
+// minVersionFromConstraint extracts the concrete floor version from a
+// constraint string so it can be used as an install target.
+// ">=1.22" → "1.22", "==1.22.5" → "1.22.5", bare "1.22.5" → "1.22.5".
+func minVersionFromConstraint(constraint string) string {
+	if strings.HasPrefix(constraint, ">=") {
+		return strings.TrimSpace(constraint[2:])
+	}
+	if strings.HasPrefix(constraint, "==") {
+		return strings.TrimSpace(constraint[2:])
+	}
+	return constraint
+}
+
 // satisfiesConstraint reports whether repoVersion satisfies constraint.
 //
 // Constraint formats (mAInlined): ">=X.Y.Z" (floor), "==X.Y.Z" or bare "X.Y.Z" (exact).

@@ -308,6 +308,11 @@ func GenerateToolchainsScript(toolchains map[string]string) string {
 	b.WriteString("esac\n\n")
 
 	if ver, ok := toolchains["go"]; ok {
+		// Go 1.21+ uses explicit patch-zero in archive names (go1.24.0, not go1.24).
+		// Normalize two-part versions so the download URL is always valid.
+		if strings.Count(ver, ".") == 1 {
+			ver += ".0"
+		}
 		fmt.Fprintf(&b, "# Go %s\n", ver)
 		fmt.Fprintf(&b, "curl -fsSL \"https://go.dev/dl/go%s.linux-${ARCH}.tar.gz\" | tar -C /usr/local -xzf -\n\n", ver)
 	}

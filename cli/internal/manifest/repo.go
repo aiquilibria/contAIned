@@ -95,9 +95,13 @@ func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error
 	merged := *operator
 
 	// Deep-copy mutable fields so we don't mutate the originals.
+	// operator.Runtime.Docker.Toolchains holds floor *constraints* (e.g. ">=1.22"),
+	// not install versions. Convert each to its minimum concrete version so that
+	// toolchains are always installed with a valid version string even when no
+	// repo manifest overrides the default.
 	merged.Runtime.Docker.Toolchains = make(map[string]string)
 	for k, v := range operator.Runtime.Docker.Toolchains {
-		merged.Runtime.Docker.Toolchains[k] = v
+		merged.Runtime.Docker.Toolchains[k] = minVersionFromConstraint(v)
 	}
 	merged.Policy.Network.AllowedDomains = append([]string{}, operator.Policy.Network.AllowedDomains...)
 
