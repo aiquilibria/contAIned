@@ -247,8 +247,6 @@ Creates (in the workspace):
   manifest.yaml          ← source of truth; baked into the image at build time
   tracer.db              ← SQLite task + diff store (gitignored)
   audit/                 ← audit log (gitignored)
-
-CLAUDE.md                ← agent operating instructions
 ```
 
 Baked into the Docker image (not in the workspace):
@@ -256,6 +254,7 @@ Baked into the Docker image (not in the workspace):
 ```
 /etc/claude-code/
   managed-settings.json  ← hook registration + sandbox rules (highest-precedence settings level)
+  CLAUDE.md              ← contAIned operating instructions (composes with project ./CLAUDE.md)
 /etc/contained/
   manifest.yaml          ← policy parameters read by hooks at runtime
   statusline.py          ← status bar script
@@ -489,6 +488,20 @@ The image is automatically rebuilt when the manifest hash changes — running `c
 **Image tagging.** By default, `contAIned init` tags the built image `contained:<workspace-name>` — derived automatically from the directory name. Running `contAIned init` in `~/projects/api-service` produces `contained:api-service`; running it in `~/projects/data-pipeline` produces `contained:data-pipeline`. Both images coexist; neither overwrites the other. To use a fixed name instead, set `runtime.docker.image` in `manifest.yaml` explicitly. The manifest hash and package version are stored as image labels and used to decide whether a rebuild is needed — running `contAIned init` after editing `manifest.yaml` triggers a rebuild automatically.
 
 > **Do not edit hook files directly.** Files under `.contAIned/hooks/` are generated from internal templates and will be overwritten by `contAIned init`. Hook registration, sandbox rules, and permission patterns are managed by `/etc/claude-code/managed-settings.json` baked into the Docker image — they cannot be overridden at runtime. Policy customisation belongs in `manifest.yaml`; structural hook changes should be raised as feature requests.
+
+### Project instructions (CLAUDE.md)
+
+contAIned's operating instructions for the agent are baked into the image at `/etc/claude-code/CLAUDE.md`. Claude Code loads this alongside your project's `./CLAUDE.md` — the two compose automatically every session without any configuration.
+
+**`./CLAUDE.md` is yours.** Create it in your project root to give the agent project-specific context: architecture notes, coding conventions, common workflows, domain terminology. The managed instructions in the image are always present regardless; you are adding to them, not replacing them.
+
+```markdown
+# My Project
+
+This is a Go service that ... (your project context here)
+```
+
+The managed `CLAUDE.md` is tamper-proof in the same way as `managed-settings.json` — it cannot be excluded or overridden by project or user settings. This ensures the governance instructions (stop on QA failure, do not modify control-plane files, do not retry denied tool calls) are always in effect, while leaving the agent's project knowledge entirely in operator hands.
 
 ### Policy schema overview
 

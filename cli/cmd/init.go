@@ -24,7 +24,7 @@ var initCmd = &cobra.Command{
 	Short: "Initialise a contAIned workspace",
 	Long: `Initialise a contAIned workspace in DIRECTORY (default: current directory).
 
-Scaffolds .contAIned/, .claude/, and CLAUDE.md. Builds a Docker image with
+Scaffolds .contAIned/ and .claude/. Builds a Docker image with
 the manifest baked in so policy is enforced at the highest-precedence settings
 level. The image is tagged contained:<workspace-name> by default, so each
 project gets its own image without manual configuration.
@@ -163,6 +163,12 @@ func runInit(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("building managed-settings: %w", err)
 	}
 
+	// Load the CLAUDE.md template to bake into /etc/claude-code/CLAUDE.md.
+	claudeMd, err := scaffold.TemplateContent("templates/CLAUDE.md")
+	if err != nil {
+		return fmt.Errorf("loading CLAUDE.md template: %w", err)
+	}
+
 	// Locate contAIned Python source for local builds.
 	source := docker.FindSource()
 	if source != "" {
@@ -181,6 +187,7 @@ func runInit(_ *cobra.Command, args []string) error {
 		initRebuild,
 		manifestContent,
 		managedSettings,
+		claudeMd,
 		printf,
 	)
 	if err != nil {
@@ -193,7 +200,7 @@ func runInit(_ *cobra.Command, args []string) error {
 	// different image tag than the on-disk copy (e.g. contained:latest →
 	// contained:<workspace-name>); VerifyWorkspace re-reads manifest.yaml to
 	// locate the image, so it must be current before the smoke-test runs.
-	// On a pure hook/CLAUDE.md refresh (imageRebuilt=false) we leave the
+	// On a pure hook refresh (imageRebuilt=false) we leave the
 	// existing manifest untouched unless --force was given.
 	manifestDest := filepath.Join(target, ".contAIned", "manifest.yaml")
 	manifestStatus, err := scaffold.WriteFile(manifestDest, manifestContent, false, imageRebuilt || initForce)
@@ -240,7 +247,7 @@ func runInit(_ *cobra.Command, args []string) error {
 	gitRoot := findGitRoot(target)
 	alreadyInit := isAlreadyInit(target)
 
-	// Managed files (hooks, CLAUDE.md) — always overwritten on re-run.
+	// Managed files (hooks) — always overwritten on re-run.
 	for _, mf := range scaffold.ManagedFiles() {
 		content, err := scaffold.TemplateContent(mf.Template)
 		if err != nil {

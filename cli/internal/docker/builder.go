@@ -82,7 +82,6 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 	settings := map[string]any{
 		"permissions": map[string]any{
 			"allow":                           allowRules,
-			"ask":                             []string{"WebFetch", "WebSearch"},
 			"disableBypassPermissionsMode":    "disable",
 			"allowManagedPermissionRulesOnly": true,
 		},
@@ -202,6 +201,7 @@ func DockerSetup(
 	rebuild bool,
 	manifestContent string,
 	managedSettingsContent string,
+	claudeMdContent string,
 	printf func(string, ...any),
 ) (bool, error) {
 	dockerBin, err := findDocker()
@@ -213,6 +213,7 @@ func DockerSetup(
 	manifestHash := shortHash(manifestContent)
 	manifestB64 := base64.StdEncoding.EncodeToString([]byte(manifestContent))
 	settingsB64 := base64.StdEncoding.EncodeToString([]byte(managedSettingsContent))
+	claudeMdB64 := base64.StdEncoding.EncodeToString([]byte(claudeMdContent))
 
 	needsBuild := true
 	if rebuild {
@@ -277,6 +278,7 @@ func DockerSetup(
 			"--label", "contAIned.manifest_hash=" + manifestHash,
 			"--build-arg", "MANIFEST_CONTENT=" + manifestB64,
 			"--build-arg", "MANAGED_SETTINGS_CONTENT=" + settingsB64,
+			"--build-arg", "CLAUDE_MD_CONTENT=" + claudeMdB64,
 			"-t", image,
 		}
 

@@ -69,6 +69,16 @@ RUN test -n "$MANAGED_SETTINGS_CONTENT" \
     || { echo "ERROR: MANAGED_SETTINGS_CONTENT build arg is required. Use contained init to build this image."; exit 1; } \
     && echo "$MANAGED_SETTINGS_CONTENT" | base64 -d > /etc/claude-code/managed-settings.json
 
+# Bake the contAIned operating instructions into the managed CLAUDE.md.
+# Claude Code loads /etc/claude-code/CLAUDE.md alongside the project's
+# ./CLAUDE.md — they compose automatically. The operator is free to use
+# ./CLAUDE.md for project-specific instructions without conflict.
+# CLAUDE_MD_CONTENT must be passed as a base64-encoded build arg by contained init.
+ARG CLAUDE_MD_CONTENT
+RUN test -n "$CLAUDE_MD_CONTENT" \
+    || { echo "ERROR: CLAUDE_MD_CONTENT build arg is required. Use contained init to build this image."; exit 1; } \
+    && echo "$CLAUDE_MD_CONTENT" | base64 -d > /etc/claude-code/CLAUDE.md
+
 # Bake the operator manifest into the image so hooks read policy from
 # /etc/contained/manifest.yaml rather than the workspace.
 ARG MANIFEST_CONTENT=""

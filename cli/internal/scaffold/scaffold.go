@@ -130,7 +130,6 @@ func ManagedFiles() []ManagedFile {
 		hook("qa.py"),
 		hook("user_prompt_submit.py"),
 		hook("push_hook.py"),
-		{RelPath: "CLAUDE.md", Template: "templates/CLAUDE.md", Executable: false},
 	}
 }
 
