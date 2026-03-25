@@ -28,9 +28,9 @@ cmd = (tool_input.get("command") or "").strip()
 if not (re.match(r'^git\s+push\b', cmd) and "--dry-run" not in cmd):
     sys.exit(0)
 
+is_error  = tool_response.get("is_error", False)
 exit_code = tool_response.get("exit_code")
-if exit_code is not None and exit_code != 0:
-    sys.exit(0)
+failed    = is_error or (exit_code is not None and exit_code != 0)
 
 session_id = event.get("session_id")
 agent_id   = event.get("agent_id")
@@ -39,6 +39,17 @@ cwd        = event.get("cwd", ".")
 
 if not actor_id:
     sys.exit(0)
+
+outcome = "denied" if failed else "success"
+reason: str | None = None
+if failed:
+    content = tool_response.get("content")
+    if isinstance(content, list):
+        reason = " ".join(
+            b.get("text", "") for b in content if isinstance(b, dict)
+        ).strip() or None
+    elif isinstance(content, str):
+        reason = content or None
 
 try:
     from pathlib import Path
@@ -49,8 +60,8 @@ try:
         session_id=actor_id,
         tool="GitPush",
         tool_input={"command": cmd},
-        outcome="success",
-        reason=None,
+        outcome=outcome,
+        reason=reason,
     )
 except Exception:
     pass

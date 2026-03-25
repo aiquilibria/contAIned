@@ -28,7 +28,7 @@ node_modules/
 # When /workspace is a git worktree these files appear at the repo root.
 HEAD
 config
-hooks
+/hooks
 objects
 refs
 

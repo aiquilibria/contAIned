@@ -313,27 +313,17 @@ summary["action_log"] = action_log
 try:
     _wu_id = tracer.get_active_work_unit(session_id)
     if _wu_id:
-        _push_events = tracer.conn.execute(
-            """
-            SELECT input FROM audit_events
-            WHERE session_id = ? AND tool = 'Bash' AND outcome = 'success'
-            ORDER BY id DESC LIMIT 50
-            """,
-            (session_id,),
-        ).fetchall()
-        _push_found = False
-        for (_ae_input,) in _push_events:
-            _inp = json.loads(_ae_input) if _ae_input else {}
-            _cmd = (_inp.get("command") or "").strip()
-            _exit = _inp.get("exit_code")
-            if (
-                _exit == 0
-                and "git" in _cmd
-                and "push" in _cmd
-                and "--dry-run" not in _cmd
-            ):
-                _push_found = True
-                break
+        # Use GitPush audit events logged by push_hook.py — already filtered by
+        # regex and only logged on successful pushes, so no exit_code check needed.
+        # Search the full session tree so sub-agent pushes are detected too.
+        _tree_session_ids = _tree_ids or [session_id]
+        _ph = ",".join("?" * len(_tree_session_ids))
+        _push_found = bool(
+            tracer.conn.execute(
+                f"SELECT 1 FROM audit_events WHERE session_id IN ({_ph}) AND tool = 'GitPush' AND outcome = 'success' LIMIT 1",
+                _tree_session_ids,
+            ).fetchone()
+        )
 
         if _push_found:
             _head_res = subprocess.run(
