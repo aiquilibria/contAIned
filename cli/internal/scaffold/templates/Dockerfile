@@ -41,14 +41,12 @@ COPY --from=ghcr.io/astral-sh/uv:0.11.1 /uv /usr/local/bin/uv
 
 # Install contAIned into an isolated venv so it never contaminates the
 # workspace Python environment, regardless of what the agent installs.
-#
-# CONTAINED_PACKAGE controls where to install from:
-#   - Default "contained[dev]": install from PyPI (release mode).
-#   - "/opt/contAIned[dev]": install from local source (development mode).
-ARG CONTAINED_PACKAGE=contained[dev]
-COPY --chown=root:root . /opt/contAIned/
+# The source tree is embedded in the contained binary and written to the
+# build context by `contained init`, so no PyPI dependency is needed.
+COPY --chown=root:root pyproject.toml /opt/contAIned/pyproject.toml
+COPY --chown=root:root src/ /opt/contAIned/src/
 RUN uv venv --python python3.13 /opt/contained-venv \
-    && uv pip install --python /opt/contained-venv/bin/python3 --no-cache "$CONTAINED_PACKAGE"
+    && uv pip install --python /opt/contained-venv/bin/python3 --no-cache /opt/contAIned[dev]
 
 # Set up in-container runtime paths
 # /tmp/claude is created here because the Claude Code sandbox sets TMPDIR to

@@ -1,0 +1,4 @@
+# Local symlinks sometimes created during development — not part of the repo.
+# The embedded source lives in source_gen.go (regenerate with go generate).
+src
+pyproject.toml

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -13,35 +14,13 @@ import (
 	"time"
 
 	"contained.dev/cli/internal/manifest"
+	"contained.dev/cli/internal/pysource"
 	"contained.dev/cli/internal/scaffold"
 	ver "contained.dev/cli/internal/version"
 	"gopkg.in/yaml.v3"
 )
 
 var version = ver.Version
-
-// FindSource walks up from cwd looking for the contAIned Python source tree
-// (identified by the presence of pyproject.toml at the repo root).
-// Returns the directory path if found, empty string otherwise.
-func FindSource() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	current := filepath.Clean(cwd)
-	for {
-		candidate := filepath.Join(current, "pyproject.toml")
-		if _, err := os.Stat(candidate); err == nil {
-			return current
-		}
-		parent := filepath.Dir(current)
-		if parent == current {
-			break
-		}
-		current = parent
-	}
-	return ""
-}
 
 // BuildManagedSettings generates the managed-settings.json content that is
 // baked into the Docker image. The dynamic sections (domain allow-list, MCP
@@ -199,12 +178,9 @@ func PolicyPull(manifestContent string) string {
 // ensures the named volume and network exist.
 //
 // Returns true if the image was (re)built, false if it was up to date.
-// source is the path to the contAIned Python source tree; empty string means
-// install from PyPI.
 func DockerSetup(
 	cfg manifest.DockerConfig,
 	workspace string,
-	source string,
 	rebuild bool,
 	manifestContent string,
 	managedSettingsContent string,
@@ -261,17 +237,11 @@ func DockerSetup(
 				filepath.Base(workspace))
 		}
 
-		// Determine build context and CONTAINED_PACKAGE arg.
-		buildContext, containedPkg, err := prepareBuildContext(source, cfg.Toolchains)
+		buildContext, err := prepareBuildContext(cfg.Toolchains)
 		if err != nil {
 			return false, err
 		}
-		if buildContext != source && buildContext != "" {
-			// Temp dir — clean up after build.
-			defer os.RemoveAll(buildContext)
-		}
-		// Always clean up the temp toolchains.sh written into the source tree.
-		defer os.Remove(filepath.Join(buildContext, "toolchains.sh"))
+		defer os.RemoveAll(buildContext)
 
 		printf("  Building image %s …", image)
 
@@ -280,7 +250,6 @@ func DockerSetup(
 			dockerBin, "build",
 			"--build-arg", "HOST_UID=" + uid,
 			"--build-arg", "HOST_GID=" + gid,
-			"--build-arg", "CONTAINED_PACKAGE=" + containedPkg,
 			"--label", "contAIned.version=" + version,
 			"--label", "contAIned.manifest_hash=" + manifestHash,
 			"--build-arg", "MANIFEST_CONTENT=" + manifestB64,
@@ -289,13 +258,7 @@ func DockerSetup(
 			"-t", image,
 		}
 
-		// Use the Dockerfile written by prepareBuildContext.
-		dockerfileName := "Dockerfile"
-		if source != "" {
-			dockerfileName = ".contained-build.Dockerfile"
-		}
-		dockerfilePath := filepath.Join(buildContext, dockerfileName)
-		defer os.Remove(dockerfilePath) // clean up temp Dockerfile in source tree
+		dockerfilePath := filepath.Join(buildContext, "Dockerfile")
 		buildArgs = append(buildArgs, "-f", dockerfilePath, buildContext)
 
 		result, err := exec.Command(buildArgs[0], buildArgs[1:]...).CombinedOutput()
@@ -383,47 +346,51 @@ func GenerateToolchainsScript(toolchains map[string]string) string {
 	return b.String()
 }
 
-// prepareBuildContext returns (contextDir, containedPackageArg, error).
-// If source is non-empty (local source tree), it is used as the context.
-// Otherwise a temp dir is created containing just the embedded Dockerfile,
-// and containedPackageArg is "contained[dev]" for PyPI install.
-// toolchains.sh is always written to the build context (no-op when empty).
-func prepareBuildContext(source string, toolchains map[string]string) (string, string, error) {
+// prepareBuildContext creates a temp directory containing the full Python
+// source tree (embedded in the binary via pysource.Source), the generated
+// Dockerfile, and the toolchains install script. The caller is responsible
+// for removing the directory when done.
+func prepareBuildContext(toolchains map[string]string) (string, error) {
 	dockerfileContent, err := scaffold.TemplateContent("templates/Dockerfile")
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 
-	toolchainsScript := GenerateToolchainsScript(toolchains)
-
-	if source != "" {
-		// Local source mode: use the source tree as the build context so
-		// COPY . /opt/contAIned works. Write temp files; caller removes them.
-		dfPath := filepath.Join(source, ".contained-build.Dockerfile")
-		if err := os.WriteFile(dfPath, []byte(dockerfileContent), 0o644); err != nil {
-			return "", "", fmt.Errorf("writing Dockerfile to source: %w", err)
-		}
-		tcPath := filepath.Join(source, "toolchains.sh")
-		if err := os.WriteFile(tcPath, []byte(toolchainsScript), 0o755); err != nil {
-			return "", "", fmt.Errorf("writing toolchains.sh to source: %w", err)
-		}
-		return source, "/opt/contAIned[dev]", nil
-	}
-
-	// PyPI mode: temp dir with Dockerfile and toolchains.sh.
 	tmp, err := os.MkdirTemp("", "contained-build-")
 	if err != nil {
-		return "", "", fmt.Errorf("creating build temp dir: %w", err)
+		return "", fmt.Errorf("creating build temp dir: %w", err)
 	}
+
+	// Write the embedded Python source tree (pyproject.toml + src/) to the
+	// build context so the Dockerfile can COPY them into the image.
+	if err := fs.WalkDir(pysource.Source, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		dest := filepath.Join(tmp, path)
+		if d.IsDir() {
+			return os.MkdirAll(dest, 0o755)
+		}
+		data, err := fs.ReadFile(pysource.Source, path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dest, data, 0o644)
+	}); err != nil {
+		os.RemoveAll(tmp)
+		return "", fmt.Errorf("writing python source to build context: %w", err)
+	}
+
 	if err := os.WriteFile(filepath.Join(tmp, "Dockerfile"), []byte(dockerfileContent), 0o644); err != nil {
 		os.RemoveAll(tmp)
-		return "", "", err
+		return "", err
 	}
+	toolchainsScript := GenerateToolchainsScript(toolchains)
 	if err := os.WriteFile(filepath.Join(tmp, "toolchains.sh"), []byte(toolchainsScript), 0o755); err != nil {
 		os.RemoveAll(tmp)
-		return "", "", err
+		return "", err
 	}
-	return tmp, "contained[dev]", nil
+	return tmp, nil
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

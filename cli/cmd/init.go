@@ -169,13 +169,6 @@ func runInit(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("loading CLAUDE.md template: %w", err)
 	}
 
-	// Locate contAIned Python source for local builds.
-	source := docker.FindSource()
-	if source != "" {
-		dim.Printf("  Local source detected: %s\n", source)
-	} else {
-		dim.Printf("  No local source found — will install contAIned from PyPI.\n")
-	}
 	fmt.Println()
 
 	// Docker: build image + ensure volume + network.
@@ -183,7 +176,6 @@ func runInit(_ *cobra.Command, args []string) error {
 	imageRebuilt, err := docker.DockerSetup(
 		m.Runtime.Docker,
 		target,
-		source,
 		initRebuild,
 		manifestContent,
 		managedSettings,
