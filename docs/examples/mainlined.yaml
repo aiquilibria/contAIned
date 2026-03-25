@@ -2,17 +2,52 @@
 #
 # This is the manifest enforced by the mAInlined operator. It controls all
 # policy settings: container resources, model selection, security rules,
-# network policy, audit logging, sigstore provenance, and toolchain floor
-# constraints. Repositories cannot override these settings — they can only
-# add toolchains (subject to the floor constraint) and QA checks via their
-# own .contAIned_manifest.yaml.
+# network policy, audit logging, sigstore provenance, toolchain floor
+# constraints, and ecosystem definitions. Repositories cannot override these
+# settings — they can only declare ecosystems (resolved against the definitions
+# below) and QA checks via their own .contAIned_manifest.yaml.
 #
 # Deploy this via:
 #   contained init --mainlined https://mainlined.example.com
 # or:
-#   contained init --manifest policy.yaml
+#   contained init --manifest docs/examples/mainlined.yaml
 #
 # See docs/policy-reference.md for full schema documentation.
+
+# ── Ecosystem definitions ─────────────────────────────────────────────────────
+# Maps ecosystem names (declared by repos in .contAIned_manifest.yaml) to the
+# toolchain they install and the network domains they require. Operators may
+# customise these entries — for example, pointing python's network_domains at
+# an internal PyPI mirror instead of pypi.org.
+ecosystem_definitions:
+  go:
+    toolchain: go
+    network_domains:
+      - proxy.golang.org
+      - sum.golang.org
+  python:
+    # Python is pre-installed in the base image; no toolchain key needed.
+    network_domains:
+      - pypi.org
+      - files.pythonhosted.org
+  node:
+    toolchain: node
+    network_domains:
+      - registry.npmjs.org
+  typescript:
+    toolchain: node   # TypeScript runs on Node.js
+    network_domains:
+      - registry.npmjs.org
+  ruby:
+    toolchain: ruby
+    network_domains:
+      - rubygems.org
+      - api.rubygems.org
+  java:
+    toolchain: java
+    network_domains:
+      - repo1.maven.org
+      - search.maven.org
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 runtime:
@@ -103,6 +138,10 @@ policy:
         action: block
 
   # ── Network policy ────────────────────────────────────────────────────────────
+  # Anthropic infrastructure is required for all sessions. Package registry
+  # domains for declared ecosystems are added automatically at `contained init`
+  # time from ecosystem_definitions above — no manual entries needed here.
+  # Add project-specific external APIs below as required.
   network:
     enabled: true
     allowed_domains:

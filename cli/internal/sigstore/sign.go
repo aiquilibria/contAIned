@@ -96,8 +96,8 @@ func parseBundle(imageDigest, rekorURL string, bundleJSON []byte) (*Provenance, 
 				RawBytes string `json:"rawBytes"`
 			} `json:"certificate"`
 			TlogEntries []struct {
-				LogIndex        string `json:"logIndex"`
-				IntegratedTime  string `json:"integratedTime"`
+				LogIndex       string `json:"logIndex"`
+				IntegratedTime string `json:"integratedTime"`
 			} `json:"tlogEntries"`
 		} `json:"verificationMaterial"`
 	}

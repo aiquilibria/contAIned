@@ -1,17 +1,16 @@
 # contAIned repo manifest — TypeScript / Node.js project
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
-# Only runtime.docker.toolchains and policy.qa.checks are permitted here;
-# all policy settings (secrets, bash rules, network, sigstore, etc.) are
+# Only ecosystems and policy.qa.checks are permitted here;
+# all policy settings (network, secrets, bash rules, sigstore, etc.) are
 # owned by the mAInlined manifest.
 #
-# `contained init` merges this file on top of the mAInlined manifest at
-# image build time. Any change here triggers an image rebuild.
+# Declaring the typescript ecosystem tells `contained init` to install Node.js
+# at the specified version and add registry.npmjs.org to the network allowlist
+# automatically (typescript maps to the node toolchain in ecosystem_definitions).
 
-runtime:
-  docker:
-    toolchains:
-      node: "20"   # pin your project's Node.js version here
+ecosystems:
+  typescript: "20"   # pin your project's Node.js major version here
 
 policy:
   qa:

@@ -147,13 +147,6 @@ cd my-project
 
 # 2. Write a manifest (see docs/policy-reference.md for the full schema)
 cat > policy.yaml << 'EOF'
-runtime:
-  docker:
-    image: contained:latest
-    memory: 2g
-    cpus: 2
-    network: contAIned-net
-    agent_config_volume: contAIned-agent-config
 agent:
   model: claude-sonnet-4-6
 policy:
@@ -164,7 +157,10 @@ policy:
       - code.claude.com
 EOF
 
-# 3. Initialize the contAIned workspace (builds the Docker image, wires hooks)
+# 3. Initialize the contAIned workspace
+#    contAIned init builds the Docker image locally from the embedded Dockerfile —
+#    there is no image to pull. This step requires a network connection to install
+#    Claude Code and any toolchains resolved from declared ecosystems.
 contAIned init --manifest policy.yaml
 
 # 4. Start a session
@@ -202,16 +198,16 @@ contAIned init --ecosystem go                              # print a Go repo man
 
 A manifest must be provided via `--manifest` (local file) or `--mainlined` (mAInlined URL). Running without either flag prints a starter manifest and exits. See [docs/policy-reference.md](docs/policy-reference.md) for the full manifest schema.
 
+> **Note:** `--mainlined` requires the `m<AI>nlined` companion policy service, which is currently in development and not yet publicly available. Use `--manifest` with a local file for all current deployments.
+
 #### Repo manifest
 
-Repositories may commit a `.contAIned_manifest.yaml` at the repo root that declares toolchains and QA checks. This file is merged into the mAInlined manifest at `contained init` time — the image is the single merged artifact. Only two fields are permitted; any others cause `contained init` to fail.
+Repositories may commit a `.contAIned_manifest.yaml` at the repo root that declares ecosystems and QA checks. This file is merged into the mAInlined manifest at `contained init` time — the image is the single merged artifact. Only two fields are permitted; any others cause `contained init` to fail.
 
 ```yaml
 # .contAIned_manifest.yaml — committed to the repository root
-runtime:
-  docker:
-    toolchains:
-      go: "1.22.5"    # installed at image build time
+ecosystems:
+  go: "1.22.5"    # installs Go toolchain + adds proxy.golang.org to allowlist
 
 policy:
   qa:
@@ -220,6 +216,8 @@ policy:
         command: [go, test, ./...]
         when_changed: ["*.go"]
 ```
+
+Each ecosystem key is resolved against `ecosystem_definitions` in the manifest passed to `contained init`. The resolved toolchain is installed and the required network domains are automatically added to the allowlist — no manual network config needed.
 
 Use `--ecosystem` to print a pre-filled starter for your stack:
 
@@ -389,6 +387,59 @@ contAIned init --rebuild
 
 **Design intent — accidental exfiltration.** The sandbox network constraints cover Bash subprocesses and agent-written scripts at the OS level. `WebFetch` to non-allowed domains requires explicit operator approval rather than proceeding silently. Together these prevent the agent from accidentally sending data outside the workspace. The residual risk — raw non-HTTP socket connections that bypass both layers — is described in [Known gaps](#known-gaps) below.
 
+### Policy hierarchy
+
+contAIned separates two distinct governance concerns that are often conflated:
+
+| Concern | What it controls | Risk addressed | Manifest key |
+|---|---|---|---|
+| **Dependency governance** (TPRM / SCA / SBOM) | What toolchains and package ecosystems the agent may install | Supply chain — installing vulnerable or unapproved software | `ecosystem_definitions`, `runtime.docker.toolchains` |
+| **Egress governance** | What outbound domains the agent and its subprocesses may reach | Exfiltration — sending workspace data outside the project | `policy.network.allowed_domains` |
+
+Both concerns are owned exclusively by the manifest passed to `contained init`. Ecosystem declarations in the repo manifest are resolved against `ecosystem_definitions` in that manifest — a team cannot install a toolchain or reach a package registry that the manifest has not approved.
+
+**Lifecycle management — org floors and team pins**
+
+The intended enforcement model for organizations is `m<AI>nlined` (the companion policy service, currently in development): a centrally-managed manifest distributed to teams, ensuring every workspace initialises against the same approved baseline. Until mAInlined is available, the same model is achievable by sharing a `policy.yaml` externally and having teams reference it at `contained init` time (`contained init --manifest policy.yaml`).
+
+> **Note:** Organizational floor constraints are enforced externally — at `contained init` time, before the image is built. There is no runtime mechanism for a team to bypass them from inside the container.
+
+The centrally-owned manifest sets minimum acceptable toolchain versions as floor constraints. Individual teams pin their required version within those bounds:
+
+```yaml
+# Centrally-owned manifest (distributed via mAInlined or a shared policy.yaml)
+runtime:
+  docker:
+    toolchains:
+      go: ">=1.22"      # floor: 1.22 or later; any version below fails at init
+      python: ">=3.13"  # floor: Python 3.13+
+      node: ">=18"
+
+ecosystem_definitions:
+  go:
+    toolchain: go
+    network_domains: [proxy.golang.org, sum.golang.org]
+  python:
+    network_domains: [pypi.org, files.pythonhosted.org]
+```
+
+```yaml
+# Repo manifest (.contAIned_manifest.yaml) — owned by each team
+ecosystems:
+  go: "1.22.5"      # satisfies >=1.22 ✓
+  python: "3.13.1"  # satisfies >=3.13 ✓
+```
+
+A version below the floor fails immediately with an actionable error — no image is built, no container runs:
+
+```
+ecosystem "go": version "1.21.0" does not satisfy constraint ">=1.22" for toolchain "go"
+```
+
+This gives the organization simultaneous control over two things: the minimum toolchain versions that satisfy compliance requirements, and the package registries those toolchains are permitted to contact. Teams cannot reach unapproved registries even if they declare a valid ecosystem, because `ecosystem_definitions` is owned entirely by the centrally-managed manifest.
+
+---
+
 ### Tracer
 
 `tracer.db` (SQLite, WAL mode) records every task, sub-agent invocation, file diff (content-addressed blob store), and QA result. Use the **`/contained:tracer`** skill to query session history, audit logs, and file diffs.
@@ -435,7 +486,7 @@ Use `#policy` from within a session to view the effective policy (read-only).
 
 The image is automatically rebuilt when the manifest hash changes — running `contAIned init` after editing `manifest.yaml` will detect the change and trigger a rebuild without needing `--rebuild` explicitly.
 
-**Image tagging — design note.** The built image is always tagged `contained:latest` (or the name configured in `manifest.yaml`). The manifest hash and package version are stored as image labels and used only to decide whether a rebuild is needed. An alternative design would use content-addressed tags (`contained:<hash>`) derived from the manifest and Dockerfile content, making each configuration immutable and allowing multiple manifests to coexist as separate images. The current approach was chosen for simplicity: there is one well-known tag to reference and old images are automatically replaced rather than accumulated. The trade-off is that two sessions with different manifests cannot run simultaneously against distinct images — a rebuild overwrites the shared tag.
+**Image tagging.** By default, `contAIned init` tags the built image `contained:<workspace-name>` — derived automatically from the directory name. Running `contAIned init` in `~/projects/api-service` produces `contained:api-service`; running it in `~/projects/data-pipeline` produces `contained:data-pipeline`. Both images coexist; neither overwrites the other. To use a fixed name instead, set `runtime.docker.image` in `manifest.yaml` explicitly. The manifest hash and package version are stored as image labels and used to decide whether a rebuild is needed — running `contAIned init` after editing `manifest.yaml` triggers a rebuild automatically.
 
 > **Do not edit hook files directly.** Files under `.contAIned/hooks/` are generated from internal templates and will be overwritten by `contAIned init`. Hook registration, sandbox rules, and permission patterns are managed by `/etc/claude-code/managed-settings.json` baked into the Docker image — they cannot be overridden at runtime. Policy customisation belongs in `manifest.yaml`; structural hook changes should be raised as feature requests.
 

@@ -22,10 +22,8 @@ func TestLoadRepoManifest_Absent_ReturnsNil(t *testing.T) {
 
 func TestLoadRepoManifest_ValidFields_Parsed(t *testing.T) {
 	dir := writeRepoManifest(t, `
-runtime:
-  docker:
-    toolchains:
-      go: "1.22.5"
+ecosystems:
+  go: "1.22.5"
 policy:
   qa:
     checks:
@@ -36,8 +34,8 @@ policy:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if r.Runtime.Docker.Toolchains["go"] != "1.22.5" {
-		t.Errorf("toolchain go: got %q", r.Runtime.Docker.Toolchains["go"])
+	if r.Ecosystems["go"] != "1.22.5" {
+		t.Errorf("ecosystem go: got %q", r.Ecosystems["go"])
 	}
 	if len(r.Policy.QA.Checks) != 1 || r.Policy.QA.Checks[0].Name != "test" {
 		t.Errorf("qa checks: got %+v", r.Policy.QA.Checks)
@@ -71,14 +69,22 @@ policy:
 	}
 }
 
-func TestLoadRepoManifest_OnlyToolchains_Valid(t *testing.T) {
+func TestLoadRepoManifest_OldToolchainsFormat_ReturnsError(t *testing.T) {
 	dir := writeRepoManifest(t, "runtime:\n  docker:\n    toolchains:\n      node: \"20\"\n")
+	_, err := LoadRepoManifest(dir)
+	if err == nil || !strings.Contains(err.Error(), "disallowed fields") {
+		t.Fatalf("expected disallowed fields error for old toolchains format, got: %v", err)
+	}
+}
+
+func TestLoadRepoManifest_OnlyEcosystems_Valid(t *testing.T) {
+	dir := writeRepoManifest(t, "ecosystems:\n  node: \"20\"\n")
 	r, err := LoadRepoManifest(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if r.Runtime.Docker.Toolchains["node"] != "20" {
-		t.Errorf("toolchain node: got %q", r.Runtime.Docker.Toolchains["node"])
+	if r.Ecosystems["node"] != "20" {
+		t.Errorf("ecosystem node: got %q", r.Ecosystems["node"])
 	}
 }
 
@@ -107,29 +113,22 @@ func TestLoadRepoManifest_Empty_Valid(t *testing.T) {
 // ── ValidateRepoManifest ──────────────────────────────────────────────────────
 
 func TestValidateRepoManifest_Valid(t *testing.T) {
-	r := &RepoManifest{}
-	r.Runtime.Docker.Toolchains = map[string]string{"go": "1.22.5"}
+	r := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
 	r.Policy.QA.Checks = []QACheck{{Name: "test", Command: []string{"go", "test", "./..."}}}
 	if err := ValidateRepoManifest(r); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-func TestValidateRepoManifest_UnsupportedToolchain(t *testing.T) {
-	r := &RepoManifest{}
-	r.Runtime.Docker.Toolchains = map[string]string{"rust": "1.80"}
-	err := ValidateRepoManifest(r)
-	if err == nil || !strings.Contains(err.Error(), "unsupported toolchain") {
-		t.Fatalf("expected unsupported toolchain error, got: %v", err)
+func TestValidateRepoManifest_EmptyEcosystemName(t *testing.T) {
+	r := &RepoManifest{
+		Ecosystems: map[string]string{"": "1.22.5"},
 	}
-}
-
-func TestValidateRepoManifest_EmptyVersion(t *testing.T) {
-	r := &RepoManifest{}
-	r.Runtime.Docker.Toolchains = map[string]string{"go": ""}
 	err := ValidateRepoManifest(r)
 	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
-		t.Fatalf("expected empty version error, got: %v", err)
+		t.Fatalf("expected empty name error, got: %v", err)
 	}
 }
 
@@ -153,7 +152,30 @@ func TestValidateRepoManifest_QACheckMissingCommand(t *testing.T) {
 
 // ── MergeRepoManifest ─────────────────────────────────────────────────────────
 
-func TestMergeRepoManifest_NilRepo_ReturnsCopyOfmAInlined(t *testing.T) {
+func operatorWithEcosystems() *Manifest {
+	m := validManifest()
+	m.Policy.Network.Enabled = true
+	m.EcosystemDefinitions = map[string]EcosystemDef{
+		"go": {
+			Toolchain:      "go",
+			NetworkDomains: []string{"proxy.golang.org", "sum.golang.org"},
+		},
+		"python": {
+			NetworkDomains: []string{"pypi.org", "files.pythonhosted.org"},
+		},
+		"typescript": {
+			Toolchain:      "node",
+			NetworkDomains: []string{"registry.npmjs.org"},
+		},
+		"node": {
+			Toolchain:      "node",
+			NetworkDomains: []string{"registry.npmjs.org"},
+		},
+	}
+	return m
+}
+
+func TestMergeRepoManifest_NilRepo_ReturnsCopyOfOperator(t *testing.T) {
 	m := validManifest()
 	m.Policy.QA.Checks = []QACheck{{Name: "lint", Command: []string{"ruff", "check", "."}}}
 
@@ -166,10 +188,11 @@ func TestMergeRepoManifest_NilRepo_ReturnsCopyOfmAInlined(t *testing.T) {
 	}
 }
 
-func TestMergeRepoManifest_RepoToolchain_AddedWhenNomAInlinedConstraint(t *testing.T) {
-	m := validManifest()
-	repo := &RepoManifest{}
-	repo.Runtime.Docker.Toolchains = map[string]string{"go": "1.22.5"}
+func TestMergeRepoManifest_EcosystemResolvesToToolchain(t *testing.T) {
+	m := operatorWithEcosystems()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
 
 	merged, err := MergeRepoManifest(m, repo)
 	if err != nil {
@@ -180,27 +203,101 @@ func TestMergeRepoManifest_RepoToolchain_AddedWhenNomAInlinedConstraint(t *testi
 	}
 }
 
-func TestMergeRepoManifest_RepoVersionSatisfiesFloorConstraint(t *testing.T) {
-	m := validManifest()
-	m.Runtime.Docker.Toolchains = map[string]string{"go": ">=1.21"}
-	repo := &RepoManifest{}
-	repo.Runtime.Docker.Toolchains = map[string]string{"go": "1.22.5"}
+func TestMergeRepoManifest_EcosystemAddsNetworkDomains(t *testing.T) {
+	m := operatorWithEcosystems()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
 
 	merged, err := MergeRepoManifest(m, repo)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Repo's pinned version is used.
+	domains := make(map[string]bool)
+	for _, d := range merged.Policy.Network.AllowedDomains {
+		domains[d] = true
+	}
+	if !domains["proxy.golang.org"] {
+		t.Error("expected proxy.golang.org in allowed domains")
+	}
+	if !domains["sum.golang.org"] {
+		t.Error("expected sum.golang.org in allowed domains")
+	}
+}
+
+func TestMergeRepoManifest_TypescriptMapsToNodeToolchain(t *testing.T) {
+	m := operatorWithEcosystems()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"typescript": "20"},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if merged.Runtime.Docker.Toolchains["node"] != "20" {
+		t.Errorf("node toolchain: got %q", merged.Runtime.Docker.Toolchains["node"])
+	}
+}
+
+func TestMergeRepoManifest_PythonNoToolchain_DomainsAdded(t *testing.T) {
+	m := operatorWithEcosystems()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"python": ""},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// No toolchain installed for python (pre-installed).
+	if _, ok := merged.Runtime.Docker.Toolchains["python"]; ok {
+		t.Error("python should not appear in toolchains (pre-installed)")
+	}
+	// But domains should be added.
+	domains := make(map[string]bool)
+	for _, d := range merged.Policy.Network.AllowedDomains {
+		domains[d] = true
+	}
+	if !domains["pypi.org"] {
+		t.Error("expected pypi.org in allowed domains")
+	}
+}
+
+func TestMergeRepoManifest_UnknownEcosystem_ReturnsError(t *testing.T) {
+	m := operatorWithEcosystems()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"rust": "1.80"},
+	}
+
+	_, err := MergeRepoManifest(m, repo)
+	if err == nil || !strings.Contains(err.Error(), "not defined in the operator manifest") {
+		t.Fatalf("expected unknown ecosystem error, got: %v", err)
+	}
+}
+
+func TestMergeRepoManifest_RepoVersionSatisfiesFloorConstraint(t *testing.T) {
+	m := operatorWithEcosystems()
+	m.Runtime.Docker.Toolchains = map[string]string{"go": ">=1.21"}
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if merged.Runtime.Docker.Toolchains["go"] != "1.22.5" {
 		t.Errorf("go toolchain: got %q", merged.Runtime.Docker.Toolchains["go"])
 	}
 }
 
 func TestMergeRepoManifest_RepoVersionViolatesFloorConstraint(t *testing.T) {
-	m := validManifest()
+	m := operatorWithEcosystems()
 	m.Runtime.Docker.Toolchains = map[string]string{"go": ">=1.23"}
-	repo := &RepoManifest{}
-	repo.Runtime.Docker.Toolchains = map[string]string{"go": "1.22.5"}
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
 
 	_, err := MergeRepoManifest(m, repo)
 	if err == nil || !strings.Contains(err.Error(), "does not satisfy") {
@@ -209,10 +306,11 @@ func TestMergeRepoManifest_RepoVersionViolatesFloorConstraint(t *testing.T) {
 }
 
 func TestMergeRepoManifest_RepoVersionMatchesExactConstraint(t *testing.T) {
-	m := validManifest()
+	m := operatorWithEcosystems()
 	m.Runtime.Docker.Toolchains = map[string]string{"go": "==1.22.5"}
-	repo := &RepoManifest{}
-	repo.Runtime.Docker.Toolchains = map[string]string{"go": "1.22.5"}
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
 
 	merged, err := MergeRepoManifest(m, repo)
 	if err != nil {
@@ -224,10 +322,11 @@ func TestMergeRepoManifest_RepoVersionMatchesExactConstraint(t *testing.T) {
 }
 
 func TestMergeRepoManifest_RepoVersionViolatesExactConstraint(t *testing.T) {
-	m := validManifest()
+	m := operatorWithEcosystems()
 	m.Runtime.Docker.Toolchains = map[string]string{"go": "==1.22.5"}
-	repo := &RepoManifest{}
-	repo.Runtime.Docker.Toolchains = map[string]string{"go": "1.23.0"}
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.23.0"},
+	}
 
 	_, err := MergeRepoManifest(m, repo)
 	if err == nil || !strings.Contains(err.Error(), "does not satisfy") {
@@ -270,19 +369,46 @@ func TestMergeRepoManifest_BothQAEmpty_Valid(t *testing.T) {
 	}
 }
 
-func TestMergeRepoManifest_DoesNotMutatemAInlined(t *testing.T) {
-	m := validManifest()
-	m.Runtime.Docker.Toolchains = map[string]string{"node": "20"}
+func TestMergeRepoManifest_DoesNotMutateOperator(t *testing.T) {
+	m := operatorWithEcosystems()
+	m.Policy.Network.AllowedDomains = []string{"api.anthropic.com"}
+	origDomains := len(m.Policy.Network.AllowedDomains)
 
-	repo := &RepoManifest{}
-	repo.Runtime.Docker.Toolchains = map[string]string{"go": "1.22.5"}
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
 
 	if _, err := MergeRepoManifest(m, repo); err != nil {
 		t.Fatal(err)
 	}
 
+	if len(m.Policy.Network.AllowedDomains) != origDomains {
+		t.Error("MergeRepoManifest must not mutate the operator manifest's AllowedDomains")
+	}
 	if _, ok := m.Runtime.Docker.Toolchains["go"]; ok {
-		t.Error("MergeRepoManifest must not mutate the mAInlined manifest")
+		t.Error("MergeRepoManifest must not mutate the operator manifest's Toolchains")
+	}
+}
+
+func TestMergeRepoManifest_NoDuplicateDomains(t *testing.T) {
+	m := operatorWithEcosystems()
+	m.Policy.Network.AllowedDomains = []string{"api.anthropic.com", "proxy.golang.org"}
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	count := 0
+	for _, d := range merged.Policy.Network.AllowedDomains {
+		if d == "proxy.golang.org" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("proxy.golang.org should appear exactly once, got %d", count)
 	}
 }
 

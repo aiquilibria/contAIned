@@ -19,7 +19,7 @@ This document covers `policy` in full. For a quick orientation see the
 
 Running without either flag prints a starter manifest to stderr and exits non-zero.
 
-Use `--ecosystem` to print a pre-filled **repo manifest** starter (toolchains + QA only) for a specific stack:
+Use `--ecosystem` to print a pre-filled **repo manifest** starter (ecosystems + QA only) for a specific stack:
 
 ```bash
 contained init --ecosystem go         # Go: go test + go vet
@@ -35,13 +35,10 @@ Save the output to `.contAIned_manifest.yaml` in your repository root. `containe
 Only two top-level keys are permitted in `.contAIned_manifest.yaml`. Any other field causes `contained init` to fail with an actionable error.
 
 ```yaml
-runtime:
-  docker:
-    toolchains:
-      go: "1.22.5"      # installs Go at image build time
-      node: "20"        # installs Node at image build time
-      # ruby: "3.3"
-      # java: "21"
+ecosystems:
+  go: "1.22.5"      # installs Go toolchain + adds proxy.golang.org to allowlist
+  python: ""        # pre-installed; adds pypi.org to allowlist
+  typescript: "20"  # installs Node 20 + adds registry.npmjs.org to allowlist
 
 policy:
   qa:
@@ -51,8 +48,10 @@ policy:
         when_changed: ["*.go"]   # omit to run on every stop
 ```
 
+Each ecosystem key is resolved against the `ecosystem_definitions` in the Mainlined manifest. The definition maps an ecosystem name to its toolchain (for install) and the network domains that are automatically added to the allowlist.
+
 **Merge rules:**
-- **Toolchains**: if the Mainlined manifest specifies a constraint for a toolchain the repo also declares, the repo version must satisfy it (see `runtime.docker.toolchains` below) or `contained init` fails. The repo's pinned version is used as the install target.
+- **Ecosystems**: each declaration is resolved against `ecosystem_definitions` in the Mainlined manifest. The toolchain is installed at the requested version; required network domains are added to the allowlist. If the Mainlined manifest specifies a floor constraint for the underlying toolchain, the repo version must satisfy it or `contained init` fails.
 - **QA checks**: concatenated — operator checks run first, then repo checks. Either or both may be empty.
 - **Everything else** (policy, network, secrets, bash rules) is owned by the Mainlined manifest and cannot be overridden by the repo manifest.
 
@@ -66,28 +65,48 @@ policy:
 
 ---
 
-## `runtime.docker.toolchains`
+## `ecosystem_definitions` (Mainlined manifest only)
 
-Installs additional language runtimes into the container image at build time.
-Supported names: `go`, `node`, `ruby`, `java`.
+Maps ecosystem names (declared by repos in `.contAIned_manifest.yaml`) to the toolchain they install and the network domains they require. Operators may customise these entries — for example, pointing `python`'s `network_domains` at an internal PyPI mirror.
+
+```yaml
+ecosystem_definitions:
+  go:
+    toolchain: go
+    network_domains:
+      - proxy.golang.org
+      - sum.golang.org
+  python:
+    # No toolchain key — Python is pre-installed in the base image.
+    network_domains:
+      - pypi.org
+      - files.pythonhosted.org
+  typescript:
+    toolchain: node   # TypeScript runs on Node.js
+    network_domains:
+      - registry.npmjs.org
+```
+
+## `runtime.docker.toolchains` (Mainlined manifest only)
+
+Sets **floor constraints** on toolchain versions. Repos declaring an ecosystem whose resolved toolchain key appears here must supply a version satisfying the constraint.
 
 ```yaml
 runtime:
   docker:
     toolchains:
-      go: "1.22.5"     # exact version (Mainlined) or pinned version (repo)
-      node: "20"       # major version for Node.js
-      java: "21"       # major version for Eclipse Temurin JDK
+      go: ">=1.22"   # repo must pin Go 1.22 or later
+      node: ">=18"   # repo must pin Node 18 or later
 ```
 
-**Constraint syntax** (Mainlined manifest only):
+**Constraint syntax:**
 
 | Format | Meaning |
 |---|---|
 | `1.22.5` or `==1.22.5` | Exact version required |
 | `>=1.22` | Repo version must be ≥ this floor |
 
-When a repo manifest also declares a toolchain, its version must satisfy the Mainlined constraint or `contained init` fails. The repo's pinned version is used as the install target.
+If the repo's pinned version does not satisfy the constraint, `contained init` fails with an actionable error.
 
 ---
 

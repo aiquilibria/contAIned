@@ -28,6 +28,6 @@ node_modules/
 # Keep it out of version control.
 .contAIned/
 .slash/
-docs/*
+docs/internal/
 .claude/*
 pytest-of-agent*

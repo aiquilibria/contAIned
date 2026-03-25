@@ -1,16 +1,14 @@
 # contAIned repo manifest
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
-# Only runtime.docker.toolchains and policy.qa.checks are permitted here;
-# all policy settings are owned by the mAInlined or operator manifest.
+# Only ecosystems and policy.qa.checks are permitted here;
+# all policy settings are owned by the mAInlined manifest.
 #
 # `contained init` merges this file on top of the operator manifest at
 # image build time. Any change here triggers an image rebuild.
 
-runtime:
-  docker:
-    toolchains:
-      go: "1.22.5"   # CLI build and tests
+ecosystems:                                                                                        
+  go: "1.22.5"   # CLI build and tests
 
 policy:
   qa:
@@ -30,9 +28,15 @@ policy:
       - name: coverage
         command: [pytest, tests/, --cov, --cov-report=term-missing, --cov-fail-under=80, -q]
         when_changed: ["*.py"]
-      - name: go-test
-        command: [sh, -c, "cd cli && go test ./..."]
+      - name: go-build
+        command: [sh, -c, "cd cli && go build ./..."]
+        when_changed: ["*.go"]
+      - name: go-fmt
+        command: [sh, -c, 'cd cli && test -z "$(gofmt -l .)"']
         when_changed: ["*.go"]
       - name: go-vet
         command: [sh, -c, "cd cli && go vet ./..."]
+        when_changed: ["*.go"]
+      - name: go-test
+        command: [sh, -c, "cd cli && go test ./..."]
         when_changed: ["*.go"]

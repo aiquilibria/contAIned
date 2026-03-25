@@ -1,16 +1,16 @@
 # contAIned repo manifest — Go ecosystem
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
-# Only runtime.docker.toolchains and policy.qa.checks are permitted here;
-# all policy settings are owned by the mAInlined manifest.
+# Only ecosystems and policy.qa.checks are permitted here; all policy settings
+# (network, secrets, bash rules, sigstore, etc.) are owned by the operator manifest.
 #
-# `contained init` merges this file on top of the mAInlined manifest at
-# image build time. Any change here triggers an image rebuild.
+# `contained init` resolves the ecosystem declaration against the operator
+# manifest's ecosystem_definitions, installs the Go toolchain at the pinned
+# version, and adds the required network domains (proxy.golang.org, sum.golang.org)
+# to the allowlist automatically.
 
-runtime:
-  docker:
-    toolchains:
-      go: "1.22.5"   # pin your project's Go version here
+ecosystems:
+  go: "1.22.5"   # pin your project's Go version here
 
 policy:
   qa:

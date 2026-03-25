@@ -24,9 +24,10 @@ var initCmd = &cobra.Command{
 	Short: "Initialise a contAIned workspace",
 	Long: `Initialise a contAIned workspace in DIRECTORY (default: current directory).
 
-Scaffolds .contAIned/, .claude/, and CLAUDE.md. Builds the contained:latest
-Docker image with the manifest baked in so policy is enforced at the
-highest-precedence settings level.
+Scaffolds .contAIned/, .claude/, and CLAUDE.md. Builds a Docker image with
+the manifest baked in so policy is enforced at the highest-precedence settings
+level. The image is tagged contained:<workspace-name> by default, so each
+project gets its own image without manual configuration.
 
 A manifest must be provided via --manifest or --mainlined. Run without either
 flag to see a starter manifest you can save and customise.
@@ -116,7 +117,7 @@ func runInit(_ *cobra.Command, args []string) error {
 		dim.Printf("  Using manifest: %s\n\n", initManifestPath)
 	}
 
-	// Merge repo-level manifest (toolchains + QA checks) if present.
+	// Merge repo-level manifest (ecosystems + QA checks) if present.
 	repoManifest, err := manifest.LoadRepoManifest(target)
 	if err != nil {
 		return fmt.Errorf("repo manifest: %w", err)
@@ -134,10 +135,23 @@ func runInit(_ *cobra.Command, args []string) error {
 		if err != nil {
 			return err
 		}
-		dim.Printf("  Repo manifest merged: %d toolchain(s), %d QA check(s).\n",
-			len(repoManifest.Runtime.Docker.Toolchains),
+		dim.Printf("  Repo manifest merged: %d ecosystem(s), %d QA check(s).\n",
+			len(repoManifest.Ecosystems),
 			len(repoManifest.Policy.QA.Checks),
 		)
+	}
+
+	// Derive image tag from workspace name when the manifest uses the generic default.
+	// This ensures each project gets its own image tag automatically, so multiple
+	// projects can coexist without rebuilding overwriting a shared contained:latest.
+	if m.Runtime.Docker.Image == "contained:latest" {
+		m.Runtime.Docker.Image = "contained:" + sanitizeImageTag(filepath.Base(target))
+		// Re-serialise so the baked manifest reflects the real tag.
+		manifestContent, err = manifest.Serialise(m)
+		if err != nil {
+			return err
+		}
+		dim.Printf("  Image tag: %s (derived from workspace name)\n", m.Runtime.Docker.Image)
 	}
 
 	// Pull policy_ref/version from mAInlined if configured.
@@ -173,6 +187,19 @@ func runInit(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("docker setup failed: %w", err)
 	}
 	fmt.Println()
+
+	// Write manifest to disk before signing so VerifyWorkspace reads the correct
+	// image tag. When imageRebuilt is true the in-memory manifest may have a
+	// different image tag than the on-disk copy (e.g. contained:latest →
+	// contained:<workspace-name>); VerifyWorkspace re-reads manifest.yaml to
+	// locate the image, so it must be current before the smoke-test runs.
+	// On a pure hook/CLAUDE.md refresh (imageRebuilt=false) we leave the
+	// existing manifest untouched unless --force was given.
+	manifestDest := filepath.Join(target, ".contAIned", "manifest.yaml")
+	manifestStatus, err := scaffold.WriteFile(manifestDest, manifestContent, false, imageRebuilt || initForce)
+	if err != nil {
+		return fmt.Errorf("writing manifest: %w", err)
+	}
 
 	// Sigstore image signing — when enabled and image was (re)built.
 	if m.Policy.Sigstore.Enabled && imageRebuilt {
@@ -227,22 +254,16 @@ func runInit(_ *cobra.Command, args []string) error {
 		results = append(results, result{mf.RelPath, status})
 	}
 
-	// Report merged toolchains and QA checks in the results table.
+	// Report merged ecosystems and QA checks in the results table.
 	if repoManifest != nil {
-		for name, version := range repoManifest.Runtime.Docker.Toolchains {
-			results = append(results, result{"toolchain: " + name, version})
+		for name, version := range repoManifest.Ecosystems {
+			results = append(results, result{"ecosystem: " + name, version})
 		}
 		for _, check := range repoManifest.Policy.QA.Checks {
 			results = append(results, result{"qa check: " + check.Name, "merged"})
 		}
 	}
 
-	// Manifest — write only on first init or --force; never overwrite on refresh.
-	manifestDest := filepath.Join(target, ".contAIned", "manifest.yaml")
-	manifestStatus, err := scaffold.WriteFile(manifestDest, manifestContent, false, initForce)
-	if err != nil {
-		return fmt.Errorf("writing manifest: %w", err)
-	}
 	results = append(results, result{".contAIned/manifest.yaml", manifestStatus})
 
 	// Directory markers.
@@ -315,7 +336,7 @@ it for your project, then re-run:
 
   contained init --manifest policy.yaml
 
-For a repo-level manifest (toolchains + QA only), use --ecosystem:
+For a repo-level manifest (ecosystems + QA only), use --ecosystem:
 
   contained init --ecosystem go             # or: node, python, typescript
   contained init --ecosystem go,python     # multiple ecosystems
@@ -360,9 +381,9 @@ func printEcosystemStarterAndExit(ecosystems []string) error {
 		}
 		starter = content
 	} else {
-		// Multiple ecosystems: merge toolchains (union) and QA checks (concatenated).
+		// Multiple ecosystems: merge ecosystem declarations (union) and QA checks (concatenated).
 		merged := &manifest.RepoManifest{}
-		merged.Runtime.Docker.Toolchains = make(map[string]string)
+		merged.Ecosystems = make(map[string]string)
 		for _, name := range ecosystems {
 			raw, err := scaffold.TemplateContent(ecosystemTemplates[name])
 			if err != nil {
@@ -372,8 +393,8 @@ func printEcosystemStarterAndExit(ecosystems []string) error {
 			if err := yaml.Unmarshal([]byte(raw), &r); err != nil {
 				return fmt.Errorf("parsing %s template: %w", name, err)
 			}
-			for k, v := range r.Runtime.Docker.Toolchains {
-				merged.Runtime.Docker.Toolchains[k] = v
+			for k, v := range r.Ecosystems {
+				merged.Ecosystems[k] = v
 			}
 			merged.Policy.QA.Checks = append(merged.Policy.QA.Checks, r.Policy.QA.Checks...)
 		}
@@ -435,6 +456,29 @@ func findGitRoot(path string) string {
 		}
 		current = parent
 	}
+}
+
+// sanitizeImageTag converts a directory name into a valid Docker tag component.
+// Docker tags allow [a-zA-Z0-9_.-] but may not start with '.' or '-'.
+// Anything outside that set is replaced with '-'; leading/trailing separators
+// are trimmed. Falls back to "workspace" if the result is empty.
+func sanitizeImageTag(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '.' || r == '-' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	tag := strings.Trim(b.String(), "-.")
+	if tag == "" {
+		return "workspace"
+	}
+	if len(tag) > 100 {
+		tag = tag[:100]
+	}
+	return tag
 }
 
 func printResultTable(results []result) {

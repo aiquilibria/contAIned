@@ -1,16 +1,15 @@
 # contAIned repo manifest — Node.js ecosystem
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
-# Only runtime.docker.toolchains and policy.qa.checks are permitted here;
-# all policy settings are owned by the mAInlined manifest.
+# Only ecosystems and policy.qa.checks are permitted here; all policy settings
+# (network, secrets, bash rules, sigstore, etc.) are owned by the operator manifest.
 #
-# `contained init` merges this file on top of the mAInlined manifest at
-# image build time. Any change here triggers an image rebuild.
+# `contained init` resolves the node ecosystem against the operator manifest's
+# ecosystem_definitions, installs Node.js at the pinned version, and adds
+# registry.npmjs.org to the network allowlist automatically.
 
-runtime:
-  docker:
-    toolchains:
-      node: "20"   # pin your project's Node major version here
+ecosystems:
+  node: "20"   # pin your project's Node.js major version here
 
 policy:
   qa:

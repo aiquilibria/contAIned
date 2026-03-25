@@ -12,21 +12,20 @@ import (
 )
 
 // RepoManifest is the restricted manifest a repository may commit to
-// .contAIned_manifest.yaml at the repo root. Only toolchains and QA checks are permitted;
-// all policy fields are owned by the mAInlined manifest.
+// .contAIned_manifest.yaml at the repo root. Only two top-level keys are
+// permitted: ecosystems and policy.qa.checks. All other policy settings
+// (network, secrets, bash rules, sigstore, etc.) are owned by the operator
+// manifest and cannot be overridden here.
+//
+// Ecosystems declares the language runtimes this repository needs. Each key is
+// an ecosystem name defined in the operator manifest's ecosystem_definitions;
+// the value is the version to install (empty string for pre-installed runtimes
+// such as Python). At `contained init` time each declaration is resolved to a
+// toolchain install target and the required network domains are added to the
+// allowlist automatically.
 type RepoManifest struct {
-	Runtime RepoRuntimeConfig `yaml:"runtime"`
-	Policy  RepoPolicy        `yaml:"policy"`
-}
-
-// RepoRuntimeConfig is the runtime section of a repo manifest.
-type RepoRuntimeConfig struct {
-	Docker RepoDockerConfig `yaml:"docker"`
-}
-
-// RepoDockerConfig is the docker section of a repo manifest — toolchains only.
-type RepoDockerConfig struct {
-	Toolchains map[string]string `yaml:"toolchains"`
+	Ecosystems map[string]string `yaml:"ecosystems,omitempty"`
+	Policy     RepoPolicy        `yaml:"policy"`
 }
 
 // RepoPolicy is the policy section of a repo manifest — QA checks only.
@@ -52,21 +51,19 @@ func LoadRepoManifest(root string) (*RepoManifest, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&r); err != nil && err != io.EOF {
 		return nil, fmt.Errorf("repo manifest contains disallowed fields "+
-			"(only runtime.docker.toolchains and policy.qa.checks are permitted): %w", err)
+			"(only ecosystems and policy.qa.checks are permitted): %w", err)
 	}
 
 	return &r, nil
 }
 
-// ValidateRepoManifest checks toolchain names, versions, and QA check structure.
+// ValidateRepoManifest checks the structure of a repo manifest.
+// Ecosystem name resolution against operator definitions happens in
+// MergeRepoManifest, which has access to both manifests.
 func ValidateRepoManifest(r *RepoManifest) error {
-	for name, version := range r.Runtime.Docker.Toolchains {
-		if !supportedToolchains[name] {
-			return fmt.Errorf("runtime.docker.toolchains: unsupported toolchain %q (supported: %s)",
-				name, supportedToolchainNames())
-		}
-		if strings.TrimSpace(version) == "" {
-			return fmt.Errorf("runtime.docker.toolchains: version for %q must not be empty", name)
+	for name := range r.Ecosystems {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("ecosystems: ecosystem name must not be empty")
 		}
 	}
 
@@ -82,51 +79,89 @@ func ValidateRepoManifest(r *RepoManifest) error {
 	return nil
 }
 
-// MergeRepoManifest merges the repository manifest into the mAInlined manifest and
-// returns the merged result. The original manifests are not modified.
+// MergeRepoManifest merges the repository manifest into the operator manifest
+// and returns the merged result. The original manifests are not modified.
 //
-// Toolchains: if mAInlined specifies a constraint for a toolchain the repo also
-// declares, the repo version must satisfy that constraint — otherwise an error is
-// returned. The repo's pinned version is used as the install target.
+// Ecosystems: each entry in repo.Ecosystems is resolved against the operator
+// manifest's ecosystem_definitions. The resolved toolchain version is installed
+// and the required network domains are added to the allowlist. The repo version
+// must satisfy any floor constraint the operator has set on the underlying toolchain.
 //
-// QA checks: concatenated (mAInlined first, repo second). Either or both may be empty.
+// QA checks: concatenated (operator first, repo second). Either or both may be empty.
 //
-// If repo is nil the function returns a copy of mAInlined unchanged.
-func MergeRepoManifest(mAInlined *Manifest, repo *RepoManifest) (*Manifest, error) {
-	// Shallow-copy the mAInlined manifest.
-	merged := *mAInlined
+// If repo is nil the function returns a copy of the operator manifest unchanged.
+func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error) {
+	// Shallow-copy the operator manifest.
+	merged := *operator
 
-	// Deep-copy toolchains so we don't mutate the original.
+	// Deep-copy mutable fields so we don't mutate the originals.
 	merged.Runtime.Docker.Toolchains = make(map[string]string)
-	for k, v := range mAInlined.Runtime.Docker.Toolchains {
+	for k, v := range operator.Runtime.Docker.Toolchains {
 		merged.Runtime.Docker.Toolchains[k] = v
 	}
+	merged.Policy.Network.AllowedDomains = append([]string{}, operator.Policy.Network.AllowedDomains...)
 
 	if repo == nil {
 		return &merged, nil
 	}
 
-	for name, repoVer := range repo.Runtime.Docker.Toolchains {
-		if mAInlinedConstraint, exists := mAInlined.Runtime.Docker.Toolchains[name]; exists {
-			ok, err := satisfiesConstraint(mAInlinedConstraint, repoVer)
-			if err != nil {
-				return nil, fmt.Errorf("toolchain %q: %w", name, err)
-			}
-			if !ok {
-				return nil, fmt.Errorf(
-					"toolchain %q: repo version %q does not satisfy mAInlined constraint %q",
-					name, repoVer, mAInlinedConstraint,
-				)
+	// Resolve ecosystem declarations to toolchain installs + network domains.
+	existing := domainSet(merged.Policy.Network.AllowedDomains)
+	for ecoName, version := range repo.Ecosystems {
+		def, ok := operator.EcosystemDefinitions[ecoName]
+		if !ok {
+			return nil, fmt.Errorf(
+				"ecosystem %q is not defined in the operator manifest "+
+					"(add an ecosystem_definitions.%s entry to your manifest.yaml)",
+				ecoName, ecoName,
+			)
+		}
+
+		// Install toolchain if this ecosystem has one and a version was specified.
+		if def.Toolchain != "" {
+			ver := strings.TrimSpace(version)
+			if ver != "" {
+				// Enforce any floor constraint the operator set on this toolchain.
+				if constraint, exists := operator.Runtime.Docker.Toolchains[def.Toolchain]; exists {
+					sat, err := satisfiesConstraint(constraint, ver)
+					if err != nil {
+						return nil, fmt.Errorf("ecosystem %q toolchain %q: %w", ecoName, def.Toolchain, err)
+					}
+					if !sat {
+						return nil, fmt.Errorf(
+							"ecosystem %q: version %q does not satisfy operator constraint %q for toolchain %q",
+							ecoName, ver, constraint, def.Toolchain,
+						)
+					}
+				}
+				merged.Runtime.Docker.Toolchains[def.Toolchain] = ver
 			}
 		}
-		merged.Runtime.Docker.Toolchains[name] = repoVer
+
+		// Add network domains when network policy is enabled.
+		if merged.Policy.Network.Enabled {
+			for _, domain := range def.NetworkDomains {
+				if !existing[domain] {
+					merged.Policy.Network.AllowedDomains = append(merged.Policy.Network.AllowedDomains, domain)
+					existing[domain] = true
+				}
+			}
+		}
 	}
 
-	// Concatenate QA checks: mAInlined (expected empty) then repo.
+	// Concatenate QA checks: operator first, then repo.
 	merged.Policy.QA.Checks = append(
-		append([]QACheck{}, mAInlined.Policy.QA.Checks...),
+		append([]QACheck{}, operator.Policy.QA.Checks...),
 		repo.Policy.QA.Checks...,
 	)
 
 	return &merged, nil
+}
+
+func domainSet(domains []string) map[string]bool {
+	s := make(map[string]bool, len(domains))
+	for _, d := range domains {
+		s[d] = true
+	}
+	return s
 }

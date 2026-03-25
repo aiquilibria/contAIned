@@ -1,20 +1,19 @@
 # contAIned repo manifest — Python + TypeScript monorepo
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
-# Only runtime.docker.toolchains and policy.qa.checks are permitted here;
-# all policy settings (secrets, bash rules, network, sigstore, etc.) are
+# Only ecosystems and policy.qa.checks are permitted here;
+# all policy settings (network, secrets, bash rules, sigstore, etc.) are
 # owned by the mAInlined manifest.
 #
-# Each check is gated on the relevant file extensions so only affected
-# checks run when a specific layer is touched.
-#
-# `contained init` merges this file on top of the mAInlined manifest at
-# image build time. Any change here triggers an image rebuild.
+# Each ecosystem declaration is resolved by `contained init` against the
+# operator manifest's ecosystem_definitions: Node.js is installed for
+# typescript; pypi.org/files.pythonhosted.org and registry.npmjs.org are
+# added to the network allowlist. Each QA check is gated on the relevant
+# file extensions so only affected checks run when a specific layer is touched.
 
-runtime:
-  docker:
-    toolchains:
-      node: "20"   # Python is pre-installed; add python: "3.12" to pin
+ecosystems:
+  python: ""      # pre-installed
+  typescript: "20"
 
 policy:
   qa:

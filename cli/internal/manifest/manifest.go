@@ -11,10 +11,23 @@ import (
 
 // Manifest is the top-level structure of .contAIned/manifest.yaml.
 type Manifest struct {
-	Runtime RuntimeConfig `yaml:"runtime"`
-	Agent   AgentConfig   `yaml:"agent"`
-	Policy  PolicyConfig  `yaml:"policy"`
-	Sandbox SandboxConfig `yaml:"sandbox"`
+	Runtime              RuntimeConfig           `yaml:"runtime"`
+	Agent                AgentConfig             `yaml:"agent"`
+	Policy               PolicyConfig            `yaml:"policy"`
+	Sandbox              SandboxConfig           `yaml:"sandbox"`
+	EcosystemDefinitions map[string]EcosystemDef `yaml:"ecosystem_definitions,omitempty"`
+}
+
+// EcosystemDef describes what an ecosystem label means in terms of toolchain
+// installation and network access. Operators define these in the mAInlined
+// manifest; repositories declare which ecosystems they use via RepoManifest.Ecosystems.
+type EcosystemDef struct {
+	// Toolchain is the runtime.docker.toolchains key to install (e.g. "go",
+	// "node"). Empty means the runtime is pre-installed in the base image.
+	Toolchain string `yaml:"toolchain,omitempty"`
+	// NetworkDomains lists the outbound domains required for dependency
+	// resolution and package fetching for this ecosystem.
+	NetworkDomains []string `yaml:"network_domains,omitempty"`
 }
 
 type RuntimeConfig struct {

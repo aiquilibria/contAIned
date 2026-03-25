@@ -14,6 +14,40 @@
 # Note: writes to .contAIned/ are always denied regardless of policy settings —
 # control-plane protection is hardcoded and not configurable.
 
+# ── Ecosystem definitions ─────────────────────────────────────────────────────
+# Maps ecosystem names (declared by repos in .contAIned_manifest.yaml) to the
+# toolchain they install and the network domains they require.
+# Customise these entries to point at internal registries or proxies.
+ecosystem_definitions:
+  go:
+    toolchain: go
+    network_domains:
+      - proxy.golang.org
+      - sum.golang.org
+  python:
+    # Python is pre-installed in the base image; no toolchain key needed.
+    network_domains:
+      - pypi.org
+      - files.pythonhosted.org
+  node:
+    toolchain: node
+    network_domains:
+      - registry.npmjs.org
+  typescript:
+    toolchain: node   # TypeScript runs on Node.js
+    network_domains:
+      - registry.npmjs.org
+  ruby:
+    toolchain: ruby
+    network_domains:
+      - rubygems.org
+      - api.rubygems.org
+  java:
+    toolchain: java
+    network_domains:
+      - repo1.maven.org
+      - search.maven.org
+
 # ── Runtime ───────────────────────────────────────────────────────────────────
 runtime:
   docker:

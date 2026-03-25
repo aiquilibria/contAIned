@@ -1,19 +1,16 @@
 # contAIned repo manifest — Python project
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
-# Only runtime.docker.toolchains and policy.qa.checks are permitted here;
-# all policy settings (secrets, bash rules, network, sigstore, etc.) are
+# Only ecosystems and policy.qa.checks are permitted here;
+# all policy settings (network, secrets, bash rules, sigstore, etc.) are
 # owned by the mAInlined manifest.
 #
-# Python is pre-installed in the base image; no toolchain pin is required
-# unless you need a specific version.
-#
-# `contained init` merges this file on top of the mAInlined manifest at
-# image build time. Any change here triggers an image rebuild.
+# Python is pre-installed in the base image — no version pin is required.
+# Declaring the python ecosystem tells `contained init` to add pypi.org and
+# files.pythonhosted.org to the network allowlist automatically.
 
-runtime:
-  docker:
-    toolchains: {}   # Python is pre-installed; add e.g. python: "3.12" to pin
+ecosystems:
+  python: ""   # pre-installed; set e.g. "3.12" as a version annotation if desired
 
 policy:
   qa:
