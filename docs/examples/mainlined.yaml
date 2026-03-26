@@ -25,6 +25,7 @@ ecosystem_definitions:
     network_domains:
       - proxy.golang.org
       - sum.golang.org
+      - storage.googleapis.com
     env:
       GOCACHE: /tmp/claude/go-build
       GOPATH: /tmp/claude/gopath
@@ -62,7 +63,7 @@ runtime:
     agent_config_volume: contAIned-agent-config
     # Toolchain floor constraints: repos may pin any version satisfying these.
     toolchains:
-      go: ">=1.22"
+      go: ">=1.23"
       node: ">=18"
     extra_mounts:
       - ~/.netrc:/home/agent/.netrc:ro

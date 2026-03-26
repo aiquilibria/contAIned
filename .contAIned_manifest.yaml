@@ -8,7 +8,7 @@
 # image build time. Any change here triggers an image rebuild.
 
 ecosystems:                                                                                        
-  go: "1.22.5"   # CLI build and tests
+  go: "1.23"   # CLI build and tests
 
 policy:
   qa:

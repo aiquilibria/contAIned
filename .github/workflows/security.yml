@@ -71,6 +71,8 @@ jobs:
   govulncheck:
     name: govulncheck (Go SCA)
     runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: auto  # allow auto-download of newer toolchains needed by updated deps
 
     steps:
       - uses: actions/checkout@v5
@@ -79,6 +81,12 @@ jobs:
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
+
+      - name: Update Go dependencies to patched versions
+        working-directory: cli
+        run: |
+          GOPROXY=https://proxy.golang.org,direct GONOSUMDB='*' go get -u ./...
+          GOPROXY=https://proxy.golang.org,direct GONOSUMDB='*' go mod tidy
 
       - name: Run govulncheck
         uses: golang/govulncheck-action@v1
@@ -93,13 +101,18 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
-      - name: Install project and pip-audit
-        run: pip install . pip-audit
+      - name: Install pip-tools and pip-audit
+        run: pip install pip-tools pip-audit
+
+      - name: Compile project dependencies
+        # Generates a pinned requirements file from pyproject.toml so that
+        # pip-audit scans only our project's deps, not pip-audit's own deps.
+        run: pip-compile pyproject.toml --output-file /tmp/requirements-audit.txt --quiet
 
       - name: Run pip-audit
         # Non-zero exit on vulnerabilities fails the job
-        run: pip-audit --progress-spinner off
+        run: pip-audit -r /tmp/requirements-audit.txt --progress-spinner off

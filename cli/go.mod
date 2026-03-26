@@ -1,6 +1,6 @@
 module contained.dev/cli
 
-go 1.22.5
+go 1.23
 
 require (
 	github.com/fatih/color v1.18.0
