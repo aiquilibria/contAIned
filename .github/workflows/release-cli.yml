@@ -9,6 +9,9 @@ permissions:
   contents: write   # create GitHub Release + upload assets
   id-token: write   # keyless cosign OIDC signing
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     name: Build ${{ matrix.os }}/${{ matrix.arch }}
