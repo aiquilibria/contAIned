@@ -5,7 +5,7 @@ Minimal MCP server for the contAIned tracer database.
 Exposes four tools:
   get_schema       — return table DDL so Claude knows what's queryable
   query_tracer     — run a read-only SQL query and return results
-  list_work_units  — list work units with status, branch, and prompt
+  list_work_units  — list work units with status, base_branch, head_branch, and prompt
   get_payload      — assemble and return the ATP payload for a work unit
 
 Usage:
@@ -70,8 +70,8 @@ _TOOLS = [
         "name": "list_work_units",
         "description": (
             "List contAIned work units from the tracer database. "
-            "Returns id, status, branch, base_commit, head_commit, opened_at, and prompt "
-            "for each unit, newest first. "
+            "Returns id, status, base_branch, head_branch, base_commit, "
+            "head_commit, opened_at, and prompt for each unit, newest first. "
             "IMPORTANT: only call this tool when the user has explicitly invoked "
             "the contained:submit skill."
         ),
@@ -164,7 +164,8 @@ def tool_list_work_units(status: str | None = None) -> str:
         if status:
             rows = conn.execute(
                 """
-                SELECT id, status, branch, base_commit, head_commit, opened_at, prompt
+                SELECT id, status, base_branch, head_branch,
+                       base_commit, head_commit, opened_at, prompt
                 FROM work_units
                 WHERE status = ?
                 ORDER BY opened_at DESC
@@ -175,7 +176,8 @@ def tool_list_work_units(status: str | None = None) -> str:
         else:
             rows = conn.execute(
                 """
-                SELECT id, status, branch, base_commit, head_commit, opened_at, prompt
+                SELECT id, status, base_branch, head_branch,
+                       base_commit, head_commit, opened_at, prompt
                 FROM work_units
                 ORDER BY opened_at DESC
                 LIMIT 50
@@ -185,11 +187,18 @@ def tool_list_work_units(status: str | None = None) -> str:
             return "(no work units found)"
         lines = []
         for r in rows:
+            base_branch = r["base_branch"] or ""
+            head_branch = r["head_branch"] or ""
+            branch_part = (
+                f"{base_branch}→{head_branch}"
+                if head_branch and head_branch != base_branch
+                else base_branch
+            )
             head = (r["head_commit"] or "")[:8] or "(open)"
-            base = (r["head_commit"] and r["base_commit"] or r["base_commit"] or "")[:8]
+            base = (r["base_commit"] or "")[:8]
             prompt_short = (r["prompt"] or "")[:60]
             lines.append(
-                f"[{r['status']}] {r['id'][:8]}…  {r['branch']}  {base}→{head}  {prompt_short}"
+                f"[{r['status']}] {r['id'][:8]}…  {branch_part}  {base}→{head}  {prompt_short}"
             )
         return "\n".join(lines)
     except sqlite3.Error as exc:

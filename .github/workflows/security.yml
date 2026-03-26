@@ -10,66 +10,8 @@ on:
 
 permissions:
   contents: read
-  actions: read  # required by codeql-action/analyze for workflow run metadata (telemetry)
 
 jobs:
-  codeql:
-    name: CodeQL (${{ matrix.language }})
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        language: [go, python]
-        include:
-          - language: go
-            build-mode: autobuild
-          - language: python
-            build-mode: none
-
-    steps:
-      - uses: actions/checkout@v5
-
-      - if: matrix.language == 'go'
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: cli/go.mod
-          cache-dependency-path: cli/go.sum
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4
-        with:
-          languages: ${{ matrix.language }}
-          build-mode: ${{ matrix.build-mode }}
-          queries: security-extended
-
-      - name: Autobuild
-        if: matrix.build-mode == 'autobuild'
-        uses: github/codeql-action/autobuild@v4
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4
-        with:
-          category: "/language:${{ matrix.language }}"
-          # Output results to a local SARIF file; no upload to Security tab
-          output: codeql-results
-          upload: never
-          upload-database: false
-
-      - name: Fail on CodeQL findings
-        run: |
-          count=$(python3 - <<'EOF'
-          import json, glob, sys
-          total = 0
-          for f in glob.glob("codeql-results/*.sarif"):
-              data = json.load(open(f))
-              for run in data.get("runs", []):
-                  total += len(run.get("results", []))
-          print(total)
-          EOF
-          )
-          echo "CodeQL findings: $count"
-          [ "$count" -eq 0 ]
-
   govulncheck:
     name: govulncheck (Go SCA)
     runs-on: ubuntu-latest

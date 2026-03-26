@@ -102,12 +102,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_tool    ON audit_events(tool, id DESC);
 
 -- Work unit registry.
 -- A work unit is the set of changes on a branch since the previous push.
--- Keyed on (repo_url, branch, base_commit). Closes when git push fires.
+-- Keyed on (repo_url, base_branch, base_commit). Closes when git push fires.
 CREATE TABLE IF NOT EXISTS work_units (
     id           TEXT    PRIMARY KEY,   -- UUID
     repo_url     TEXT    NOT NULL,
-    branch       TEXT    NOT NULL,
+    base_branch  TEXT    NOT NULL,      -- branch name at session open
     base_commit  TEXT    NOT NULL,      -- HEAD when unit opened (last pushed commit)
+    head_branch  TEXT,                  -- branch pushed to (may differ if dev switched mid-session)
     head_commit  TEXT,                  -- populated at push (NULL = still open)
     opened_at    INTEGER NOT NULL,      -- Unix ms
     pushed_at    INTEGER,               -- Unix ms (set when payload is POSTed)
@@ -115,7 +116,7 @@ CREATE TABLE IF NOT EXISTS work_units (
     prompt       TEXT    NOT NULL,      -- first user message since base_commit
     narrative    TEXT,                  -- assistant summary at push time
     qa_result    TEXT,                  -- JSON: {checks, passed} for result.qa
-    UNIQUE (repo_url, branch, base_commit)
+    UNIQUE (repo_url, base_branch, base_commit)
 );
 
 -- Maps sessions to their work unit (many sessions may contribute to one unit).
@@ -518,6 +519,8 @@ class contAInedTracer:
             "ALTER TABLE audit_events ADD COLUMN exception_detail TEXT",
             "ALTER TABLE snapshots ADD COLUMN diff_hash TEXT REFERENCES blobs(hash)",
             "ALTER TABLE tasks ADD COLUMN transcript_path TEXT",
+            "ALTER TABLE work_units RENAME COLUMN branch TO base_branch",
+            "ALTER TABLE work_units ADD COLUMN head_branch TEXT",
         ]
         for sql in migrations:
             try:
@@ -868,12 +871,12 @@ class contAInedTracer:
     def open_or_find_work_unit(
         self,
         repo_url: str,
-        branch: str,
+        base_branch: str,
         base_commit: str,
         prompt: str,
     ) -> str:
         """
-        Return the id of the open work unit for *(repo_url, branch, base_commit)*,
+        Return the id of the open work unit for *(repo_url, base_branch, base_commit)*,
         creating it if it does not yet exist.
 
         The ``prompt`` is stored only on creation — if the unit already exists
@@ -885,10 +888,10 @@ class contAInedTracer:
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO work_units
-                    (id, repo_url, branch, base_commit, opened_at, status, prompt)
+                    (id, repo_url, base_branch, base_commit, opened_at, status, prompt)
                 VALUES (?, ?, ?, ?, ?, 'open', ?)
                 """,
-                (unit_id, repo_url, branch, base_commit, now_ms, prompt),
+                (unit_id, repo_url, base_branch, base_commit, now_ms, prompt),
             )
             # If the unit already existed with a blank prompt (written at session
             # startup before the first user message was known), fill it in now.
@@ -896,14 +899,14 @@ class contAInedTracer:
                 self.conn.execute(
                     """
                     UPDATE work_units SET prompt = ?
-                    WHERE repo_url = ? AND branch = ? AND base_commit = ?
+                    WHERE repo_url = ? AND base_branch = ? AND base_commit = ?
                       AND (prompt IS NULL OR prompt = '')
                     """,
-                    (prompt, repo_url, branch, base_commit),
+                    (prompt, repo_url, base_branch, base_commit),
                 )
         row = self.conn.execute(
-            "SELECT id FROM work_units WHERE repo_url = ? AND branch = ? AND base_commit = ?",
-            (repo_url, branch, base_commit),
+            "SELECT id FROM work_units WHERE repo_url = ? AND base_branch = ? AND base_commit = ?",
+            (repo_url, base_branch, base_commit),
         ).fetchone()
         return row[0]
 
@@ -988,17 +991,27 @@ class contAInedTracer:
         ).fetchone()
         return row[0] if row else None
 
-    def complete_work_unit(self, work_unit_id: str, head_commit: str) -> None:
-        """Mark *work_unit_id* as pushed, recording *head_commit*.  Sets ``pushed_at`` to now."""
+    def complete_work_unit(
+        self,
+        work_unit_id: str,
+        head_commit: str,
+        head_branch: Optional[str] = None,
+    ) -> None:
+        """Mark *work_unit_id* as pushed, recording *head_commit* and *head_branch*.
+
+        *head_branch* is the branch that was actually pushed to — it may differ
+        from *base_branch* if the developer switched branches mid-session.
+        Sets ``pushed_at`` to now.
+        """
         now_ms = int(time.time() * 1000)
         with self.conn:
             self.conn.execute(
                 """
                 UPDATE work_units
-                SET status = 'pushed', pushed_at = ?, head_commit = ?
+                SET status = 'pushed', pushed_at = ?, head_commit = ?, head_branch = ?
                 WHERE id = ?
                 """,
-                (now_ms, head_commit, work_unit_id),
+                (now_ms, head_commit, head_branch, work_unit_id),
             )
 
     # ------------------------------------------------------------------
@@ -1415,7 +1428,7 @@ class contAInedTracer:
         """
         wu = self.conn.execute(
             """
-            SELECT id, repo_url, branch, base_commit, head_commit,
+            SELECT id, repo_url, base_branch, base_commit, head_branch, head_commit,
                    prompt, narrative, qa_result, pushed_at
             FROM work_units WHERE id = ?
             """,
@@ -1469,7 +1482,7 @@ class contAInedTracer:
             (work_unit_id,),
         ).fetchall()
 
-        qa_result = json.loads(wu[7]) if wu[7] else None
+        qa_result = json.loads(wu[8]) if wu[8] else None
         qa_passed = bool(qa_result and qa_result.get("passed"))
 
         diffs = []
@@ -1530,7 +1543,7 @@ class contAInedTracer:
                     "authenticated": True,
                 },
                 "input": {
-                    "prompt": wu[5],
+                    "prompt": wu[6],
                     "policy_snapshots": [
                         {
                             "session_id": ps[0],
@@ -1543,15 +1556,16 @@ class contAInedTracer:
                     ],
                     "git": {
                         "repo_url": wu[1],
-                        "branch": wu[2],
+                        "base_branch": wu[2],
                         "base_commit": wu[3],
-                        "head_commit": wu[4],
+                        "head_branch": wu[4],
+                        "head_commit": wu[5],
                     },
                 },
             },
             "outcome": {
                 "result": {
-                    "response": wu[6],
+                    "response": wu[7],
                     "diffs": diffs,
                     "actions": formatted_actions,
                     "qa": qa_result,

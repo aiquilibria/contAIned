@@ -2138,7 +2138,7 @@ class TestBuildActions:
         tracer.open_task("S1", "test task")
         wu_id = tracer.open_or_find_work_unit(
             repo_url="https://github.com/test/repo",
-            branch="main",
+            base_branch="main",
             base_commit="abc123",
             prompt="test task",
         )

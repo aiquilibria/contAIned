@@ -331,6 +331,11 @@ try:
                 capture_output=True, text=True, cwd=cwd, timeout=10,
             )
             _head_commit = _head_res.stdout.strip() if _head_res.returncode == 0 else ""
+            _head_branch_res = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, cwd=cwd, timeout=10,
+            )
+            _head_branch = _head_branch_res.stdout.strip() if _head_branch_res.returncode == 0 else None
 
             if _qa_checks:
                 _qa_passed = all(
@@ -385,16 +390,16 @@ try:
                     pass
 
             if _head_commit:
-                tracer.complete_work_unit(_wu_id, _head_commit)
+                tracer.complete_work_unit(_wu_id, _head_commit, head_branch=_head_branch)
                 try:
                     _wu_row = tracer.conn.execute(
-                        "SELECT repo_url, branch FROM work_units WHERE id = ?",
+                        "SELECT repo_url FROM work_units WHERE id = ?",
                         (_wu_id,),
                     ).fetchone()
                     if _wu_row:
                         tracer.open_or_find_work_unit(
                             repo_url=_wu_row[0],
-                            branch=_wu_row[1],
+                            base_branch=_head_branch or "",
                             base_commit=_head_commit,
                             prompt="(continued after push)",
                         )

@@ -57,7 +57,7 @@ if session_id and not agent_id:
                 if _git_url and _git_branch and _git_base:
                     _work_unit_id = tracer.open_or_find_work_unit(
                         repo_url=_git_url,
-                        branch=_git_branch,
+                        base_branch=_git_branch,
                         base_commit=_git_base,
                         prompt=prompt or "(no prompt)",
                     )
