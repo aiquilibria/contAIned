@@ -12,9 +12,6 @@ permissions:
   contents: read
   security-events: write  # upload SARIF to GitHub Security tab
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   codeql:
     name: CodeQL (${{ matrix.language }})
@@ -30,16 +27,16 @@ jobs:
             build-mode: none
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - if: matrix.language == 'go'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -48,10 +45,10 @@ jobs:
 
       - name: Autobuild
         if: matrix.build-mode == 'autobuild'
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@v4
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"
 
@@ -60,9 +57,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
@@ -75,7 +72,7 @@ jobs:
           output-file: govulncheck.sarif
 
       - name: Upload govulncheck SARIF
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: govulncheck.sarif
@@ -86,26 +83,26 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
 
-      - name: Install pip-audit
-        run: pip install pip-audit
+      - name: Install project and pip-audit
+        run: pip install . pip-audit
 
       - name: Run pip-audit
         run: |
           pip-audit \
-            --requirement pyproject.toml \
             --format sarif \
             --output pip-audit.sarif \
-            --progress-spinner off || true
+            --progress-spinner off
+        continue-on-error: true
 
       - name: Upload pip-audit SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && hashFiles('pip-audit.sarif') != ''
         with:
           sarif_file: pip-audit.sarif
           category: pip-audit
