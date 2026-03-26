@@ -98,4 +98,4 @@ This file is embedded into the Docker image and loaded as the agent's operating 
 
 ## Release process
 
-Releases are triggered by pushing a version tag. GitHub Actions cross-compiles the CLI for 5 targets (`linux/{amd64,arm64}`, `darwin/{amd64,arm64}`, `windows/amd64`), signs with Sigstore/cosign, and uploads to GitHub Releases. The Homebrew formula in `homebrew/contained.rb` is updated separately.
+Releases are triggered by pushing a version tag. GitHub Actions cross-compiles the CLI for 5 targets (`linux/{amd64,arm64}`, `darwin/{amd64,arm64}`, `windows/amd64`), signs each binary with Sigstore keyless signing, generates `checksums.txt`, and uploads all assets (including `install.sh`) to GitHub Releases.

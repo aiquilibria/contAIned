@@ -2,10 +2,11 @@
 // contAIned workspaces.
 //
 // Verification uses github.com/sigstore/sigstore-go directly — no cosign
-// binary is required on the verify path.
+// binary required on the verify path.
 //
-// Signing (contained init) still shells out to cosign sign-blob; eliminating
-// that dependency requires a full Fulcio OIDC flow and is deferred.
+// Signing (contained init) shells out to the cosign binary for the Fulcio
+// OIDC flow, which requires cosign to be installed on the operator's host.
+// Driving that flow natively via github.com/sigstore/sigstore is deferred.
 package sigstore
 
 import (
@@ -52,6 +53,31 @@ func WriteProvenance(root string, p *Provenance) error {
 	return os.WriteFile(path, out, 0o644)
 }
 
+var cosignSearchPaths = []string{
+	"/usr/local/bin/cosign",
+	"/usr/bin/cosign",
+	"/opt/homebrew/bin/cosign",
+}
+
+// FindCosign locates the cosign v2 executable via PATH, then common locations.
+// cosign is required when the manifest enables Sigstore-based image signing
+// (policy.sigstore.enabled: true), which causes contained init to sign the
+// built image digest and record provenance in .contAIned/provenance.yaml.
+func FindCosign() (string, error) {
+	if p, err := exec.LookPath("cosign"); err == nil {
+		return p, nil
+	}
+	for _, p := range cosignSearchPaths {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf(
+		"cosign not found — cosign v2 is required when policy.sigstore.enabled is true\n" +
+			"  Install: https://docs.sigstore.dev/cosign/system_config/installation/",
+	)
+}
+
 // GetImageDigest returns the sha256 image ID for a local Docker image.
 func GetImageDigest(dockerBin, image string) (string, error) {
 	out, err := exec.Command(
@@ -67,24 +93,3 @@ func GetImageDigest(dockerBin, image string) (string, error) {
 	return id, nil
 }
 
-var cosignSearchPaths = []string{
-	"/usr/local/bin/cosign",
-	"/usr/bin/cosign",
-	"/opt/homebrew/bin/cosign",
-}
-
-// FindCosign locates the cosign v2 executable.
-func FindCosign() (string, error) {
-	if p, err := exec.LookPath("cosign"); err == nil {
-		return p, nil
-	}
-	for _, p := range cosignSearchPaths {
-		if info, err := os.Stat(p); err == nil && !info.IsDir() {
-			return p, nil
-		}
-	}
-	return "", fmt.Errorf(
-		"cosign not found — cosign v2 is required for image signing\n" +
-			"  Install: https://docs.sigstore.dev/cosign/system_config/installation/",
-	)
-}

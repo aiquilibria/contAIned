@@ -17,6 +17,9 @@ import (
 // (keyless OIDC flow). Writes the bundle to bundleDest and returns a Provenance
 // record parsed from the resulting bundle.
 //
+// Requires the cosign binary on the operator's PATH or a well-known install
+// location. This is a known limitation; see the package comment for context.
+//
 // stderr is passed through so the operator can complete the OIDC browser flow.
 func SignImage(image, rekorURL, fulcioURL, bundleDest string) (*Provenance, error) {
 	cosignBin, err := FindCosign()

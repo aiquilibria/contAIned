@@ -144,17 +144,13 @@ Claude Code's design makes these extension points available; contAIned is what t
 
 ## Install
 
-**macOS / Linux — Homebrew:**
-
-```bash
-brew install aiquilibria/tap/contained
-```
-
-**macOS / Linux — curl installer:**
+**macOS / Linux:**
 
 ```bash
 curl -fsSL https://github.com/aiquilibria/contAIned/releases/latest/download/install.sh | sh
 ```
+
+Installs to `/usr/local/bin` (prompts for `sudo` if needed) or `~/.local/bin` as a fallback. To install a specific version: `... | sh -s v0.2.0`.
 
 **Direct download:** grab the binary for your platform from [GitHub Releases](https://github.com/aiquilibria/contAIned/releases), make it executable, and place it on your `$PATH`.
 
