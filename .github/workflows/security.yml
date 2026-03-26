@@ -53,6 +53,7 @@ jobs:
           # Output results to a local SARIF file; no upload to Security tab
           output: codeql-results
           upload: never
+          upload-database: false
 
       - name: Fail on CodeQL findings
         run: |
