@@ -11,6 +11,7 @@ on:
 permissions:
   contents: read
   security-events: write  # upload SARIF to GitHub Security tab
+  actions: read           # required by codeql-action/upload-sarif for workflow run metadata
 
 jobs:
   codeql:
