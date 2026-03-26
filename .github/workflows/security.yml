@@ -10,8 +10,6 @@ on:
 
 permissions:
   contents: read
-  security-events: write  # upload SARIF to GitHub Security tab
-  actions: read           # required by codeql-action/upload-sarif for workflow run metadata
 
 jobs:
   codeql:
@@ -41,7 +39,6 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          # Use security-and-quality query suite for broader coverage
           queries: security-and-quality
 
       - name: Autobuild
@@ -52,6 +49,24 @@ jobs:
         uses: github/codeql-action/analyze@v4
         with:
           category: "/language:${{ matrix.language }}"
+          # Output results to a local SARIF file; no upload to Security tab
+          output: codeql-results
+          upload: never
+
+      - name: Fail on CodeQL findings
+        run: |
+          count=$(python3 - <<'EOF'
+          import json, glob, sys
+          total = 0
+          for f in glob.glob("codeql-results/*.sarif"):
+              data = json.load(open(f))
+              for run in data.get("runs", []):
+                  total += len(run.get("results", []))
+          print(total)
+          EOF
+          )
+          echo "CodeQL findings: $count"
+          [ "$count" -eq 0 ]
 
   govulncheck:
     name: govulncheck (Go SCA)
@@ -69,15 +84,7 @@ jobs:
         uses: golang/govulncheck-action@v1
         with:
           work-dir: cli
-          output-format: sarif
-          output-file: govulncheck.sarif
-
-      - name: Upload govulncheck SARIF
-        uses: github/codeql-action/upload-sarif@v4
-        if: always()
-        with:
-          sarif_file: govulncheck.sarif
-          category: govulncheck
+          # Default output (text) — non-zero exit on vulnerabilities fails the job
 
   pip-audit:
     name: pip-audit (Python SCA)
@@ -94,16 +101,5 @@ jobs:
         run: pip install . pip-audit
 
       - name: Run pip-audit
-        run: |
-          pip-audit \
-            --format sarif \
-            --output pip-audit.sarif \
-            --progress-spinner off
-        continue-on-error: true
-
-      - name: Upload pip-audit SARIF
-        uses: github/codeql-action/upload-sarif@v4
-        if: always() && hashFiles('pip-audit.sarif') != ''
-        with:
-          sarif_file: pip-audit.sarif
-          category: pip-audit
+        # Non-zero exit on vulnerabilities fails the job
+        run: pip-audit --progress-spinner off
