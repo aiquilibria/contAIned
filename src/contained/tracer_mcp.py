@@ -161,16 +161,26 @@ def tool_list_work_units(status: str | None = None) -> str:
     if isinstance(conn, str):
         return conn
     try:
-        where = f"WHERE status = '{status}'" if status else ""
-        rows = conn.execute(
-            f"""
-            SELECT id, status, branch, base_commit, head_commit, opened_at, prompt
-            FROM work_units
-            {where}
-            ORDER BY opened_at DESC
-            LIMIT 50
-            """
-        ).fetchall()
+        if status:
+            rows = conn.execute(
+                """
+                SELECT id, status, branch, base_commit, head_commit, opened_at, prompt
+                FROM work_units
+                WHERE status = ?
+                ORDER BY opened_at DESC
+                LIMIT 50
+                """,
+                (status,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, status, branch, base_commit, head_commit, opened_at, prompt
+                FROM work_units
+                ORDER BY opened_at DESC
+                LIMIT 50
+                """
+            ).fetchall()
         if not rows:
             return "(no work units found)"
         lines = []
