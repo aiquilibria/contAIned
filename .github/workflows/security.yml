@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  actions: read  # required by codeql-action/analyze for workflow run metadata (telemetry)
 
 jobs:
   codeql:
@@ -71,8 +72,6 @@ jobs:
   govulncheck:
     name: govulncheck (Go SCA)
     runs-on: ubuntu-latest
-    env:
-      GOTOOLCHAIN: auto  # allow auto-download of newer toolchains needed by updated deps
 
     steps:
       - uses: actions/checkout@v5
@@ -84,9 +83,15 @@ jobs:
 
       - name: Update Go dependencies to patched versions
         working-directory: cli
+        # Step-level env overrides $GITHUB_ENV; setup-go@v6 writes GOTOOLCHAIN=local
+        # there to prevent accidental upgrades, so we must override it here explicitly.
+        env:
+          GOTOOLCHAIN: auto
+          GOPROXY: https://proxy.golang.org,direct
+          GONOSUMDB: '*'
         run: |
-          GOPROXY=https://proxy.golang.org,direct GONOSUMDB='*' go get -u ./...
-          GOPROXY=https://proxy.golang.org,direct GONOSUMDB='*' go mod tidy
+          go get -u ./...
+          go mod tidy
 
       - name: Run govulncheck
         uses: golang/govulncheck-action@v1
