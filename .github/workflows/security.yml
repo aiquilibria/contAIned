@@ -81,23 +81,11 @@ jobs:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
 
-      - name: Update Go dependencies to patched versions
-        working-directory: cli
-        # Step-level env overrides $GITHUB_ENV; setup-go@v6 writes GOTOOLCHAIN=local
-        # there to prevent accidental upgrades, so we must override it here explicitly.
-        env:
-          GOTOOLCHAIN: auto
-          GOPROXY: https://proxy.golang.org,direct
-          GONOSUMDB: '*'
-        run: |
-          go get -u ./...
-          go mod tidy
-
       - name: Run govulncheck
         uses: golang/govulncheck-action@v1
         with:
           work-dir: cli
-          # Default output (text) — non-zero exit on vulnerabilities fails the job
+          # Scans committed deps only; non-zero exit on call-graph-reachable vulns fails the job
 
   pip-audit:
     name: pip-audit (Python SCA)

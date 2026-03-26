@@ -64,7 +64,7 @@ runtime:
     # Toolchain floor constraints: repos may pin any version satisfying these.
     toolchains:
       go: ">=1.23"
-      node: ">=18"
+      node: ">=20"
     extra_mounts:
       - ~/.netrc:/home/agent/.netrc:ro
   mAInlined:
