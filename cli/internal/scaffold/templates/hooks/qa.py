@@ -77,6 +77,29 @@ def record(name: str, status: str, output: str = "") -> None:
     check_results.append({"name": name, "status": status, "output": output})
 
 
+# ── Run setup commands ────────────────────────────────────────────────────────
+# Setup commands (from ecosystem install fields) run before any checks.
+# A setup failure is immediately fatal — there is no point running checks
+# if the workspace is not properly initialised.
+for _setup_cmd in policy["qa"].get("setup", []):
+    if not _setup_cmd:
+        continue
+    _setup_name = " ".join(_setup_cmd)
+    try:
+        _code, _out = run(_setup_cmd)
+    except FileNotFoundError:
+        record(_setup_name, "skip", f"{_setup_cmd[0]!r} not found")
+        continue
+    if _code != 0:
+        record(_setup_name, "fail", _out)
+        result: dict = {"checks": check_results}
+        result["decision"] = "block"
+        result["reason"] = f"QA setup failed — fix before finishing:\n\n### {_setup_name}\n```\n{_out}\n```\n"
+        print(json.dumps(result))
+        sys.exit(0)
+    record(_setup_name, "pass")
+
+
 # ── Run checks ────────────────────────────────────────────────────────────────
 for _entry in checks:
     _check = _expand(_entry)

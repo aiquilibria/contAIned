@@ -282,6 +282,57 @@ func TestGenerateToolchainsScript_StartsWithShebang(t *testing.T) {
 	}
 }
 
+// ── GenerateDepsScript ────────────────────────────────────────────────────────
+
+func TestGenerateDepsScript_EmptyDeps_NoOp(t *testing.T) {
+	script := GenerateDepsScript(nil)
+	if !strings.HasPrefix(script, "#!/bin/sh") {
+		t.Error("script should start with shebang")
+	}
+	if strings.Contains(script, "go install") || strings.Contains(script, "curl") {
+		t.Error("empty deps should produce a no-op script with no install commands")
+	}
+}
+
+func TestGenerateDepsScript_GolangciLint_UsesGoInstall(t *testing.T) {
+	script := GenerateDepsScript([]string{"golangci-lint"})
+	if !strings.Contains(script, "go install") {
+		t.Error("golangci-lint should be installed via go install")
+	}
+	if !strings.Contains(script, "golangci-lint") {
+		t.Error("script should reference golangci-lint")
+	}
+	if !strings.Contains(script, "GOBIN=/usr/local/bin") {
+		t.Error("golangci-lint should be installed to /usr/local/bin")
+	}
+}
+
+func TestGenerateDepsScript_GolangciLint_SetsGoPath(t *testing.T) {
+	script := GenerateDepsScript([]string{"golangci-lint"})
+	if !strings.Contains(script, "/usr/local/go/bin") {
+		t.Error("script should prepend /usr/local/go/bin to PATH")
+	}
+}
+
+func TestGenerateDepsScript_UnknownDep_PrintsWarning(t *testing.T) {
+	script := GenerateDepsScript([]string{"unknown-tool"})
+	if !strings.Contains(script, "WARNING") {
+		t.Error("unknown dep should produce a WARNING line")
+	}
+	if !strings.Contains(script, "unknown-tool") {
+		t.Error("warning should name the unknown dep")
+	}
+}
+
+func TestGenerateDepsScript_StartsWithShebang(t *testing.T) {
+	for _, deps := range [][]string{nil, {"golangci-lint"}, {"unknown"}} {
+		script := GenerateDepsScript(deps)
+		if !strings.HasPrefix(script, "#!/bin/sh") {
+			t.Errorf("script should start with #!/bin/sh for deps %v, got: %.20q", deps, script)
+		}
+	}
+}
+
 // ── PolicyPull ────────────────────────────────────────────────────────────────
 
 func TestPolicyPull_NomAInlinedURL_ReturnsOriginal(t *testing.T) {

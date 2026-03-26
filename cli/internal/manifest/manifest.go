@@ -24,6 +24,13 @@ type EcosystemDef struct {
 	// Toolchain is the runtime.docker.toolchains key to install (e.g. "go",
 	// "node"). Empty means the runtime is pre-installed in the base image.
 	Toolchain string `yaml:"toolchain,omitempty"`
+	// Deps lists additional tools or packages to pre-install in the container
+	// image for this ecosystem (e.g. ["golangci-lint"] for Go).
+	Deps []string `yaml:"deps,omitempty"`
+	// Install is a command run once in the workspace before QA checks execute,
+	// each time the agent stops. Use for workspace-level setup that must happen
+	// inside the container on the target platform (e.g. ["npm", "install"]).
+	Install []string `yaml:"install,omitempty"`
 	// NetworkDomains lists the outbound domains required for dependency
 	// resolution and package fetching for this ecosystem.
 	NetworkDomains []string `yaml:"network_domains,omitempty"`
@@ -56,6 +63,9 @@ type DockerConfig struct {
 	// Env holds merged environment variables collected from active ecosystems.
 	// Populated by MergeRepoManifest; not intended for direct YAML authoring.
 	Env map[string]string `yaml:"env,omitempty"`
+	// Deps lists additional tools collected from active ecosystem definitions.
+	// Populated by MergeRepoManifest; not intended for direct YAML authoring.
+	Deps []string `yaml:"deps,omitempty"`
 }
 
 type AgentConfig struct {
@@ -108,7 +118,11 @@ type AuditConfig struct {
 }
 
 type QAConfig struct {
-	Checks []QACheck `yaml:"checks"`
+	// Setup lists commands run before any checks on every QA pass.
+	// Populated by MergeRepoManifest from active ecosystem Install commands;
+	// may also be authored directly in the operator manifest.
+	Setup  [][]string `yaml:"setup,omitempty"`
+	Checks []QACheck  `yaml:"checks"`
 }
 
 type QACheck struct {

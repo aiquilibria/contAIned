@@ -237,7 +237,7 @@ func DockerSetup(
 				filepath.Base(workspace))
 		}
 
-		buildContext, err := prepareBuildContext(cfg.Toolchains)
+		buildContext, err := prepareBuildContext(cfg.Toolchains, cfg.Deps)
 		if err != nil {
 			return false, err
 		}
@@ -351,11 +351,40 @@ func GenerateToolchainsScript(toolchains map[string]string) string {
 	return b.String()
 }
 
+// GenerateDepsScript returns a shell script that installs each named dep in
+// the provided list. Returns a no-op script when the list is empty. The script
+// runs as root inside the Docker build context, after toolchains have been
+// installed, so toolchain binaries (e.g. /usr/local/go/bin) are available.
+//
+// Supported deps: golangci-lint.
+func GenerateDepsScript(deps []string) string {
+	if len(deps) == 0 {
+		return "#!/bin/sh\n# no deps declared\n"
+	}
+
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\nset -eu\n\n")
+	// Make toolchain binaries installed by toolchains.sh visible.
+	b.WriteString("export PATH=/usr/local/go/bin:${PATH}\n\n")
+
+	for _, dep := range deps {
+		switch dep {
+		case "golangci-lint":
+			b.WriteString("# golangci-lint\n")
+			b.WriteString("GOBIN=/usr/local/bin go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest\n\n")
+		default:
+			fmt.Fprintf(&b, "echo \"WARNING: unknown dep %q — skipping\" >&2\n\n", dep)
+		}
+	}
+
+	return b.String()
+}
+
 // prepareBuildContext creates a temp directory containing the full Python
 // source tree (embedded in the binary via pysource.Source), the generated
 // Dockerfile, and the toolchains install script. The caller is responsible
 // for removing the directory when done.
-func prepareBuildContext(toolchains map[string]string) (string, error) {
+func prepareBuildContext(toolchains map[string]string, deps []string) (string, error) {
 	dockerfileContent, err := scaffold.TemplateContent("templates/Dockerfile")
 	if err != nil {
 		return "", err
@@ -392,6 +421,11 @@ func prepareBuildContext(toolchains map[string]string) (string, error) {
 	}
 	toolchainsScript := GenerateToolchainsScript(toolchains)
 	if err := os.WriteFile(filepath.Join(tmp, "toolchains.sh"), []byte(toolchainsScript), 0o755); err != nil {
+		os.RemoveAll(tmp)
+		return "", err
+	}
+	depsScript := GenerateDepsScript(deps)
+	if err := os.WriteFile(filepath.Join(tmp, "deps.sh"), []byte(depsScript), 0o755); err != nil {
 		os.RemoveAll(tmp)
 		return "", err
 	}

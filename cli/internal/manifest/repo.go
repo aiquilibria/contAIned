@@ -104,6 +104,8 @@ func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error
 		merged.Runtime.Docker.Toolchains[k] = minVersionFromConstraint(v)
 	}
 	merged.Policy.Network.AllowedDomains = append([]string{}, operator.Policy.Network.AllowedDomains...)
+	merged.Runtime.Docker.Deps = append([]string{}, operator.Runtime.Docker.Deps...)
+	merged.Policy.QA.Setup = append([][]string{}, operator.Policy.QA.Setup...)
 
 	if repo == nil {
 		return &merged, nil
@@ -161,6 +163,32 @@ func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error
 				merged.Runtime.Docker.Env[k] = v
 			}
 		}
+
+		// Collect ecosystem deps (deduplicated).
+		if len(def.Deps) > 0 {
+			seen := sliceSet(merged.Runtime.Docker.Deps)
+			for _, dep := range def.Deps {
+				if !seen[dep] {
+					merged.Runtime.Docker.Deps = append(merged.Runtime.Docker.Deps, dep)
+					seen[dep] = true
+				}
+			}
+		}
+
+		// Collect ecosystem install command (deduplicated by command string).
+		if len(def.Install) > 0 {
+			key := strings.Join(def.Install, " ")
+			already := false
+			for _, existing := range merged.Policy.QA.Setup {
+				if strings.Join(existing, " ") == key {
+					already = true
+					break
+				}
+			}
+			if !already {
+				merged.Policy.QA.Setup = append(merged.Policy.QA.Setup, def.Install)
+			}
+		}
 	}
 
 	// Concatenate QA checks: operator first, then repo.
@@ -173,9 +201,13 @@ func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error
 }
 
 func domainSet(domains []string) map[string]bool {
-	s := make(map[string]bool, len(domains))
-	for _, d := range domains {
-		s[d] = true
+	return sliceSet(domains)
+}
+
+func sliceSet(items []string) map[string]bool {
+	s := make(map[string]bool, len(items))
+	for _, v := range items {
+		s[v] = true
 	}
 	return s
 }

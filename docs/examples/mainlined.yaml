@@ -21,7 +21,9 @@
 # an internal PyPI mirror instead of pypi.org.
 ecosystem_definitions:
   go:
-    toolchain: go
+    toolchain: go                                                                                                     
+    deps:
+      - golangci-lint
     network_domains:
       - proxy.golang.org
       - sum.golang.org
@@ -38,10 +40,12 @@ ecosystem_definitions:
     toolchain: node
     network_domains:
       - registry.npmjs.org
+    install: [npm, install]
   typescript:
     toolchain: node   # TypeScript runs on Node.js
     network_domains:
       - registry.npmjs.org
+    install: [npm, install]
   ruby:
     toolchain: ruby
     network_domains:

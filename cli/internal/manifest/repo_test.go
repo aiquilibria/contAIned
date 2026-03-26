@@ -159,6 +159,7 @@ func operatorWithEcosystems() *Manifest {
 		"go": {
 			Toolchain:      "go",
 			NetworkDomains: []string{"proxy.golang.org", "sum.golang.org"},
+			Deps:           []string{"golangci-lint"},
 		},
 		"python": {
 			NetworkDomains: []string{"pypi.org", "files.pythonhosted.org"},
@@ -166,10 +167,12 @@ func operatorWithEcosystems() *Manifest {
 		"typescript": {
 			Toolchain:      "node",
 			NetworkDomains: []string{"registry.npmjs.org"},
+			Install:        []string{"npm", "install"},
 		},
 		"node": {
 			Toolchain:      "node",
 			NetworkDomains: []string{"registry.npmjs.org"},
+			Install:        []string{"npm", "install"},
 		},
 	}
 	return m
@@ -403,6 +406,118 @@ func TestMergeRepoManifest_DoesNotMutateOperator(t *testing.T) {
 	}
 	if _, ok := m.Runtime.Docker.Toolchains["go"]; ok {
 		t.Error("MergeRepoManifest must not mutate the operator manifest's Toolchains")
+	}
+}
+
+func TestMergeRepoManifest_EcosystemDeps_Collected(t *testing.T) {
+	m := operatorWithEcosystems()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := false
+	for _, dep := range merged.Runtime.Docker.Deps {
+		if dep == "golangci-lint" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected golangci-lint in merged deps")
+	}
+}
+
+func TestMergeRepoManifest_NoDuplicateDeps(t *testing.T) {
+	m := operatorWithEcosystems()
+	// Add a second ecosystem that also declares golangci-lint.
+	m.EcosystemDefinitions["go2"] = EcosystemDef{
+		Toolchain: "go",
+		Deps:      []string{"golangci-lint"},
+	}
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5", "go2": "1.22.5"},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	count := 0
+	for _, dep := range merged.Runtime.Docker.Deps {
+		if dep == "golangci-lint" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("golangci-lint should appear exactly once in deps, got %d", count)
+	}
+}
+
+func TestMergeRepoManifest_EcosystemInstall_CollectedIntoSetup(t *testing.T) {
+	m := operatorWithEcosystems()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"typescript": "20"},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(merged.Policy.QA.Setup) == 0 {
+		t.Fatal("expected setup commands from typescript ecosystem, got none")
+	}
+	found := false
+	for _, cmd := range merged.Policy.QA.Setup {
+		if len(cmd) == 2 && cmd[0] == "npm" && cmd[1] == "install" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected [npm install] in qa.setup, got %v", merged.Policy.QA.Setup)
+	}
+}
+
+func TestMergeRepoManifest_NoDuplicateSetupCommands(t *testing.T) {
+	m := operatorWithEcosystems()
+	// Both typescript and node declare [npm install] — should appear only once.
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"typescript": "20", "node": "20"},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	count := 0
+	for _, cmd := range merged.Policy.QA.Setup {
+		if len(cmd) == 2 && cmd[0] == "npm" && cmd[1] == "install" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("[npm install] should appear exactly once in setup, got %d", count)
+	}
+}
+
+func TestMergeRepoManifest_NoInstall_SetupEmpty(t *testing.T) {
+	m := operatorWithEcosystems()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, cmd := range merged.Policy.QA.Setup {
+		if len(cmd) == 2 && cmd[0] == "npm" && cmd[1] == "install" {
+			t.Error("npm install should not appear in setup when only go ecosystem is active")
+		}
 	}
 }
 

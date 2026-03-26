@@ -27,6 +27,7 @@ _DEFAULTS = {
         "enabled": True,
     },
     "qa": {
+        "setup": [],
         "checks": [],
     },
     "network": {
