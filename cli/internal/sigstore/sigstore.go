@@ -92,4 +92,3 @@ func GetImageDigest(dockerBin, image string) (string, error) {
 	}
 	return id, nil
 }
-
