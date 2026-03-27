@@ -24,21 +24,30 @@ var initCmd = &cobra.Command{
 	Short: "Initialise a contAIned workspace",
 	Long: `Initialise a contAIned workspace in DIRECTORY (default: current directory).
 
-Scaffolds .contAIned/ and .claude/. Builds a Docker image with
-the manifest baked in so policy is enforced at the highest-precedence settings
-level. The image is tagged contained:<workspace-name> by default, so each
-project gets its own image without manual configuration.
+Scaffolds .contAIned/ and builds a Docker image with the operator policy
+baked in at the highest-precedence settings level. Each project gets its own
+image tag derived from the workspace name so multiple projects can coexist
+without manual configuration.
 
-A manifest must be provided via --manifest or --mainlined. Run without either
-flag to see a starter manifest you can save and customise.
+There are two modes:
 
-Examples:
-  contained init --manifest policy.yaml
-  contained init --mainlined https://mAInlined.example.com
-  contained init --manifest policy.yaml --rebuild
-  contained init ./myrepo --manifest policy.yaml
-  contained init --ecosystem go
-  contained init --ecosystem go,python`,
+  Operator init — provide a full policy manifest to bake into the image.
+  Use --manifest (local file) or --mainlined (remote policy server URL).
+  Run without either flag to print a generic manifest starter you can save
+  and customise.
+
+    contained init --manifest policy.yaml
+    contained init --mainlined https://mainlined.example.com
+    contained init --manifest policy.yaml --rebuild
+    contained init ./myrepo --manifest policy.yaml
+
+  Repo manifest starter — print a .contAIned_manifest.yaml template and exit.
+  Use --ecosystem to select one or more language runtimes. Commit the output
+  to the repository root; it is merged into the operator manifest on the next
+  contained init.
+
+    contained init --ecosystem go
+    contained init --ecosystem go,python`,
 	Args:         cobra.MaximumNArgs(1),
 	RunE:         runInit,
 	SilenceUsage: true,
@@ -55,9 +64,9 @@ var (
 func init() {
 	initCmd.Flags().StringVar(&initManifestPath, "manifest", "", "Path to manifest.yaml to bake into the image")
 	initCmd.Flags().StringVar(&initmAInlinedURL, "mAInlined", "", "mAInlined URL to fetch manifest from")
-	initCmd.Flags().StringSliceVar(&initEcosystem, "ecosystem", nil, "Print a repo manifest starter for these ecosystem(s) and exit (go, node, python, typescript; comma-separated or repeated)")
-	initCmd.Flags().BoolVarP(&initForce, "force", "f", false, "Re-initialise even if workspace already exists")
 	initCmd.Flags().BoolVarP(&initRebuild, "rebuild", "r", false, "Force Docker image rebuild")
+	initCmd.Flags().BoolVarP(&initForce, "force", "f", false, "Re-initialise even if workspace already exists")
+	initCmd.Flags().StringSliceVar(&initEcosystem, "ecosystem", nil, "Print a repo manifest starter for these ecosystem(s) and exit (go, node, python, typescript; comma-separated or repeated)")
 	rootCmd.AddCommand(initCmd)
 }
 

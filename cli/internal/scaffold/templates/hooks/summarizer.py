@@ -42,6 +42,17 @@ if event.get("agent_id"):
 if not session_id:
     sys.exit(0)
 
+# ── File sentinel: prevents infinite loop on the second Stop ──────────────────
+# Written just before the first block; on the second Stop the agent stops
+# cleanly without rebuilding the summary.  File-based so it works even when
+# the task row does not exist in the tracer DB (e.g. unregistered sessions) —
+# the DB sentinel below is unreliable in that case because set_task_status is
+# a bare UPDATE that silently no-ops when no row exists, so status never
+# becomes "closed" and the DB sentinel never fires.
+_sentinel_file = Path("/tmp/claude") / f".stop_done_{session_id[:16]}"
+if _sentinel_file.exists():
+    sys.exit(0)
+
 # ── Phase 1: QA checks ────────────────────────────────────────────────────────
 # Run qa.py inline before building the summary or showing the approval UI.
 # This guarantees QA always completes first regardless of whether the SDK
@@ -421,8 +432,8 @@ except Exception:
     pass
 
 # Block with a formatted summary so Claude surfaces it to the operator.
-# On the next Stop (after Claude acknowledges), the sentinel check at the top
-# detects status == "closed" and exits 0 cleanly — no infinite loop.
+# Touch the file sentinel before blocking so the next Stop exits 0 cleanly
+# regardless of whether the DB task row was created or not.
 _status_icons = {"pass": "✓", "fail": "✗", "skip": "·"}
 _qa_line = "  ".join(
     f"{_status_icons.get(c['status'], '?')} {c['name']}"
@@ -444,5 +455,9 @@ if _prov_log:
     _prov_line = f"\nProvenance: {_digest_short}… · {_operator}" + (f" · Rekor #{_rekor}" if _rekor else "")
 
 _summary_msg = f"QA: {_qa_line}\n\nChanged:\n{_files_line}{_prov_line}\n"
+try:
+    _sentinel_file.touch()
+except Exception:
+    pass
 print(json.dumps({"decision": "block", "reason": _summary_msg}))
 sys.exit(0)

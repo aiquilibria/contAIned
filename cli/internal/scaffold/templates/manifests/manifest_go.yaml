@@ -10,7 +10,7 @@
 # to the allowlist automatically.
 
 ecosystems:
-  go: "1.22.5"   # pin your project's Go version here
+  go: "1.24.0"   # pin your project's Go version here
 
 policy:
   qa:

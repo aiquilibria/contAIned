@@ -80,12 +80,24 @@ if not target:
 cwd          = event.get("cwd", ".")
 policy       = load_policy(cwd)
 project_root = Path(cwd).resolve()
-contAIned_dir    = project_root / ".contAIned"
+contAIned_dir = project_root / ".contAIned"
 resolved     = Path(target).resolve()
 
 # ── Check 1: inside .contAIned/ control-plane (always enforced, not configurable) ─
+# Primary check: absolute-path prefix (requires cwd to resolve correctly).
+# Belt-and-suspenders: path-component membership — catches symlink/CWD edge cases
+# where project_root resolves to an unexpected path and relative_to() raises ValueError
+# even though the target genuinely lives inside .contAIned/.
+_in_control_plane = False
 try:
     resolved.relative_to(contAIned_dir)
+    _in_control_plane = True
+except ValueError:
+    pass
+if not _in_control_plane:
+    _in_control_plane = ".contAIned" in resolved.parts
+
+if _in_control_plane:
     log_denial(event, target, f"write into control-plane directory: {target}")
     print(
         f"Write denied: \'{target}\' is inside the .contAIned/ control-plane directory.\n"
@@ -93,12 +105,14 @@ try:
         file=sys.stderr,
     )
     sys.exit(2)
-except ValueError:
-    pass  # not inside .contAIned/ — continue
 
 # ── Check 2: .claude/settings.json — Claude Code hook registration file ───────
+# Same dual check: absolute equality first, component-name fallback second.
 claude_settings = (project_root / ".claude" / "settings.json").resolve()
-if resolved == claude_settings:
+_is_claude_settings = (resolved == claude_settings) or (
+    ".claude" in resolved.parts and resolved.name == "settings.json"
+)
+if _is_claude_settings:
     log_denial(event, target, f"write to Claude Code settings file: {target}")
     print(
         f"Write denied: \'{target}\' is the Claude Code settings file.\n"

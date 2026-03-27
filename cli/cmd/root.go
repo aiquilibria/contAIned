@@ -29,7 +29,9 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	// Cobra adds --version automatically when Version is set.
-	// No additional flags needed for the root command in Phase 1.
+	// Hide the auto-generated completion command — it is not part of the
+	// contAIned UX and would confuse operators seeing it in `--help`.
+	rootCmd.CompletionOptions.DisableDefaultCmd = true
 }
 
 // Execute is the entry point called from main.
