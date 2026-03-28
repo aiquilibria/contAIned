@@ -13,9 +13,23 @@ import (
 	"contained.dev/cli/internal/docker"
 )
 
+// signingPayload is the structured content written to disk and signed by cosign
+// sign-blob. Including policyRef/policyVersion in this JSON blob means the
+// mAInlined policy version is cryptographically bound to the image digest in
+// the Rekor transparency log entry.
+type signingPayload struct {
+	ImageDigest   string `json:"image_digest"`
+	PolicyRef     string `json:"policy_ref,omitempty"`
+	PolicyVersion string `json:"policy_version,omitempty"`
+}
+
 // SignImage signs the local Docker image digest as a blob using cosign sign-blob
 // (keyless OIDC flow). Writes the bundle to bundleDest and returns a Provenance
 // record parsed from the resulting bundle.
+//
+// policyRef and policyVersion are included in the signed JSON payload so the
+// mAInlined policy version is part of the Rekor entry. Pass empty strings when
+// mAInlined is not configured.
 //
 // If idToken is non-empty it is passed to cosign via the SIGSTORE_ID_TOKEN
 // environment variable so the OIDC browser flow is skipped — useful when a
@@ -25,7 +39,7 @@ import (
 // location. This is a known limitation; see the package comment for context.
 //
 // stderr is passed through so the operator can complete the OIDC browser flow.
-func SignImage(image, rekorURL, fulcioURL, bundleDest, idToken string) (*Provenance, error) {
+func SignImage(image, rekorURL, fulcioURL, bundleDest, idToken, policyRef, policyVersion string) (*Provenance, error) {
 	cosignBin, err := FindCosign()
 	if err != nil {
 		return nil, err
@@ -41,13 +55,25 @@ func SignImage(image, rekorURL, fulcioURL, bundleDest, idToken string) (*Provena
 		return nil, fmt.Errorf("getting image digest: %w", err)
 	}
 
-	// Write the digest to a temp file — cosign signs file contents.
+	// Build the JSON signing payload — cosign signs the file contents and the
+	// hash is recorded in the Rekor entry. Including policy_ref/policy_version
+	// here cryptographically binds the mAInlined policy to the image digest.
+	payload := signingPayload{
+		ImageDigest:   imageDigest,
+		PolicyRef:     policyRef,
+		PolicyVersion: policyVersion,
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling signing payload: %w", err)
+	}
+
 	digestFile, err := os.CreateTemp("", "contained-digest-*.txt")
 	if err != nil {
 		return nil, err
 	}
 	defer os.Remove(digestFile.Name())
-	if _, err := digestFile.WriteString(imageDigest); err != nil {
+	if _, err := digestFile.Write(payloadJSON); err != nil {
 		return nil, err
 	}
 	digestFile.Close()
@@ -98,6 +124,9 @@ func SignImage(image, rekorURL, fulcioURL, bundleDest, idToken string) (*Provena
 	if err != nil {
 		return nil, fmt.Errorf("parsing bundle: %w", err)
 	}
+	prov.PolicyRef = policyRef
+	prov.PolicyVersion = policyVersion
+	prov.SignedPayload = string(payloadJSON)
 	return prov, nil
 }
 

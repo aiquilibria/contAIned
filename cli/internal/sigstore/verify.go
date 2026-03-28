@@ -73,7 +73,14 @@ func VerifyWorkspace(root_ string) (*Provenance, error) {
 
 	rekorURL := m.Policy.Sigstore.RekorURL
 
-	if err := VerifyBundle(bundlePath, prov.ImageDigest, prov.OperatorIdentity, prov.OIDCIssuer, rekorURL); err != nil {
+	// For new bundles the signed artifact is a JSON payload (image_digest +
+	// policy_ref + policy_version). Legacy bundles signed only the raw digest
+	// string; fall back to that when signed_payload is absent.
+	verifyPayload := prov.SignedPayload
+	if verifyPayload == "" {
+		verifyPayload = prov.ImageDigest
+	}
+	if err := VerifyBundle(bundlePath, verifyPayload, prov.OperatorIdentity, prov.OIDCIssuer, rekorURL); err != nil {
 		return nil, fmt.Errorf("Sigstore verification failed: %w", err)
 	}
 
@@ -84,7 +91,11 @@ func VerifyWorkspace(root_ string) (*Provenance, error) {
 // No cosign binary is required.
 //
 // bundlePath  — path to the .json bundle produced by cosign sign-blob
-// payload     — the exact bytes that were signed (the image digest string)
+// payload     — the exact bytes that were signed; for new bundles this is a
+//
+//	JSON object (image_digest + policy_ref + policy_version);
+//	for legacy bundles it is the raw image digest string
+//
 // identity    — expected certificate SAN (operator email or URI)
 // oidcIssuer  — expected OIDC issuer URL
 // rekorURL    — Rekor transparency log URL (used only for informational checks)

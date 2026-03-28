@@ -322,7 +322,9 @@ func runInit(_ *cobra.Command, args []string) error {
 			m.Policy.Sigstore.RekorURL,
 			m.Policy.Sigstore.FulcioURL,
 			bundleDest,
-			idToken, // reuse mAInlined OIDC token (aud=sigstore); "" = cosign drives its own flow
+			idToken,                   // reuse mAInlined OIDC token (aud=sigstore); "" = cosign drives its own flow
+			m.Mainlined.PolicyRef,     // included in the signed payload → bound in Rekor entry
+			m.Mainlined.PolicyVersion, // included in the signed payload → bound in Rekor entry
 		)
 		if err != nil {
 			fmt.Printf(" warning\n  Warning: image signing failed — workspace will function but lacks Sigstore provenance.\n  %v\n", err)
