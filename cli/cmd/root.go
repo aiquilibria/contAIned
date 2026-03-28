@@ -75,7 +75,7 @@ func runRepl(_ *cobra.Command, _ []string) error {
 
 	printRuntimeBanner(root, m)
 
-	runner := docker.New(m.Runtime.Docker, root, m.Policy)
+	runner := docker.New(m.Runtime.Docker, root, m.Policy, m.Mainlined.URL)
 	return runner.RunRepl()
 }
 

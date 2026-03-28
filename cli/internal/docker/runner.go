@@ -3,10 +3,12 @@ package docker
 import (
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"contained.dev/cli/internal/manifest"
 )
@@ -41,14 +43,17 @@ func findDocker() (string, error) {
 
 // Runner orchestrates `docker run` for a contAIned session.
 type Runner struct {
-	cfg       manifest.DockerConfig
-	workspace string
-	policy    manifest.PolicyConfig
+	cfg           manifest.DockerConfig
+	workspace     string
+	policy        manifest.PolicyConfig
+	mainlinedURL  string // non-empty when mAInlined is configured; drives secrets mount
 }
 
 // New creates a Runner for the given manifest and workspace root.
-func New(cfg manifest.DockerConfig, workspace string, policy manifest.PolicyConfig) *Runner {
-	return &Runner{cfg: cfg, workspace: workspace, policy: policy}
+// mainlinedURL is the value of manifest.Mainlined.URL; pass an empty string
+// when mAInlined is not configured.
+func New(cfg manifest.DockerConfig, workspace string, policy manifest.PolicyConfig, mainlinedURL string) *Runner {
+	return &Runner{cfg: cfg, workspace: workspace, policy: policy, mainlinedURL: mainlinedURL}
 }
 
 // baseArgs returns the docker run arguments common to all invocations,
@@ -110,8 +115,37 @@ func (r *Runner) baseArgs(dockerBin string) ([]string, error) {
 		args = append(args, "--volume", expanded)
 	}
 
+	// Bind-mount the mAInlined API key secret as read-only when configured.
+	// The container path is fixed at /run/contained/secrets/mainlined_api_key
+	// so enforcement hooks can always find it at a well-known location.
+	if r.mainlinedURL != "" {
+		secretPath, err := mainlinedSecretPath(r.mainlinedURL, home)
+		if err == nil {
+			if _, statErr := os.Stat(secretPath); statErr == nil {
+				args = append(args, "--volume",
+					secretPath+":/run/contained/secrets/mainlined_api_key:ro",
+				)
+			}
+		}
+	}
+
 	args = append(args, r.cfg.Image)
 	return args, nil
+}
+
+// mainlinedSecretPath derives the host-side secrets file path from a mAInlined
+// scope URL. The path is ~/.contained/secrets/<org>-<scope>.
+func mainlinedSecretPath(rawURL, home string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	path := strings.Trim(u.Path, "/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", fmt.Errorf("invalid mainlined URL path: %q", u.Path)
+	}
+	return filepath.Join(home, ".contained", "secrets", parts[0]+"-"+parts[1]), nil
 }
 
 // expandHome replaces a leading ~ in s with the provided home directory.

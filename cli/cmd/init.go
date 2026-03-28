@@ -14,7 +14,9 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"contained.dev/cli/internal/docker"
+	"contained.dev/cli/internal/mainlined"
 	"contained.dev/cli/internal/manifest"
+	"contained.dev/cli/internal/oidc"
 	"contained.dev/cli/internal/scaffold"
 	"contained.dev/cli/internal/sigstore"
 )
@@ -63,7 +65,10 @@ var (
 
 func init() {
 	initCmd.Flags().StringVar(&initManifestPath, "manifest", "", "Path to manifest.yaml to bake into the image")
-	initCmd.Flags().StringVar(&initmAInlinedURL, "mAInlined", "", "mAInlined URL to fetch manifest from")
+	initCmd.Flags().StringVar(&initmAInlinedURL, "mainlined", "", "mAInlined scope URL to register with (e.g. https://mainlined.example.com/org/scope)")
+	// Accept the stylised form --mAInlined as an alias so both spellings work.
+	initCmd.Flags().StringVar(&initmAInlinedURL, "mAInlined", "", "alias for --mainlined")
+	_ = initCmd.Flags().MarkHidden("mAInlined")
 	initCmd.Flags().BoolVarP(&initRebuild, "rebuild", "r", false, "Force Docker image rebuild")
 	initCmd.Flags().BoolVarP(&initForce, "force", "f", false, "Re-initialise even if workspace already exists")
 	initCmd.Flags().StringSliceVar(&initEcosystem, "ecosystem", nil, "Print a repo manifest starter for these ecosystem(s) and exit (go, node, python, typescript; comma-separated or repeated)")
@@ -96,18 +101,81 @@ func runInit(_ *cobra.Command, args []string) error {
 	var manifestContent string
 	var m *manifest.Manifest
 
+	// idToken holds the OIDC ID token obtained during mAInlined registration.
+	// It may be reused for Sigstore signing to avoid a second browser prompt.
+	var idToken string
+
+	// mAInlinedParsed is non-nil when --mainlined was supplied; it drives the
+	// deferred registration for the --manifest + --mainlined combined flow.
+	var mAInlinedParsed *mainlined.ParsedURL
+
 	switch {
 	case initmAInlinedURL != "":
-		token := os.Getenv("mAInlined_TOKEN")
-		dim.Printf("  Fetching manifest from %s …\n", initmAInlinedURL)
-		m, err = manifest.FetchFromURL(initmAInlinedURL, token)
+		// Parse the mAInlined URL early so any format error surfaces immediately.
+		p, err := mainlined.ParseURL(initmAInlinedURL)
 		if err != nil {
-			return fmt.Errorf("fetching manifest: %w", err)
+			return fmt.Errorf("invalid --mainlined URL: %w", err)
 		}
-		// Re-serialise for baking into the image.
-		manifestContent, err = manifest.Serialise(m)
+
+		// Obtain the OIDC ID token (browser flow or SIGSTORE_ID_TOKEN env var).
+		dim.Printf("  Obtaining OIDC token for mAInlined …\n")
+		idToken, err = oidc.GetIDToken(oidc.SigstoreIssuer, oidc.SigstoreClientID, []string{"openid", "email"})
 		if err != nil {
-			return err
+			return fmt.Errorf("OIDC authentication: %w", err)
+		}
+
+		if initManifestPath != "" {
+			// ── Flow B: --manifest + --mainlined ──────────────────────────────
+			// Load the local manifest first. Registration (which computes the
+			// manifest hash) is deferred until after the repo manifest merge and
+			// image-tag derivation so the hash covers the fully-merged manifest.
+			raw, err := os.ReadFile(initManifestPath)
+			if err != nil {
+				return fmt.Errorf("reading manifest %s: %w", initManifestPath, err)
+			}
+			m, err = manifest.Parse(raw)
+			if err != nil {
+				return fmt.Errorf("parsing manifest: %w", err)
+			}
+			if err := manifest.Validate(m); err != nil {
+				return fmt.Errorf("manifest validation: %w", err)
+			}
+			manifestContent = string(raw)
+			dim.Printf("  Using manifest: %s\n\n", initManifestPath)
+			mAInlinedParsed = &p // registration runs after merge/image-tag steps
+
+		} else {
+			// ── Flow A: --mainlined alone (bootstrap) ──────────────────────────
+			// No local manifest — register immediately with an empty-manifest hash.
+			// The server's policy_yaml response becomes the base manifest.
+			dim.Printf("  Registering with mAInlined (%s/%s) …\n", p.Org, p.Scope)
+			reg, err := mainlined.Register(p, idToken, mainlined.SystemURI(p.Org, p.Scope), mainlined.ManifestHashEmpty)
+			if err != nil {
+				return fmt.Errorf("mAInlined registration: %w", err)
+			}
+			keyPath, err := mainlined.StoreAPIKey(p.Org, p.Scope, reg.APIKey)
+			if err != nil {
+				return fmt.Errorf("storing mAInlined API key: %w", err)
+			}
+			dim.Printf("  API key written to %s\n", keyPath)
+
+			m, err = manifest.Parse([]byte(reg.PolicyYAML))
+			if err != nil {
+				return fmt.Errorf("parsing mAInlined policy_yaml: %w", err)
+			}
+			if err := manifest.Validate(m); err != nil {
+				return fmt.Errorf("mAInlined policy_yaml validation: %w", err)
+			}
+			m.Mainlined = manifest.MainlinedSection{
+				URL:           initmAInlinedURL,
+				PolicyRef:     reg.PolicyRef,
+				PolicyVersion: reg.PolicyVersion,
+				PolicyYAML:    reg.PolicyYAML,
+			}
+			manifestContent, err = manifest.Serialise(m)
+			if err != nil {
+				return err
+			}
 		}
 
 	case initManifestPath != "":
@@ -127,6 +195,9 @@ func runInit(_ *cobra.Command, args []string) error {
 	}
 
 	// Merge repo-level manifest (ecosystems + QA checks) if present.
+	// MergeRepoManifest is always called (even with nil repo) because it
+	// normalises toolchain constraint strings like ">= 1.24" to concrete
+	// install versions like "1.24" before they reach GenerateToolchainsScript.
 	repoManifest, err := manifest.LoadRepoManifest(target)
 	if err != nil {
 		return fmt.Errorf("repo manifest: %w", err)
@@ -135,15 +206,17 @@ func runInit(_ *cobra.Command, args []string) error {
 		if err := manifest.ValidateRepoManifest(repoManifest); err != nil {
 			return fmt.Errorf("repo manifest validation: %w", err)
 		}
-		m, err = manifest.MergeRepoManifest(m, repoManifest)
-		if err != nil {
-			return fmt.Errorf("merging repo manifest: %w", err)
-		}
-		// Re-serialise so the merged state is what gets baked into the image.
-		manifestContent, err = manifest.Serialise(m)
-		if err != nil {
-			return err
-		}
+	}
+	m, err = manifest.MergeRepoManifest(m, repoManifest)
+	if err != nil {
+		return fmt.Errorf("merging repo manifest: %w", err)
+	}
+	// Re-serialise so the merged state is what gets baked into the image.
+	manifestContent, err = manifest.Serialise(m)
+	if err != nil {
+		return err
+	}
+	if repoManifest != nil {
 		dim.Printf("  Repo manifest merged: %d ecosystem(s), %d QA check(s).\n",
 			len(repoManifest.Ecosystems),
 			len(repoManifest.Policy.QA.Checks),
@@ -163,7 +236,38 @@ func runInit(_ *cobra.Command, args []string) error {
 		dim.Printf("  Image tag: %s (derived from workspace name)\n", m.Runtime.Docker.Image)
 	}
 
-	// Pull policy_ref/version from mAInlined if configured.
+	// ── Flow B: deferred mAInlined registration ─────────────────────────────
+	// When --manifest + --mainlined are both specified, registration happens here
+	// (after the repo manifest merge and image-tag derivation) so the manifest
+	// hash sent to the server covers the fully-merged, finalised manifest.
+	if mAInlinedParsed != nil {
+		hash := mainlined.HashManifest(manifestContent)
+		dim.Printf("  Registering with mAInlined (%s/%s) …\n", mAInlinedParsed.Org, mAInlinedParsed.Scope)
+		reg, err := mainlined.Register(*mAInlinedParsed, idToken,
+			mainlined.SystemURI(mAInlinedParsed.Org, mAInlinedParsed.Scope), hash)
+		if err != nil {
+			return fmt.Errorf("mAInlined registration: %w", err)
+		}
+		keyPath, err := mainlined.StoreAPIKey(mAInlinedParsed.Org, mAInlinedParsed.Scope, reg.APIKey)
+		if err != nil {
+			return fmt.Errorf("storing mAInlined API key: %w", err)
+		}
+		dim.Printf("  API key written to %s\n", keyPath)
+
+		m.Mainlined = manifest.MainlinedSection{
+			URL:           initmAInlinedURL,
+			PolicyRef:     reg.PolicyRef,
+			PolicyVersion: reg.PolicyVersion,
+			PolicyYAML:    reg.PolicyYAML,
+		}
+		manifestContent, err = manifest.Serialise(m)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Pull policy_ref/version from the legacy policy.mAInlined section if configured.
+	// This is a no-op for manifests that use the new top-level mainlined: section.
 	manifestContent = docker.PolicyPull(manifestContent)
 
 	// Build managed-settings.json from the manifest.
@@ -218,6 +322,7 @@ func runInit(_ *cobra.Command, args []string) error {
 			m.Policy.Sigstore.RekorURL,
 			m.Policy.Sigstore.FulcioURL,
 			bundleDest,
+			idToken, // reuse mAInlined OIDC token (aud=sigstore); "" = cosign drives its own flow
 		)
 		if err != nil {
 			fmt.Printf(" warning\n  Warning: image signing failed — workspace will function but lacks Sigstore provenance.\n  %v\n", err)

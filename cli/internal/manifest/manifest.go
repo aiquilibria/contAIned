@@ -15,6 +15,16 @@ type Manifest struct {
 	Agent                AgentConfig             `yaml:"agent"`
 	Policy               PolicyConfig            `yaml:"policy"`
 	EcosystemDefinitions map[string]EcosystemDef `yaml:"ecosystem_definitions,omitempty"`
+	Mainlined            MainlinedSection        `yaml:"mainlined,omitempty"`
+}
+
+// MainlinedSection records the mAInlined registration result baked into the
+// manifest so enforcement hooks can operate entirely offline.
+type MainlinedSection struct {
+	URL           string `yaml:"url,omitempty"`
+	PolicyRef     string `yaml:"policy_ref,omitempty"`
+	PolicyVersion string `yaml:"policy_version,omitempty"`
+	PolicyYAML    string `yaml:"policy_yaml,omitempty"`
 }
 
 // EcosystemDef describes what an ecosystem label means in terms of toolchain

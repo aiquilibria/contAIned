@@ -17,11 +17,15 @@ import (
 // (keyless OIDC flow). Writes the bundle to bundleDest and returns a Provenance
 // record parsed from the resulting bundle.
 //
+// If idToken is non-empty it is passed to cosign via the SIGSTORE_ID_TOKEN
+// environment variable so the OIDC browser flow is skipped — useful when a
+// token was already obtained during mAInlined registration.
+//
 // Requires the cosign binary on the operator's PATH or a well-known install
 // location. This is a known limitation; see the package comment for context.
 //
 // stderr is passed through so the operator can complete the OIDC browser flow.
-func SignImage(image, rekorURL, fulcioURL, bundleDest string) (*Provenance, error) {
+func SignImage(image, rekorURL, fulcioURL, bundleDest, idToken string) (*Provenance, error) {
 	cosignBin, err := FindCosign()
 	if err != nil {
 		return nil, err
@@ -65,9 +69,15 @@ func SignImage(image, rekorURL, fulcioURL, bundleDest string) (*Provenance, erro
 		digestFile.Name(),
 	)
 	// Pass stdin/stdout/stderr through so the OIDC browser/device flow works.
+	// When an ID token is available (e.g. from mAInlined registration), inject
+	// it via SIGSTORE_ID_TOKEN so cosign skips its own browser prompt.
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = os.Environ()
+	if idToken != "" {
+		cmd.Env = append(cmd.Env, "SIGSTORE_ID_TOKEN="+idToken)
+	}
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("cosign sign-blob failed: %w", err)
 	}
