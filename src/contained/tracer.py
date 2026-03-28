@@ -20,6 +20,7 @@ import sqlite3
 import threading as _threading
 import time
 import uuid
+import yaml
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -135,7 +136,9 @@ CREATE TABLE IF NOT EXISTS policy_snapshots (
     manifest_hash  TEXT    NOT NULL,
     manifest_text  TEXT    NOT NULL,   -- full YAML of /etc/contained/manifest.yaml
     provenance     TEXT    NOT NULL,   -- provenance snapshot at container startup
-    captured_at    INTEGER NOT NULL    -- Unix ms (taken immediately at session open)
+    captured_at    INTEGER NOT NULL,   -- Unix ms (taken immediately at session open)
+    policy_ref     TEXT,               -- mainlined.policy_ref from manifest (mAInlined git SHA)
+    policy_version TEXT                -- mainlined.policy_version from manifest
 );
 
 CREATE INDEX IF NOT EXISTS idx_policy_snapshots_unit ON policy_snapshots(work_unit_id);
@@ -521,6 +524,12 @@ class contAInedTracer:
             "ALTER TABLE tasks ADD COLUMN transcript_path TEXT",
             "ALTER TABLE work_units RENAME COLUMN branch TO base_branch",
             "ALTER TABLE work_units ADD COLUMN head_branch TEXT",
+            # Phase 2 — mAInlined policy binding in proof chain
+            "ALTER TABLE policy_snapshots ADD COLUMN policy_ref TEXT",
+            "ALTER TABLE policy_snapshots ADD COLUMN policy_version TEXT",
+            # Phase 2 — ATP Exchange submission timestamps
+            "ALTER TABLE tasks ADD COLUMN atp_depot_submitted_at INTEGER",
+            "ALTER TABLE tasks ADD COLUMN atp_committed_at INTEGER",
         ]
         for sql in migrations:
             try:
@@ -942,6 +951,17 @@ class contAInedTracer:
             manifest_text = ""
         manifest_hash = hashlib.sha256(manifest_text.encode()).hexdigest()
 
+        # Extract mAInlined policy_ref and policy_version for proof chain binding.
+        policy_ref: str = ""
+        policy_version: str = ""
+        try:
+            manifest_data = yaml.safe_load(manifest_text) or {}
+            mainlined = manifest_data.get("mainlined") or {}
+            policy_ref = mainlined.get("policy_ref") or ""
+            policy_version = mainlined.get("policy_version") or ""
+        except Exception:
+            pass
+
         try:
             provenance_text = Path(provenance_path).read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -953,10 +973,14 @@ class contAInedTracer:
                 """
                 INSERT INTO policy_snapshots
                     (work_unit_id, session_id, manifest_hash,
-                     manifest_text, provenance, captured_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                     manifest_text, provenance, captured_at,
+                     policy_ref, policy_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (work_unit_id, session_id, manifest_hash, manifest_text, provenance_text, now_ms),
+                (
+                    work_unit_id, session_id, manifest_hash, manifest_text,
+                    provenance_text, now_ms, policy_ref or None, policy_version or None,
+                ),
             )
 
     def record_qa_result(self, work_unit_id: str, result_dict: dict) -> None:
@@ -1573,6 +1597,157 @@ class contAInedTracer:
                 "status": "success" if qa_passed else "failed",
                 "error": None,
             },
+        }
+
+    # ------------------------------------------------------------------
+    # ATP cryptographic hashing
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _canonical_json(obj: object) -> bytes:
+        """Deterministic JSON serialization suitable for hashing.
+
+        Uses sorted keys and minimal separators so the same logical object
+        always produces the same byte sequence regardless of insertion order.
+        """
+        return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+
+    def compute_invocation_hash(self, invocation: dict) -> str:
+        """SHA-256 of the canonical invocation object.
+
+        Per ATP spec, *invocation.input* must include ``mAInlined_policy_ref``
+        and ``mAInlined_policy_version`` (read from the policy snapshot) so
+        any policy change between sessions produces a different hash.
+        """
+        return hashlib.sha256(self._canonical_json(invocation)).hexdigest()
+
+    def compute_outcome_hash(self, outcome: dict) -> str:
+        """SHA-256 of the canonical outcome object."""
+        return hashlib.sha256(self._canonical_json(outcome)).hexdigest()
+
+    def compute_dependencies_hash(self, dependencies: list) -> str:
+        """SHA-256 of the canonical dependencies array."""
+        return hashlib.sha256(self._canonical_json(dependencies)).hexdigest()
+
+    # ------------------------------------------------------------------
+    # ATP Full Proof and Proof Sketch assembly
+    # ------------------------------------------------------------------
+
+    def assemble_proof(self, work_unit_id: str) -> dict:
+        """Assemble the ATP Full Proof JSON for *work_unit_id*.
+
+        Wraps :meth:`assemble_payload` with the ATP envelope fields
+        (``atp_metadata``, ``dependencies``, ``cryptography``, ``timestamp``,
+        ``storage``) required by the depot submission API.
+
+        ``invocation.input`` is extended with ``mAInlined_policy_ref`` and
+        ``mAInlined_policy_version`` from the latest policy snapshot so the
+        three hashes cryptographically bind the mAInlined policy version.
+        """
+        payload = self.assemble_payload(work_unit_id)
+
+        # Fetch the latest policy snapshot to get policy_ref/version and
+        # manifest-derived system_uri for atp_metadata.
+        ps_row = self.conn.execute(
+            """
+            SELECT manifest_text, policy_ref, policy_version
+            FROM   policy_snapshots
+            WHERE  work_unit_id = ?
+            ORDER  BY captured_at DESC
+            LIMIT  1
+            """,
+            (work_unit_id,),
+        ).fetchone()
+
+        policy_ref = ""
+        policy_version = ""
+        system_uri = "contained://unknown/unknown"
+        if ps_row:
+            policy_ref = ps_row[1] or ""
+            policy_version = ps_row[2] or ""
+            try:
+                manifest_data = yaml.safe_load(ps_row[0]) or {}
+                mainlined = manifest_data.get("mainlined") or {}
+                url = mainlined.get("url") or ""
+                # Derive system_uri from mainlined URL: contained://<org>/<scope>
+                # URL path is expected to end in /<org>/<scope>
+                parts = [p for p in url.rstrip("/").split("/") if p]
+                if len(parts) >= 2:
+                    system_uri = f"contained://{parts[-2]}/{parts[-1]}"
+            except Exception:
+                pass
+
+        wu_row = self.conn.execute(
+            "SELECT ended_at FROM tasks WHERE session_id IN "
+            "(SELECT session_id FROM work_unit_sessions WHERE work_unit_id = ?) "
+            "ORDER BY ended_at DESC LIMIT 1",
+            (work_unit_id,),
+        ).fetchone()
+        ended_at_ms = wu_row[0] if wu_row and wu_row[0] else int(time.time() * 1000)
+        ended_at_iso = datetime.fromtimestamp(ended_at_ms / 1000, tz=timezone.utc).isoformat()
+        expires_iso = datetime.fromtimestamp(
+            ended_at_ms / 1000 + 90 * 86400, tz=timezone.utc
+        ).isoformat()
+
+        # Inject policy binding into invocation.input before hashing.
+        invocation = payload["invocation"]
+        invocation["input"]["mAInlined_policy_ref"] = policy_ref
+        invocation["input"]["mAInlined_policy_version"] = policy_version
+
+        outcome = payload["outcome"]
+        prompt = invocation["input"].get("prompt") or ""
+
+        # Claude API is an undeclared dependency until an ATP-compliant wrapper exists.
+        dependencies: list = []
+
+        return {
+            "atp_metadata": {
+                "spec_version": "0.1.0",
+                "spec_uri": "https://atp.aiquilibria.com/spec/v0.1.0",
+                "system_uri": system_uri,
+                "system_type": "agent",
+                "task_id": work_unit_id,
+                "classification": {
+                    "description": prompt[:200],
+                    "ontology": {
+                        "ontology_uri": "https://atp.aiquilibria.com/ontology/v0.1.0",
+                        "occupation": "15-1252.00",
+                        "work_activities": ["4.A.3.b.1"],
+                        "capabilities": ["code-generation", "code-debugging"],
+                    },
+                },
+            },
+            "invocation": invocation,
+            "outcome": outcome,
+            "dependencies": dependencies,
+            "cryptography": {
+                "algorithm": "SHA-256",
+                "invocation_hash": self.compute_invocation_hash(invocation),
+                "outcome_hash": self.compute_outcome_hash(outcome),
+                "dependencies_hash": self.compute_dependencies_hash(dependencies),
+            },
+            "timestamp": ended_at_iso,
+            "storage": {
+                "created_at": ended_at_iso,
+                "ttl_days": 90,
+                "expires_at": expires_iso,
+            },
+        }
+
+    def assemble_proof_sketch(self, work_unit_id: str) -> dict:
+        """Assemble the ATP Proof Sketch for Exchange commitment.
+
+        Contains ``atp_metadata``, ``dependencies``, and ``cryptography``
+        (the three hashes) only — no prompt, response, or file content.
+        A challenger recomputes the hashes from the full proof and compares
+        against the sketch to detect any tampering.
+        """
+        proof = self.assemble_proof(work_unit_id)
+        return {
+            "atp_metadata": proof["atp_metadata"],
+            "dependencies": proof["dependencies"],
+            "cryptography": proof["cryptography"],
+            "timestamp": proof["timestamp"],
         }
 
     def set_task_transcript_path(self, session_id: str, transcript_path: str) -> None:
