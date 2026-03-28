@@ -20,11 +20,12 @@ import sqlite3
 import threading as _threading
 import time
 import uuid
-import yaml
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+import yaml
 
 # ---------------------------------------------------------------------------
 # Schema DDL
@@ -978,8 +979,14 @@ class contAInedTracer:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    work_unit_id, session_id, manifest_hash, manifest_text,
-                    provenance_text, now_ms, policy_ref or None, policy_version or None,
+                    work_unit_id,
+                    session_id,
+                    manifest_hash,
+                    manifest_text,
+                    provenance_text,
+                    now_ms,
+                    policy_ref or None,
+                    policy_version or None,
                 ),
             )
 
