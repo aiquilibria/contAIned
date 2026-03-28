@@ -43,10 +43,10 @@ func findDocker() (string, error) {
 
 // Runner orchestrates `docker run` for a contAIned session.
 type Runner struct {
-	cfg           manifest.DockerConfig
-	workspace     string
-	policy        manifest.PolicyConfig
-	mainlinedURL  string // non-empty when mAInlined is configured; drives secrets mount
+	cfg          manifest.DockerConfig
+	workspace    string
+	policy       manifest.PolicyConfig
+	mainlinedURL string // non-empty when mAInlined is configured; drives secrets mount
 }
 
 // New creates a Runner for the given manifest and workspace root.
