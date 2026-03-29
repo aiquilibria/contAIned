@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,24 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 			"api.anthropic.com",
 			"code.claude.com",
 			"docs.anthropic.com",
+		}
+	}
+
+	// Ensure the mAInlined host is in the allow-list. When the manifest already
+	// has an explicit domain list, InjectMaInlinedDomain will have added it
+	// before this call (via init.go), so the loop below is typically a no-op.
+	// For manifests using the default empty list the domain must still be added
+	// to the local allowedDomains slice (which holds the hardcoded defaults).
+	if host := maInlinedHostname(m); host != "" {
+		alreadyPresent := false
+		for _, d := range allowedDomains {
+			if d == host {
+				alreadyPresent = true
+				break
+			}
+		}
+		if !alreadyPresent {
+			allowedDomains = append(allowedDomains, host)
 		}
 	}
 
@@ -463,6 +482,69 @@ func nestedMap(m map[string]any, keys ...string) (map[string]any, bool) {
 		cur = next
 	}
 	return cur, true
+}
+
+// InjectMaInlinedDomain appends the mAInlined hostname to
+// m.Policy.Network.AllowedDomains when an explicit domain list is already
+// configured, keeping the on-disk manifest in sync with managed-settings.json.
+// No-op when the list is empty (BuildManagedSettings applies its own defaults
+// and handles the injection there), when the domain is already present, or
+// when the resolved URL is loopback.
+func InjectMaInlinedDomain(m *manifest.Manifest) {
+	if len(m.Policy.Network.AllowedDomains) == 0 {
+		return
+	}
+	host := maInlinedHostname(m)
+	if host == "" {
+		return
+	}
+	for _, d := range m.Policy.Network.AllowedDomains {
+		if d == host {
+			return
+		}
+	}
+	m.Policy.Network.AllowedDomains = append(m.Policy.Network.AllowedDomains, host)
+}
+
+// maInlinedHostname returns the non-loopback hostname from the mAInlined URL,
+// preferring policy_yaml's policy.mAInlined.url (Docker-network alias) over
+// mainlined.url (host-side bootstrap URL that may be localhost). Returns "".
+func maInlinedHostname(m *manifest.Manifest) string {
+	rawURL := extractPolicyMainlinedURL(m.Mainlined.PolicyYAML)
+	if rawURL == "" {
+		rawURL = m.Mainlined.URL
+	}
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	host := u.Hostname()
+	if host == "" || host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return ""
+	}
+	return host
+}
+
+// extractPolicyMainlinedURL parses the policy_yaml field of the manifest and
+// returns the mAInlined URL declared inside it (policy.mAInlined.url), or ""
+// if absent or unparseable. This URL is the Docker-network-reachable address
+// (e.g. "http://mainlined:8080") as opposed to mainlined.url which is the
+// host-side bootstrap URL and may point to localhost.
+func extractPolicyMainlinedURL(policyYAML string) string {
+	if policyYAML == "" {
+		return ""
+	}
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(policyYAML), &raw); err != nil {
+		return ""
+	}
+	pol, _ := raw["policy"].(map[string]any)
+	ml, _ := pol["mAInlined"].(map[string]any)
+	u, _ := ml["url"].(string)
+	return u
 }
 
 func stringVal(v any) string {

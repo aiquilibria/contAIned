@@ -333,6 +333,132 @@ func TestGenerateDepsScript_StartsWithShebang(t *testing.T) {
 	}
 }
 
+// ── extractPolicyMainlinedURL ─────────────────────────────────────────────────
+
+func TestExtractPolicyMainlinedURL_Empty(t *testing.T) {
+	if got := extractPolicyMainlinedURL(""); got != "" {
+		t.Errorf("expected empty, got %q", got)
+	}
+}
+
+func TestExtractPolicyMainlinedURL_Present(t *testing.T) {
+	policyYAML := `
+policy:
+  mAInlined:
+    url: "http://mainlined:8080"
+    policy_name: "default"
+`
+	got := extractPolicyMainlinedURL(policyYAML)
+	if got != "http://mainlined:8080" {
+		t.Errorf("expected %q, got %q", "http://mainlined:8080", got)
+	}
+}
+
+func TestExtractPolicyMainlinedURL_MissingSection(t *testing.T) {
+	policyYAML := "policy:\n  network:\n    enabled: true\n"
+	if got := extractPolicyMainlinedURL(policyYAML); got != "" {
+		t.Errorf("expected empty when section absent, got %q", got)
+	}
+}
+
+func TestBuildManagedSettings_mAInlinedDomainFromPolicyYAML(t *testing.T) {
+	m := baseManifest()
+	m.Mainlined.URL = "http://localhost:8080/aiquilibria/default" // should be skipped
+	m.Mainlined.PolicyYAML = "policy:\n  mAInlined:\n    url: \"http://mainlined:8080\"\n"
+
+	settings := parsedSettings(t, m)
+
+	// Check sandbox network allowedDomains.
+	sandbox := settings["sandbox"].(map[string]any)
+	network := sandbox["network"].(map[string]any)
+	domains := network["allowedDomains"].([]any)
+	found := false
+	for _, d := range domains {
+		if d.(string) == "mainlined" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected 'mainlined' in sandbox.network.allowedDomains, got %v", domains)
+	}
+
+	// Also check WebFetch allow rule.
+	perms := settings["permissions"].(map[string]any)
+	allow := perms["allow"].([]any)
+	foundWF := false
+	for _, r := range allow {
+		if r.(string) == "WebFetch(domain:mainlined)" {
+			foundWF = true
+			break
+		}
+	}
+	if !foundWF {
+		t.Errorf("expected WebFetch(domain:mainlined) in permissions.allow, got %v", allow)
+	}
+}
+
+func TestBuildManagedSettings_mAInlinedLocalhostNotAdded(t *testing.T) {
+	m := baseManifest()
+	m.Mainlined.URL = "http://localhost:8080/path"
+	// No policy_yaml — falls back to URL which is localhost, should be skipped.
+
+	settings := parsedSettings(t, m)
+	sandbox := settings["sandbox"].(map[string]any)
+	network := sandbox["network"].(map[string]any)
+	domains := network["allowedDomains"].([]any)
+	for _, d := range domains {
+		if d.(string) == "localhost" {
+			t.Error("localhost should not appear in allowedDomains")
+		}
+	}
+}
+
+// ── InjectMaInlinedDomain ─────────────────────────────────────────────────────
+
+func TestInjectMaInlinedDomain_EmptyList_NoOp(t *testing.T) {
+	m := baseManifest()
+	m.Mainlined.PolicyYAML = "policy:\n  mAInlined:\n    url: \"http://mainlined:8080\"\n"
+	InjectMaInlinedDomain(m)
+	if len(m.Policy.Network.AllowedDomains) != 0 {
+		t.Error("should not modify empty domain list (defaults path)")
+	}
+}
+
+func TestInjectMaInlinedDomain_AddsHostname(t *testing.T) {
+	m := baseManifest()
+	m.Policy.Network.AllowedDomains = []string{"api.anthropic.com"}
+	m.Mainlined.URL = "http://localhost:8080/path"
+	m.Mainlined.PolicyYAML = "policy:\n  mAInlined:\n    url: \"http://mainlined:8080\"\n"
+	InjectMaInlinedDomain(m)
+	last := m.Policy.Network.AllowedDomains[len(m.Policy.Network.AllowedDomains)-1]
+	if last != "mainlined" {
+		t.Errorf("expected 'mainlined' appended, got %q", last)
+	}
+}
+
+func TestInjectMaInlinedDomain_Idempotent(t *testing.T) {
+	m := baseManifest()
+	m.Policy.Network.AllowedDomains = []string{"api.anthropic.com", "mainlined"}
+	m.Mainlined.PolicyYAML = "policy:\n  mAInlined:\n    url: \"http://mainlined:8080\"\n"
+	before := len(m.Policy.Network.AllowedDomains)
+	InjectMaInlinedDomain(m)
+	if len(m.Policy.Network.AllowedDomains) != before {
+		t.Error("should not add duplicate domain")
+	}
+}
+
+func TestInjectMaInlinedDomain_LocalhostSkipped(t *testing.T) {
+	m := baseManifest()
+	m.Policy.Network.AllowedDomains = []string{"api.anthropic.com"}
+	m.Mainlined.URL = "http://localhost:8080/path"
+	before := len(m.Policy.Network.AllowedDomains)
+	InjectMaInlinedDomain(m)
+	if len(m.Policy.Network.AllowedDomains) != before {
+		t.Error("localhost URL should not add any domain")
+	}
+}
+
 // ── PolicyPull ────────────────────────────────────────────────────────────────
 
 func TestPolicyPull_NomAInlinedURL_ReturnsOriginal(t *testing.T) {

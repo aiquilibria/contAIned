@@ -382,8 +382,36 @@ try:
                     _manifest_path = Path(cwd) / ".contAIned" / "manifest.yaml"
                     if _manifest_path.exists():
                         import yaml as _yaml  # noqa: PLC0415
+                        from urllib.parse import urlparse, urlunparse  # noqa: PLC0415
                         _manifest = _yaml.safe_load(_manifest_path.read_text()) or {}
-                        _mAInlined_url = _manifest.get("runtime", {}).get("mAInlined", {}).get("url")
+                        _mainlined_sec = _manifest.get("mainlined", {})
+                        _bootstrap_url = _mainlined_sec.get("url", "")
+                        # Prefer the in-container URL from policy_yaml (Docker network
+                        # alias, e.g. "http://mainlined:8080") over mainlined.url which
+                        # is the host-side bootstrap URL and may point to localhost.
+                        # Graft the path from mainlined.url so the full submission
+                        # endpoint is preserved (e.g. /aiquilibria/default).
+                        _policy_base_url = ""
+                        _policy_yaml_str = _mainlined_sec.get("policy_yaml", "")
+                        if _policy_yaml_str:
+                            try:
+                                _policy_doc = _yaml.safe_load(_policy_yaml_str) or {}
+                                _policy_base_url = (
+                                    _policy_doc.get("policy", {})
+                                    .get("mAInlined", {})
+                                    .get("url", "")
+                                )
+                            except Exception:
+                                pass
+                        if _policy_base_url and _bootstrap_url:
+                            _pb = urlparse(_policy_base_url)
+                            _pf = urlparse(_bootstrap_url)
+                            _mAInlined_url = urlunparse((
+                                _pb.scheme, _pb.netloc,
+                                _pf.path, _pf.params, _pf.query, _pf.fragment,
+                            ))
+                        else:
+                            _mAInlined_url = _policy_base_url or _bootstrap_url
                     _mAInlined_key = os.environ.get("mAInlined_API_KEY")
                     if _mAInlined_url and _mAInlined_key:
                         import urllib.request  # noqa: PLC0415

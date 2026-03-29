@@ -293,6 +293,15 @@ func runInit(_ *cobra.Command, args []string) error {
 	// This is a no-op for manifests that use the new top-level mainlined: section.
 	manifestContent = docker.PolicyPull(manifestContent)
 
+	// Inject the mAInlined hostname into the manifest's allowed_domains list so
+	// the on-disk manifest stays in sync with managed-settings.json.
+	// Re-serialise so the written manifest reflects the injection.
+	docker.InjectMaInlinedDomain(m)
+	manifestContent, err = manifest.Serialise(m)
+	if err != nil {
+		return err
+	}
+
 	// Build managed-settings.json from the manifest.
 	managedSettings, err := docker.BuildManagedSettings(m)
 	if err != nil {
