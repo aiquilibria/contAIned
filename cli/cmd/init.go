@@ -109,6 +109,11 @@ func runInit(_ *cobra.Command, args []string) error {
 	// deferred registration for the --manifest + --mainlined combined flow.
 	var mAInlinedParsed *mainlined.ParsedURL
 
+	// mAInlinedUsed and mAInlinedAPIKey are set whenever mAInlined registration
+	// completes (either flow). Used to intimate provenance after signing.
+	var mAInlinedUsed *mainlined.ParsedURL
+	var mAInlinedAPIKey string
+
 	switch {
 	case initmAInlinedURL != "":
 		// Parse the mAInlined URL early so any format error surfaces immediately.
@@ -158,6 +163,8 @@ func runInit(_ *cobra.Command, args []string) error {
 				return fmt.Errorf("storing mAInlined API key: %w", err)
 			}
 			dim.Printf("  API key written to %s\n", keyPath)
+			mAInlinedAPIKey = reg.APIKey
+			mAInlinedUsed = &p
 
 			m, err = manifest.Parse([]byte(reg.PolicyYAML))
 			if err != nil {
@@ -253,6 +260,8 @@ func runInit(_ *cobra.Command, args []string) error {
 			return fmt.Errorf("storing mAInlined API key: %w", err)
 		}
 		dim.Printf("  API key written to %s\n", keyPath)
+		mAInlinedAPIKey = reg.APIKey
+		mAInlinedUsed = mAInlinedParsed
 
 		m.Mainlined = manifest.MainlinedSection{
 			URL:           initmAInlinedURL,
@@ -339,6 +348,22 @@ func runInit(_ *cobra.Command, args []string) error {
 				fmt.Printf(" warning\n  Warning: post-sign verification failed: %v\n", verr)
 			} else {
 				fmt.Printf(" ok\n")
+			}
+			// Intimate provenance to mAInlined (fire-and-forget).
+			// Only when mAInlined was used for this init; skip when sigstore.enabled: false
+			// (already inside that guard) or when mAInlined was not configured.
+			if mAInlinedUsed != nil {
+				dim.Printf("  Intimating provenance to mAInlined …\n")
+				mainlined.IntimateProvenance(
+					*mAInlinedUsed,
+					mAInlinedAPIKey,
+					prov.ImageDigest,
+					prov.RekorLogIndex,
+					m.Policy.Sigstore.RekorURL,
+					prov.OperatorIdentity,
+					m.Mainlined.PolicyRef,
+					m.Mainlined.PolicyVersion,
+				)
 			}
 		}
 	}

@@ -183,3 +183,47 @@ func HashManifest(content string) string {
 	h := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", h)
 }
+
+// IntimateProvenance sends image-signing provenance to the mAInlined server
+// after a successful Sigstore signing. The call is fire-and-forget: errors
+// are printed to stderr but do not abort contained init.
+func IntimateProvenance(
+	p ParsedURL,
+	apiKey string,
+	imageDigest string,
+	rekorLogIndex int,
+	rekorURL string,
+	operatorIdentity string,
+	policyRef string,
+	policyVersion string,
+) {
+	payload, _ := json.Marshal(map[string]any{
+		"image_digest":      imageDigest,
+		"rekor_log_index":   rekorLogIndex,
+		"rekor_url":         rekorURL,
+		"operator_identity": operatorIdentity,
+		"policy_ref":        policyRef,
+		"policy_version":    policyVersion,
+	})
+
+	endpoint := fmt.Sprintf("%s/%s/%s/provenance", p.Server, p.Org, p.Scope)
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(payload))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  provenance intimation: build request: %v\n", err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  provenance intimation: %v\n", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		fmt.Fprintf(os.Stderr, "  provenance intimation: server returned %d: %s\n", resp.StatusCode, body)
+	}
+}
