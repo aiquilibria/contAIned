@@ -412,6 +412,8 @@ try:
                             ))
                         else:
                             _mAInlined_url = _policy_base_url or _bootstrap_url
+                    if _mAInlined_url:
+                        _mAInlined_url = _mAInlined_url.rstrip("/") + "/proof/submit"
                     _mAInlined_key = os.environ.get("mAInlined_API_KEY")
                     if _mAInlined_url and _mAInlined_key:
                         import urllib.request  # noqa: PLC0415
