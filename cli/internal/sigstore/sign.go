@@ -131,12 +131,21 @@ func SignImage(image, rekorURL, fulcioURL, bundleDest, idToken, policyRef, polic
 }
 
 // parseBundle extracts provenance fields from a cosign bundle JSON.
+// It handles both the legacy bundle format (verificationMaterial.certificate)
+// and the cosign v2 format (verificationMaterial.x509CertificateChain.certificates[0]).
 func parseBundle(imageDigest, rekorURL string, bundleJSON []byte) (*Provenance, error) {
 	var bundle struct {
 		VerificationMaterial struct {
+			// Legacy format (cosign v1 / bundle v0.1).
 			Certificate struct {
 				RawBytes string `json:"rawBytes"`
 			} `json:"certificate"`
+			// Current format (cosign v2 / bundle v0.2+).
+			X509CertificateChain struct {
+				Certificates []struct {
+					RawBytes string `json:"rawBytes"`
+				} `json:"certificates"`
+			} `json:"x509CertificateChain"`
 			TlogEntries []struct {
 				LogIndex       string `json:"logIndex"`
 				IntegratedTime string `json:"integratedTime"`
@@ -159,8 +168,18 @@ func parseBundle(imageDigest, rekorURL string, bundleJSON []byte) (*Provenance, 
 	signedAt := time.Unix(integratedTime, 0).UTC().Format(time.RFC3339)
 	rekorEntryURL := fmt.Sprintf("%s/api/v1/log/entries?logIndex=%d", rekorURL, logIndex)
 
+	// Resolve the certificate raw bytes: prefer x509CertificateChain (cosign v2+),
+	// fall back to the legacy certificate field (cosign v1).
+	rawBytes := bundle.VerificationMaterial.Certificate.RawBytes
+	if rawBytes == "" && len(bundle.VerificationMaterial.X509CertificateChain.Certificates) > 0 {
+		rawBytes = bundle.VerificationMaterial.X509CertificateChain.Certificates[0].RawBytes
+	}
+	if rawBytes == "" {
+		return nil, fmt.Errorf("bundle contains no certificate (checked certificate and x509CertificateChain)")
+	}
+
 	// Parse the Fulcio certificate for operator identity and OIDC issuer.
-	certDER, err := base64.StdEncoding.DecodeString(bundle.VerificationMaterial.Certificate.RawBytes)
+	certDER, err := base64.StdEncoding.DecodeString(rawBytes)
 	if err != nil {
 		return nil, fmt.Errorf("decoding certificate: %w", err)
 	}

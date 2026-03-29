@@ -173,10 +173,18 @@ func runInit(_ *cobra.Command, args []string) error {
 			if err := manifest.Validate(m); err != nil {
 				return fmt.Errorf("mAInlined policy_yaml validation: %w", err)
 			}
+			// The registration endpoint may omit policy_version even though the
+			// policy_yaml it returns contains it at policy.mAInlined.policy_version.
+			// PolicyConfig.mAInlined is unexported so yaml.v3 can't unmarshal into
+			// it; extract the version from the raw YAML string instead.
+			policyVersion := reg.PolicyVersion
+			if policyVersion == "" {
+				policyVersion = manifest.ExtractPolicyVersion(reg.PolicyYAML)
+			}
 			m.Mainlined = manifest.MainlinedSection{
 				URL:           initmAInlinedURL,
 				PolicyRef:     reg.PolicyRef,
-				PolicyVersion: reg.PolicyVersion,
+				PolicyVersion: policyVersion,
 				PolicyYAML:    reg.PolicyYAML,
 			}
 			manifestContent, err = manifest.Serialise(m)
@@ -263,10 +271,16 @@ func runInit(_ *cobra.Command, args []string) error {
 		mAInlinedAPIKey = reg.APIKey
 		mAInlinedUsed = mAInlinedParsed
 
+		// The registration endpoint may omit policy_version; extract it from
+		// the returned policy_yaml (at policy.mAInlined.policy_version) if so.
+		policyVersionB := reg.PolicyVersion
+		if policyVersionB == "" {
+			policyVersionB = manifest.ExtractPolicyVersion(reg.PolicyYAML)
+		}
 		m.Mainlined = manifest.MainlinedSection{
 			URL:           initmAInlinedURL,
 			PolicyRef:     reg.PolicyRef,
-			PolicyVersion: reg.PolicyVersion,
+			PolicyVersion: policyVersionB,
 			PolicyYAML:    reg.PolicyYAML,
 		}
 		manifestContent, err = manifest.Serialise(m)

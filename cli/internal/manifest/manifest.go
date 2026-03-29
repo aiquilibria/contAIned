@@ -156,6 +156,21 @@ type mAInlinedPolicy struct {
 	PolicyVersion string `yaml:"policy_version"`
 }
 
+// ExtractPolicyVersion extracts policy.mAInlined.policy_version from a raw
+// manifest YAML string via unstructured map access. This is necessary because
+// PolicyConfig.mAInlined is an unexported field that yaml.v3 cannot unmarshal
+// into via reflection.
+func ExtractPolicyVersion(yamlContent string) string {
+	var raw map[string]any
+	if err := yaml.Unmarshal([]byte(yamlContent), &raw); err != nil {
+		return ""
+	}
+	policy, _ := raw["policy"].(map[string]any)
+	mAInlined, _ := policy["mAInlined"].(map[string]any)
+	v, _ := mAInlined["policy_version"].(string)
+	return v
+}
+
 type SandboxConfig struct {
 	Enabled    bool            `yaml:"enabled"`
 	Filesystem FilesystemRules `yaml:"filesystem"`
