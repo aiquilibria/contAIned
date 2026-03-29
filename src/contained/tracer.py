@@ -1617,7 +1617,11 @@ class contAInedTracer:
         Uses sorted keys and minimal separators so the same logical object
         always produces the same byte sequence regardless of insertion order.
         """
-        return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        # Match Go's json.Marshal: UTF-8 output, sorted keys, compact separators,
+        # and HTML-safe escaping of <, >, & (Go does this by default).
+        raw = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        raw = raw.replace("<", r"\u003c").replace(">", r"\u003e").replace("&", r"\u0026")
+        return raw.encode("utf-8")
 
     def compute_invocation_hash(self, invocation: dict) -> str:
         """SHA-256 of the canonical invocation object.
@@ -1626,15 +1630,15 @@ class contAInedTracer:
         and ``mAInlined_policy_version`` (read from the policy snapshot) so
         any policy change between sessions produces a different hash.
         """
-        return hashlib.sha256(self._canonical_json(invocation)).hexdigest()
+        return "sha256:" + hashlib.sha256(self._canonical_json(invocation)).hexdigest()
 
     def compute_outcome_hash(self, outcome: dict) -> str:
         """SHA-256 of the canonical outcome object."""
-        return hashlib.sha256(self._canonical_json(outcome)).hexdigest()
+        return "sha256:" + hashlib.sha256(self._canonical_json(outcome)).hexdigest()
 
     def compute_dependencies_hash(self, dependencies: list) -> str:
         """SHA-256 of the canonical dependencies array."""
-        return hashlib.sha256(self._canonical_json(dependencies)).hexdigest()
+        return "sha256:" + hashlib.sha256(self._canonical_json(dependencies)).hexdigest()
 
     # ------------------------------------------------------------------
     # ATP Full Proof and Proof Sketch assembly

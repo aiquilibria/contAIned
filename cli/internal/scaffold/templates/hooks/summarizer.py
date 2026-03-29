@@ -13,7 +13,7 @@ Flow:
   4. Build provenance_log — append current container provenance to any existing
      entries so resumed tasks preserve the full signing history across rebuilds.
   5. Collect file diffs and action log for the operator summary UI.
-  6. If a git push happened this session: build_actions, assemble_payload, POST,
+  6. If a git push happened this session: build_actions, assemble_proof, POST,
      mark work unit pushed, open next work unit.
   7. Store transcript_path; set task status = closed.
   8. Block with a formatted summary so Claude surfaces it to the operator.
@@ -372,7 +372,7 @@ try:
             tracer.build_actions(_wu_id, [t for t in [_transcript_path] if t])
 
             try:
-                _payload = tracer.assemble_payload(_wu_id)
+                _payload = tracer.assemble_proof(_wu_id)
             except Exception:
                 _payload = None
 
