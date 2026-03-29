@@ -98,6 +98,9 @@ RUN if [ -n "$MANIFEST_CONTENT" ]; then \
 # Reads agent.model from the workspace manifest and execs claude directly.
 RUN cat <<'ENTRYPOINT_EOF' > /etc/contained/entrypoint.sh
 #!/bin/sh
+# If the workspace ships a src/ tree (e.g. the contAIned repo itself), prefer
+# it over the image-baked package so hook changes take effect without rebuilding.
+[ -d /workspace/src ] && export PYTHONPATH="/workspace/src${PYTHONPATH:+:$PYTHONPATH}"
 MODEL=$(/opt/contained-venv/bin/python3 -c "
 import yaml, sys
 try:

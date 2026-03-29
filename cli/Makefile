@@ -11,16 +11,20 @@ PLATFORMS := \
 	darwin/arm64 \
 	windows/amd64
 
-.PHONY: all build build-all release clean test vet
+.PHONY: all build build-all release clean test vet generate
 
 all: build
 
+## generate — regenerate the embedded Python source tree (run after editing src/)
+generate:
+	go generate $(MODULE)/internal/pysource
+
 ## build — compile for the current platform
-build:
+build: generate
 	go build $(LDFLAGS) -o $(DIST)/$(BINARY) .
 
 ## build-all — cross-compile for all supported platforms
-build-all: $(PLATFORMS)
+build-all: generate $(PLATFORMS)
 
 $(PLATFORMS):
 	$(eval OS   := $(word 1,$(subst /, ,$@)))
