@@ -9,17 +9,20 @@ You are helping the operator inspect or re-submit a contAIned work unit payload.
    units and ask the operator which one to inspect.
 2. If a work unit ID (or unambiguous prefix) is provided, call `get_payload` with that ID
    and display the payload JSON.
-3. Ask the operator whether they want to re-POST the payload. If yes:
-   - Read `.contAIned/manifest.yaml` and resolve the submission URL as follows:
-     - Prefer the in-container Docker network URL from `mainlined.policy_yaml`
-       (parsed as YAML; `policy.mAInlined.url`, e.g. `http://mainlined:8080`) as the
-       base — this avoids localhost resolution issues inside the container.
-     - Graft the path from `mainlined.url` (the host-side bootstrap URL) onto that base
-       so the org/workspace path (e.g. `/aiquilibria/default`) is preserved.
-     - If only one source is available, use whichever is present.
-   - Append `/proof/submit` to the resolved base URL.
-   - Read the API key from `/run/contained/secrets/mainlined_api_key`.
-   - POST the payload JSON to that endpoint with that key in the
-     `Authorization: Bearer` header.
+3. Ask the operator whether they want to re-POST the payload. If yes, run this
+   Python snippet via the Bash tool:
+
+   ```bash
+   python3 - <<'EOF'
+   from contained.payload import submit_proof_impl, _find_tracer_db
+   from pathlib import Path
+   db = _find_tracer_db(Path("."))
+   submit_proof_impl(db, "<work_unit_id>")
+   EOF
+   ```
+
+   `submit_proof_impl` resolves the submission URL from `.contAIned/manifest.yaml`,
+   reads the API key from `/run/contained/secrets/mainlined_api_key`, POSTs the proof,
+   and prints the HTTP response or an error message.
 
 $ARGUMENTS
