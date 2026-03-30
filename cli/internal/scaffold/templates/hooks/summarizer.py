@@ -49,9 +49,9 @@ if not session_id:
 # the DB sentinel below is unreliable in that case because set_task_status is
 # a bare UPDATE that silently no-ops when no row exists, so status never
 # becomes "closed" and the DB sentinel never fires.
+# NOTE: the sentinel is NOT checked here — it is evaluated after the tracer is
+# imported so we can verify there is no unprocessed push before exiting early.
 _sentinel_file = Path("/tmp/claude") / f".stop_done_{session_id[:16]}"
-if _sentinel_file.exists():
-    sys.exit(0)
 
 # ── Phase 1: QA checks ────────────────────────────────────────────────────────
 # Run qa.py inline before building the summary or showing the approval UI.
@@ -92,10 +92,35 @@ try:
     from contained.tracer import contAInedTracer  # noqa: PLC0415
     tracer = contAInedTracer(db_path)
 except Exception:
-    # If the tracer is unavailable the agent should still be allowed to stop.
+    # If the tracer is unavailable, fall back to the file sentinel and stop.
+    if _sentinel_file.exists():
+        sys.exit(0)
     sys.exit(0)
 
-# ── Sentinel: second Stop after Claude has already presented the summary ───────
+# ── Check for an unprocessed push ─────────────────────────────────────────────
+# Both sentinels below must yield to a pending push: if the session tree has a
+# successful GitPush event and the work unit is still open, we must not skip
+# the push-processing section — even if a previous Stop already ran.
+_has_push_to_process = False
+try:
+    if tracer.get_active_work_unit(session_id):
+        _sentinel_tree = tracer.tree_session_ids(session_id) or [session_id]
+        _sentinel_ph = ",".join("?" * len(_sentinel_tree))
+        _has_push_to_process = bool(
+            tracer.conn.execute(
+                f"SELECT 1 FROM audit_events WHERE session_id IN ({_sentinel_ph})"
+                " AND tool = 'GitPush' AND outcome = 'success' LIMIT 1",
+                _sentinel_tree,
+            ).fetchone()
+        )
+except Exception:
+    pass
+
+# ── File sentinel ──────────────────────────────────────────────────────────────
+if _sentinel_file.exists() and not _has_push_to_process:
+    sys.exit(0)
+
+# ── DB sentinel: second Stop after Claude has already presented the summary ───
 # The first pass stores the summary and blocks with it for Claude to format.
 # On the second Stop (after Claude has presented and stopped again), the task
 # is already "closed" — exit 0 so the agent stops cleanly.
@@ -103,7 +128,7 @@ try:
     _status_row = tracer.conn.execute(
         "SELECT status FROM tasks WHERE session_id = ?", (session_id,)
     ).fetchone()
-    if _status_row and _status_row[0] == "closed":
+    if _status_row and _status_row[0] == "closed" and not _has_push_to_process:
         sys.exit(0)
 except Exception:
     pass
