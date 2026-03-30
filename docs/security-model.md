@@ -278,9 +278,9 @@ When the operator enables Sigstore at `contAIned init` time, an additional accou
 After a successful image build, `contAIned init`:
 
 1. Retrieves the image's SHA256 digest from Docker.
-2. Signs that digest as a blob using `cosign sign-blob` (keyless, OIDC-based). This triggers a browser or device-flow authentication with the operator's OIDC provider (GitHub, Google, or any supported issuer).
+2. Constructs a JSON blob containing the image digest, mAInlined policy ref, and policy version, then signs that blob using `cosign sign-blob` (keyless, OIDC-based). **Only this JSON blob is signed — not the image layers or any registry artifact.** This triggers a browser or device-flow authentication with the operator's OIDC provider (GitHub, Google, or any supported issuer).
 3. Cosign submits the signature and the short-lived Fulcio certificate (which carries the operator's verified identity) to the Rekor append-only transparency log. The entry cannot be removed or modified.
-4. Writes `.contAIned/provenance.yaml` — a local pointer recording the image digest, Rekor log index and entry URL, operator identity, OIDC issuer, and signing timestamp.
+4. Writes `.contAIned/provenance.yaml` — a local record with fields ordered by the provenance hierarchy: operator identity and OIDC issuer → host workspace path and mAInlined URL → policy ref and version → image name and digest → Rekor log index, entry URL, signing timestamp, and the signed payload.
 5. Writes `.contAIned/provenance.bundle` — the cosign bundle required for offline verification.
 
 ### What is verifiable
@@ -293,6 +293,8 @@ After a successful image build, `contAIned init`:
 ### Scope and boundaries
 
 **The image is never distributed to a registry.** Sigstore signing here is a build-time provenance record for the local operator, not a supply-chain distribution mechanism. Scenarios where a signed image is shared across machines require a registry-based model and are out of scope.
+
+**Rebuilding the same Dockerfile produces a different digest.** Because the signed artifact is the local image digest (not a registry-pinned content address), rebuilding the image on a different machine — even from the same `Dockerfile` — will produce a different `sha256:` digest and the existing Rekor entry will not match. Each `contained init --rebuild` produces a new signature and a new Rekor entry.
 
 **Physical access to the machine is out of scope.** Consistent with the existing threat model, attacks requiring host OS compromise or physical device access are not addressed.
 

@@ -190,20 +190,26 @@ func HashManifest(content string) string {
 func IntimateProvenance(
 	p ParsedURL,
 	apiKey string,
+	operatorIdentity string,
+	hostWorkspace string,
+	mainlinedURL string,
+	policyRef string,
+	policyVersion string,
+	imageName string,
 	imageDigest string,
 	rekorLogIndex int,
 	rekorURL string,
-	operatorIdentity string,
-	policyRef string,
-	policyVersion string,
 ) {
 	payload, _ := json.Marshal(map[string]any{
+		"operator_identity": operatorIdentity,
+		"host_workspace":    hostWorkspace,
+		"mainlined_url":     mainlinedURL,
+		"policy_ref":        policyRef,
+		"policy_version":    policyVersion,
+		"image_name":        imageName,
 		"image_digest":      imageDigest,
 		"rekor_log_index":   rekorLogIndex,
 		"rekor_url":         rekorURL,
-		"operator_identity": operatorIdentity,
-		"policy_ref":        policyRef,
-		"policy_version":    policyVersion,
 	})
 
 	endpoint := fmt.Sprintf("%s/%s/%s/provenance", p.Server, p.Org, p.Scope)

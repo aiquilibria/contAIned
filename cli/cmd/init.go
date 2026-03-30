@@ -380,12 +380,15 @@ func runInit(_ *cobra.Command, args []string) error {
 				mainlined.IntimateProvenance(
 					*mAInlinedUsed,
 					mAInlinedAPIKey,
+					prov.OperatorIdentity,
+					target,
+					initmAInlinedURL,
+					m.Mainlined.PolicyRef,
+					m.Mainlined.PolicyVersion,
+					m.Runtime.Docker.Image,
 					prov.ImageDigest,
 					prov.RekorLogIndex,
 					m.Policy.Sigstore.RekorURL,
-					prov.OperatorIdentity,
-					m.Mainlined.PolicyRef,
-					m.Mainlined.PolicyVersion,
 				)
 			}
 		}

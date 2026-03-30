@@ -19,25 +19,30 @@ import (
 )
 
 // Provenance is the contents of .contAIned/provenance.yaml.
+// Fields are ordered to match the conceptual hierarchy:
+// operator → workspace → policy → image → Sigstore transparency log.
 type Provenance struct {
-	SchemaVersion int    `yaml:"schema_version"`
-	ImageDigest   string `yaml:"image_digest"`
+	SchemaVersion    int    `yaml:"schema_version"`
+	OperatorIdentity string `yaml:"operator_identity"`
+	OIDCIssuer       string `yaml:"oidc_issuer"`
+	HostWorkspace    string `yaml:"host_workspace,omitempty"`
+	MainlinedURL     string `yaml:"mainlined_url,omitempty"`
 	// PolicyRef and PolicyVersion are the mAInlined policy git commit SHA and
 	// schema version baked into the signed payload. Empty when mAInlined is not
 	// configured. Their presence in SignedPayload makes the mAInlined policy
 	// version cryptographically part of the Rekor transparency log entry.
 	PolicyRef     string `yaml:"policy_ref,omitempty"`
 	PolicyVersion string `yaml:"policy_version,omitempty"`
+	ImageName     string `yaml:"image_name,omitempty"`
+	ImageDigest   string `yaml:"image_digest"`
+	RekorLogIndex int    `yaml:"rekor_log_index"`
+	RekorEntryURL string `yaml:"rekor_entry_url"`
+	SignedAt      string `yaml:"signed_at"`
 	// SignedPayload is the canonical JSON blob that was passed to cosign
 	// sign-blob. Stored here so VerifyBundle can reconstruct the exact bytes
 	// without re-deriving them. Empty for legacy bundles produced before this
 	// field was introduced; those bundles used the raw image digest string.
-	SignedPayload    string `yaml:"signed_payload,omitempty"`
-	RekorLogIndex    int    `yaml:"rekor_log_index"`
-	RekorEntryURL    string `yaml:"rekor_entry_url"`
-	OperatorIdentity string `yaml:"operator_identity"`
-	OIDCIssuer       string `yaml:"oidc_issuer"`
-	SignedAt         string `yaml:"signed_at"`
+	SignedPayload string `yaml:"signed_payload,omitempty"`
 }
 
 // LoadProvenance reads and parses .contAIned/provenance.yaml.

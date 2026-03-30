@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"contained.dev/cli/internal/manifest"
+	"gopkg.in/yaml.v3"
 )
 
 var dockerSearchPaths = []string{
@@ -179,7 +180,7 @@ func (r *Runner) RunRepl() error {
 	args = args[:len(args)-1]
 
 	// Snapshot provenance files to a temp dir and mount read-only.
-	tmpDir, provArgs, err := provenance(r.workspace)
+	tmpDir, provArgs, err := provenance(r.workspace, image, r.mainlinedURL)
 	if err != nil {
 		return err
 	}
@@ -205,22 +206,53 @@ func (r *Runner) RunRepl() error {
 	return nil
 }
 
-// provenance copies provenance.yaml (and optionally provenance.bundle) from
-// the workspace to a temp directory and returns docker volume mount args for
-// them as read-only mounts. Returns ("", nil, nil) when no provenance files
-// are present.
-func provenance(workspace string) (tmpDir string, args []string, err error) {
-	provYAML := filepath.Join(workspace, ".contAIned", "provenance.yaml")
-	if _, err := os.Stat(provYAML); os.IsNotExist(err) {
-		return "", nil, nil
-	}
+// provenanceDoc is the ordered schema for /run/contained/provenance.yaml.
+// Field order matches the conceptual hierarchy: operator → workspace →
+// policy → image → Sigstore transparency log.
+type provenanceDoc struct {
+	SchemaVersion    int    `yaml:"schema_version"`
+	OperatorIdentity string `yaml:"operator_identity,omitempty"`
+	OIDCIssuer       string `yaml:"oidc_issuer,omitempty"`
+	HostWorkspace    string `yaml:"host_workspace,omitempty"`
+	MainlinedURL     string `yaml:"mainlined_url,omitempty"`
+	PolicyRef        string `yaml:"policy_ref,omitempty"`
+	PolicyVersion    string `yaml:"policy_version,omitempty"`
+	ImageName        string `yaml:"image_name,omitempty"`
+	ImageDigest      string `yaml:"image_digest,omitempty"`
+	RekorLogIndex    int64  `yaml:"rekor_log_index,omitempty"`
+	RekorEntryURL    string `yaml:"rekor_entry_url,omitempty"`
+	SignedAt         string `yaml:"signed_at,omitempty"`
+	SignedPayload    string `yaml:"signed_payload,omitempty"`
+}
 
+// provenance reads provenance.yaml from the workspace (if present), augments
+// it with runtime context (image name and host workspace path), writes the
+// result to a temp directory, and returns docker volume mount args for a
+// read-only bind-mount into the container. The optional provenance.bundle is
+// copied unchanged alongside it when present.
+func provenance(workspace, image, mainlinedURL string) (tmpDir string, args []string, err error) {
 	tmp, err := os.MkdirTemp("", "contained-prov-")
 	if err != nil {
 		return "", nil, fmt.Errorf("creating provenance temp dir: %w", err)
 	}
 
-	if err := copyFile(provYAML, filepath.Join(tmp, "provenance.yaml")); err != nil {
+	var doc provenanceDoc
+	provYAML := filepath.Join(workspace, ".contAIned", "provenance.yaml")
+	if data, readErr := os.ReadFile(provYAML); readErr == nil {
+		_ = yaml.Unmarshal(data, &doc)
+	} else {
+		doc.SchemaVersion = 1
+	}
+	doc.HostWorkspace = workspace
+	doc.MainlinedURL = mainlinedURL
+	doc.ImageName = image
+
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		os.RemoveAll(tmp)
+		return "", nil, fmt.Errorf("marshaling provenance: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "provenance.yaml"), out, 0o600); err != nil {
 		os.RemoveAll(tmp)
 		return "", nil, err
 	}
