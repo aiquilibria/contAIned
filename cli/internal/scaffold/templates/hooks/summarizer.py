@@ -414,7 +414,8 @@ try:
                             _mAInlined_url = _policy_base_url or _bootstrap_url
                     if _mAInlined_url:
                         _mAInlined_url = _mAInlined_url.rstrip("/") + "/proof/submit"
-                    _mAInlined_key = os.environ.get("mAInlined_API_KEY")
+                    _secret_key_path = Path("/run/contained/secrets/mainlined_api_key")
+                    _mAInlined_key = _secret_key_path.read_text().strip() if _secret_key_path.exists() else None
                     if _mAInlined_url and _mAInlined_key:
                         import urllib.request  # noqa: PLC0415
                         _req = urllib.request.Request(

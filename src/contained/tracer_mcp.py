@@ -223,7 +223,7 @@ def tool_get_payload(work_unit_id: str) -> str:
             if not row:
                 return f"Error: no work unit found with prefix '{work_unit_id}'."
             work_unit_id = row[0]
-        payload = tracer.assemble_payload(work_unit_id)
+        payload = tracer.assemble_proof(work_unit_id)
         return json.dumps(payload, indent=2, ensure_ascii=False)
     except ValueError as exc:
         return f"Error: {exc}"

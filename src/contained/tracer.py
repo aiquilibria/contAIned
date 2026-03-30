@@ -1009,13 +1009,26 @@ class contAInedTracer:
     def get_active_work_unit(self, session_id: str) -> Optional[str]:
         """
         Return the work_unit_id of the open work unit associated with
-        *session_id*, or None if not found.
+        *session_id* or any of its ancestor sessions, or None if not found.
+
+        Walks up the parent_session_id chain so post-compaction sessions
+        (which are not directly registered in work_unit_sessions) are still
+        linked to the work unit opened by the original session.
         """
         row = self.conn.execute(
             """
+            WITH RECURSIVE ancestors(sid) AS (
+                SELECT ? AS sid
+                UNION ALL
+                SELECT t.parent_session_id
+                FROM tasks t
+                JOIN ancestors ON t.session_id = ancestors.sid
+                WHERE t.parent_session_id IS NOT NULL
+            )
             SELECT wu.id FROM work_units wu
             JOIN work_unit_sessions wus ON wus.work_unit_id = wu.id
-            WHERE wus.session_id = ? AND wu.status = 'open'
+            JOIN ancestors a ON a.sid = wus.session_id
+            WHERE wu.status = 'open'
             ORDER BY wu.opened_at DESC LIMIT 1
             """,
             (session_id,),

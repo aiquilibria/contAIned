@@ -18,7 +18,8 @@ You are helping the operator inspect or re-submit a contAIned work unit payload.
        so the org/workspace path (e.g. `/aiquilibria/default`) is preserved.
      - If only one source is available, use whichever is present.
    - Append `/proof/submit` to the resolved base URL.
-   - POST the payload JSON to that endpoint with the `mAInlined_API_KEY` environment
-     variable in the `Authorization: Bearer` header.
+   - Read the API key from `/run/contained/secrets/mainlined_api_key`.
+   - POST the payload JSON to that endpoint with that key in the
+     `Authorization: Bearer` header.
 
 $ARGUMENTS
