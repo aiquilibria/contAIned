@@ -18,7 +18,7 @@ import json
 import sys
 from pathlib import Path
 
-_HOOKS_DIR = Path(__file__).parent.parent / ".contAIned" / "hooks"
+_HOOKS_DIR = Path(__file__).parent.parent / "cli" / "internal" / "scaffold" / "templates" / "hooks"
 POLICY_LOADER_HOOK = (_HOOKS_DIR / "_policy.py").read_text()
 QA_HOOK = (_HOOKS_DIR / "qa.py").read_text()
 
