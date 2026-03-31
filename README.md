@@ -160,31 +160,39 @@ The `contained` binary is a single self-contained executable with no runtime dep
 
 ## Quickstart
 
+contAIned uses two manifest files: an **operator manifest** that controls all security policy, and a **repo manifest** committed to each repository that declares the ecosystem and QA checks.
+
+**1. Set up the operator manifest.** Start from the provided example, which includes sensible defaults for secret-file protection, Bash restrictions, network policy, Sigstore provenance, and ecosystem definitions:
+
 ```bash
-# 1. Go to your project
+cp docs/examples/mainlined.yaml policy.yaml
+# edit policy.yaml to match your environment (model, allowed domains, etc.)
+```
+
+**2. Generate a repo manifest** for your stack and commit it:
+
+```bash
 cd my-project
+contAIned init --ecosystem go         > .contAIned_manifest.yaml   # Go
+contAIned init --ecosystem python     > .contAIned_manifest.yaml   # Python
+contAIned init --ecosystem node       > .contAIned_manifest.yaml   # Node.js
+contAIned init --ecosystem typescript > .contAIned_manifest.yaml   # TypeScript
+git add .contAIned_manifest.yaml && git commit -m "Add contAIned repo manifest"
+```
 
-# 2. Write a manifest (see docs/policy-reference.md for the full schema)
-cat > policy.yaml << 'EOF'
-agent:
-  model: claude-sonnet-4-6
-policy:
-  network:
-    enabled: true
-    allowed_domains:
-      - api.anthropic.com
-      - code.claude.com
-EOF
+The generated file declares the ecosystem (installing the toolchain and opening the required package registry domains) and a full set of QA checks — build, format, lint, test, coverage — with `when_changed` guards so only relevant checks run on each session.
 
-# 3. Initialize the contAIned workspace
-#    contAIned init builds the Docker image locally from the embedded Dockerfile —
-#    there is no image to pull. This step requires a network connection to install
-#    Claude Code and any toolchains resolved from declared ecosystems.
+**3. Initialize and run:**
+
+```bash
+# contAIned init builds the Docker image locally — there is no image to pull.
+# This requires a network connection to install Claude Code and any declared toolchains.
 contAIned init --manifest policy.yaml
 
-# 4. Start a session
 contAIned
 ```
+
+The repo manifest is merged into the operator manifest at `contAIned init` time. Only `ecosystems` and `policy.qa.checks` are permitted in the repo manifest — all security policy is owned by the operator manifest and cannot be overridden by repositories. See [`docs/examples/`](docs/examples/) for the full starters and a mixed-stack example.
 
 ## Commands
 
