@@ -7,8 +7,8 @@ on:
     branches: ["**"]
 
 jobs:
-  test:
-    name: Test
+  test-go:
+    name: Test (Go)
     runs-on: ubuntu-latest
 
     steps:
@@ -34,3 +34,23 @@ jobs:
       - name: Vet
         working-directory: cli
         run: go vet ./...
+
+  test-python:
+    name: Test (Python)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Test
+        run: pytest tests/
+
+      - name: Lint
+        run: ruff check .

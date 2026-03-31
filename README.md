@@ -592,14 +592,6 @@ Commands run with `shell=False` using exec-form arrays. A check whose binary is 
 
 ## Known gaps
 
-### Operator shell escape (`!`) audit coverage
-
-The audit log records every agent tool call. Commands run by the operator directly via `!command` (Claude Code's shell escape) are not agent tool calls and therefore do not pass through the `PreToolUse`/`PostToolUse` hooks.
-
-The `UserPromptSubmit` hook may receive `!` commands — Claude Code's documentation states it fires "when the user submits a prompt, before Claude processes it" with no documented exception for shell escapes. The hook detects and logs any prompt starting with `"!"` as an `OperatorShell` audit event, which will appear in `tracer.db` alongside agent events and be queryable via `/contained:tracer`.
-
-**Caveat:** whether `!` commands actually reach `UserPromptSubmit` is unconfirmed — the SDK may intercept them before the hook fires. If it does fire, coverage is automatic. If not, the fallback is shell history logging (`HISTFILE`, `PROMPT_COMMAND='history -a'`) at the container level.
-
 ### QA hook coverage
 
 QA checks are now fully language-agnostic. The `policy.qa.checks` list accepts any exec-form command array — `go vet`, `npx tsc --noEmit`, `cargo clippy`, or any other tool. No Python knowledge is required; see [docs/examples/](./docs/examples/) for ready-to-use manifests for Go, TypeScript, and mixed projects.
