@@ -19,6 +19,10 @@ jobs:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
 
+      - name: Generate
+        working-directory: cli
+        run: go generate contained.dev/cli/internal/pysource
+
       - name: Build
         working-directory: cli
         run: go build ./...

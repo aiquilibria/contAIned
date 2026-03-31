@@ -346,6 +346,9 @@ summary["action_log"] = action_log
 # ── Process any pending git push ───────────────────────────────────────────────
 # Detect a successful git push this session; if found, build the ATP work unit
 # payload, POST it to mAInlined, close the work unit, and open the next one.
+_push_found = False
+_submitted = False
+_submit_error: str | None = None
 try:
     _wu_id = tracer.get_active_work_unit(session_id)
     if _wu_id:
@@ -445,6 +448,7 @@ try:
                     _mAInlined_key = _secret_key_path.read_text().strip() if _secret_key_path.exists() else None
                     if _mAInlined_url and _mAInlined_key:
                         import urllib.request  # noqa: PLC0415
+                        import urllib.error    # noqa: PLC0415
                         _req = urllib.request.Request(
                             _mAInlined_url,
                             data=json.dumps(_payload).encode("utf-8"),
@@ -454,11 +458,25 @@ try:
                             },
                             method="POST",
                         )
-                        urllib.request.urlopen(_req, timeout=30)
-                except Exception:
-                    pass
+                        try:
+                            with urllib.request.urlopen(_req, timeout=30) as _resp:
+                                _resp_status = _resp.status
+                            if 200 <= _resp_status < 300:
+                                _submitted = True
+                            else:
+                                _submit_error = f"HTTP {_resp_status}"
+                        except urllib.error.HTTPError as _he:
+                            _submit_error = f"HTTP {_he.code}: {_he.read().decode('utf-8', errors='replace')[:200]}"
+                        except Exception as _se:
+                            _submit_error = str(_se)
+                    elif not _mAInlined_url:
+                        _submit_error = "could not resolve mAInlined URL from manifest"
+                    elif not _mAInlined_key:
+                        _submit_error = "mainlined_api_key not found"
+                except Exception as _pe:
+                    _submit_error = f"payload/URL error: {_pe}"
 
-            if _head_commit:
+            if _head_commit and _submitted:
                 tracer.complete_work_unit(_wu_id, _head_commit, head_branch=_head_branch)
                 try:
                     _wu_row = tracer.conn.execute(
@@ -512,7 +530,14 @@ if _prov_log:
     _rekor = _latest.get("rekor_log_index")
     _prov_line = f"\nProvenance: {_digest_short}… · {_operator}" + (f" · Rekor #{_rekor}" if _rekor else "")
 
-_summary_msg = f"QA: {_qa_line}\n\nChanged:\n{_files_line}{_prov_line}\n"
+_proof_line = ""
+if _push_found:
+    if _submitted:
+        _proof_line = "\nProof: submitted ✓"
+    elif _submit_error:
+        _proof_line = f"\nProof: FAILED — {_submit_error}"
+
+_summary_msg = f"QA: {_qa_line}\n\nChanged:\n{_files_line}{_prov_line}{_proof_line}\n"
 try:
     _sentinel_file.touch()
 except Exception:
