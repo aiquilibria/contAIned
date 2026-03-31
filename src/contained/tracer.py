@@ -1483,10 +1483,12 @@ class contAInedTracer:
 
         policy_snaps = self.conn.execute(
             """
-            SELECT session_id, manifest_hash, manifest_text, provenance, captured_at
+            SELECT session_id, manifest_hash, manifest_text, provenance,
+                   MIN(captured_at) AS captured_at
             FROM policy_snapshots
             WHERE work_unit_id = ?
-            ORDER BY captured_at
+            GROUP BY session_id, manifest_hash, provenance
+            ORDER BY MIN(captured_at)
             """,
             (work_unit_id,),
         ).fetchall()
