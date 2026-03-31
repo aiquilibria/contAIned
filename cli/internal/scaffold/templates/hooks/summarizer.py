@@ -384,8 +384,10 @@ try:
             _wu_narrative = None
             if _transcript_path and Path(_transcript_path).exists():
                 try:
-                    from contained.tracer import extract_narrative_from_transcript  # noqa: PLC0415
-                    _wu_narrative = extract_narrative_from_transcript(_transcript_path) or None
+                    from contained.tracer import extract_session_narrative  # noqa: PLC0415
+                    _narrative_dict = extract_session_narrative(_transcript_path)
+                    if _narrative_dict:
+                        _wu_narrative = json.dumps(_narrative_dict, ensure_ascii=False)
                 except Exception:
                     pass
             if _wu_narrative:

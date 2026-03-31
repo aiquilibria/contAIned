@@ -1598,6 +1598,13 @@ class contAInedTracer:
                         }
                         for ps in policy_snaps
                     ],
+                },
+            },
+            "outcome": {
+                "result": {
+                    "response": (
+                        json.loads(wu[7]) if wu[7] and wu[7].lstrip().startswith("{") else wu[7]
+                    ),
                     "git": {
                         "repo_url": wu[1],
                         "base_branch": wu[2],
@@ -1605,11 +1612,6 @@ class contAInedTracer:
                         "head_branch": wu[4],
                         "head_commit": wu[5],
                     },
-                },
-            },
-            "outcome": {
-                "result": {
-                    "response": wu[7],
                     "diffs": diffs,
                     "actions": formatted_actions,
                     "qa": qa_result,
@@ -1719,7 +1721,6 @@ class contAInedTracer:
         invocation["input"]["mAInlined_policy_version"] = policy_version
 
         outcome = payload["outcome"]
-        prompt = invocation["input"].get("prompt") or ""
 
         # Claude API is an undeclared dependency until an ATP-compliant wrapper exists.
         dependencies: list = []
@@ -1732,7 +1733,7 @@ class contAInedTracer:
                 "system_type": "agent",
                 "task_id": work_unit_id,
                 "classification": {
-                    "description": prompt[:200],
+                    "description": "Code generation and debugging. Developer assistance.",
                     "ontology": {
                         "ontology_uri": "https://atp.aiquilibria.com/ontology/v0.1.0",
                         "occupation": "15-1252.00",

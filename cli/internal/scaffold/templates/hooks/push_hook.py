@@ -25,7 +25,15 @@ tool_input    = event.get("tool_input") or {}
 tool_response = event.get("tool_response") or {}
 
 cmd = (tool_input.get("command") or "").strip()
-if not (re.match(r'^git\s+push\b', cmd) and "--dry-run" not in cmd):
+
+# Match git push in any of these forms:
+#   git push ...
+#   git -C <dir> push ...
+#   <anything> && git push ...   (compound commands)
+_GIT_PUSH_RE = re.compile(
+    r'(?:^|&&|;|\|\|)\s*git(?:\s+-C\s+\S+)?\s+push\b'
+)
+if not (_GIT_PUSH_RE.search(cmd) and "--dry-run" not in cmd):
     sys.exit(0)
 
 is_error  = tool_response.get("is_error", False)
