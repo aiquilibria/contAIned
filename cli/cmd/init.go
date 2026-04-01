@@ -158,7 +158,7 @@ func runInit(_ *cobra.Command, args []string) error {
 			if err != nil {
 				return fmt.Errorf("mAInlined registration: %w", err)
 			}
-			keyPath, err := mainlined.StoreAPIKey(p.Org, p.Scope, reg.APIKey)
+			keyPath, err := mainlined.StoreWorkspaceAPIKey(target, reg.APIKey)
 			if err != nil {
 				return fmt.Errorf("storing mAInlined API key: %w", err)
 			}
@@ -263,7 +263,7 @@ func runInit(_ *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("mAInlined registration: %w", err)
 		}
-		keyPath, err := mainlined.StoreAPIKey(mAInlinedParsed.Org, mAInlinedParsed.Scope, reg.APIKey)
+		keyPath, err := mainlined.StoreWorkspaceAPIKey(target, reg.APIKey)
 		if err != nil {
 			return fmt.Errorf("storing mAInlined API key: %w", err)
 		}

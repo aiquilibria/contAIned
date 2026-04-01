@@ -3,12 +3,10 @@ package docker
 import (
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 
 	"contained.dev/cli/internal/manifest"
 	"gopkg.in/yaml.v3"
@@ -116,37 +114,8 @@ func (r *Runner) baseArgs(dockerBin string) ([]string, error) {
 		args = append(args, "--volume", expanded)
 	}
 
-	// Bind-mount the mAInlined API key secret as read-only when configured.
-	// The container path is fixed at /run/contained/secrets/mainlined_api_key
-	// so enforcement hooks can always find it at a well-known location.
-	if r.mainlinedURL != "" {
-		secretPath, err := mainlinedSecretPath(r.mainlinedURL, home)
-		if err == nil {
-			if _, statErr := os.Stat(secretPath); statErr == nil {
-				args = append(args, "--volume",
-					secretPath+":/run/contained/secrets/mainlined_api_key:ro",
-				)
-			}
-		}
-	}
-
 	args = append(args, r.cfg.Image)
 	return args, nil
-}
-
-// mainlinedSecretPath derives the host-side secrets file path from a mAInlined
-// scope URL. The path is ~/.contained/secrets/<org>-<scope>.
-func mainlinedSecretPath(rawURL, home string) (string, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return "", err
-	}
-	path := strings.Trim(u.Path, "/")
-	parts := strings.Split(path, "/")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", fmt.Errorf("invalid mainlined URL path: %q", u.Path)
-	}
-	return filepath.Join(home, ".contained", "secrets", parts[0]+"-"+parts[1]), nil
 }
 
 // expandHome replaces a leading ~ in s with the provided home directory.
@@ -188,8 +157,18 @@ func (r *Runner) RunRepl() error {
 		defer os.RemoveAll(tmpDir)
 	}
 
+	// Stage a session-specific copy of the mAInlined API key so that parallel
+	// sessions — even within the same workspace — never share or clobber each
+	// other's credential. The copy lives in .contAIned/sessions/<pid>/ which is
+	// already covered by the workspace .gitignore and is cleaned up on exit.
+	sessionKeyDir, keyArgs := r.stageSessionKey()
+	if sessionKeyDir != "" {
+		defer os.RemoveAll(sessionKeyDir)
+	}
+
 	args = append(args, "-it")
 	args = append(args, provArgs...)
+	args = append(args, keyArgs...)
 	args = append(args, image)
 
 	cmd := exec.Command(args[0], args[1:]...)
@@ -204,6 +183,35 @@ func (r *Runner) RunRepl() error {
 		return err
 	}
 	return nil
+}
+
+// stageSessionKey copies the workspace mAInlined API key to a session-specific
+// directory inside .contAIned/sessions/<pid>/ and returns the directory path
+// and the docker volume mount args needed to expose it at the well-known
+// container path /run/contained/secrets/mainlined_api_key.
+//
+// If no key has been written yet (e.g. mAInlined was not configured), both
+// return values are empty and the container starts without the key — hooks
+// will surface a clear "mainlined_api_key not found" error at proof submission.
+func (r *Runner) stageSessionKey() (sessionDir string, volumeArgs []string) {
+	if r.mainlinedURL == "" {
+		return "", nil
+	}
+	srcPath := filepath.Join(r.workspace, ".contAIned", "mainlined_api_key")
+	keyData, err := os.ReadFile(srcPath)
+	if err != nil {
+		return "", nil
+	}
+	sessionDir = filepath.Join(r.workspace, ".contAIned", "sessions", fmt.Sprintf("%d", os.Getpid()))
+	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
+		return "", nil
+	}
+	keyFile := filepath.Join(sessionDir, "mainlined_api_key")
+	if err := os.WriteFile(keyFile, keyData, 0o600); err != nil {
+		os.RemoveAll(sessionDir)
+		return "", nil
+	}
+	return sessionDir, []string{"--volume", keyFile + ":/run/contained/secrets/mainlined_api_key:ro"}
 }
 
 // provenanceDoc is the ordered schema for /run/contained/provenance.yaml.
