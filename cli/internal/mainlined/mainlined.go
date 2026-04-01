@@ -145,32 +145,22 @@ func Register(p ParsedURL, idToken, systemURI, manifestHash string) (*Registrati
 	return &reg, nil
 }
 
-// StoreAPIKey writes the API key JWT to ~/.contained/secrets/<org>-<scope>
-// with mode 0600. Parent directories are created with mode 0700 if absent.
+// StoreWorkspaceAPIKey writes the API key JWT to <workspace>/.contAIned/mainlined_api_key
+// with mode 0600. The .contAIned/ directory is created with mode 0700 if absent.
+// Storing the key inside the workspace (rather than a shared user-home location) ensures
+// that parallel sessions across different workspaces using the same org/scope never
+// overwrite each other's credentials.
 // Returns the absolute path where the key was written.
-func StoreAPIKey(org, scope, apiKey string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolving home directory: %w", err)
+func StoreWorkspaceAPIKey(workspace, apiKey string) (string, error) {
+	dir := filepath.Join(workspace, ".contAIned")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("creating .contAIned directory %s: %w", dir, err)
 	}
-	secretsDir := filepath.Join(home, ".contained", "secrets")
-	if err := os.MkdirAll(secretsDir, 0o700); err != nil {
-		return "", fmt.Errorf("creating secrets directory %s: %w", secretsDir, err)
+	keyPath := filepath.Join(dir, "mainlined_api_key")
+	if err := os.WriteFile(keyPath, []byte(apiKey), 0o600); err != nil {
+		return "", fmt.Errorf("writing API key to %s: %w", keyPath, err)
 	}
-	secretsPath := filepath.Join(secretsDir, org+"-"+scope)
-	if err := os.WriteFile(secretsPath, []byte(apiKey), 0o600); err != nil {
-		return "", fmt.Errorf("writing API key to %s: %w", secretsPath, err)
-	}
-	return secretsPath, nil
-}
-
-// SecretPath returns the expected host-side path for the mAInlined API key.
-func SecretPath(org, scope string) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolving home directory: %w", err)
-	}
-	return filepath.Join(home, ".contained", "secrets", org+"-"+scope), nil
+	return keyPath, nil
 }
 
 // SystemURI returns the stable identity URI for a container scope.
