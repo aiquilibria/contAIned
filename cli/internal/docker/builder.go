@@ -54,13 +54,13 @@ func buildPluginMarketplaceSettings(m *manifest.Manifest) (strict, extra any) {
 	}
 
 	// Use an empty non-nil slice so the key is always present when strict mode
-	// is on, even when both builtin and extra sources are disabled (total lockdown).
+	// is on, even with no extra sources (total lockdown). Claude Code has no
+	// "builtin" source type, so the Anthropic official marketplace cannot be
+	// expressed as a source object — in strict mode it is blocked along with
+	// everything else unless added as an explicit extra_marketplace entry.
+	// The builtin_marketplace manifest field is reserved for future use once
+	// the Anthropic marketplace source reference is known.
 	sources := make([]any, 0)
-	// Include the Anthropic builtin marketplace unless explicitly disabled.
-	builtin := p.BuiltinMarketplace == nil || *p.BuiltinMarketplace
-	if builtin {
-		sources = append(sources, map[string]any{"source": "builtin"})
-	}
 	for _, mp := range p.ExtraMarketplaces {
 		sources = append(sources, marketplaceSourceObject(mp))
 	}

@@ -543,9 +543,10 @@ func TestBuildManagedSettings_Plugins_NoExtra_ExtraKeyAbsent(t *testing.T) {
 	}
 }
 
-func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinTrue(t *testing.T) {
-	// strict_marketplaces: true, builtin_marketplace: true (default) →
-	// strictKnownMarketplaces contains {"source":"builtin"}.
+func TestBuildManagedSettings_Plugins_StrictTrue_NoExtra_EmptyList(t *testing.T) {
+	// strict_marketplaces: true with no extra_marketplaces → strictKnownMarketplaces
+	// is present but empty (total lockdown). Claude Code has no "builtin" source
+	// type, so builtin_marketplace does not add any entry to the array.
 	m := baseManifest()
 	m.Policy.Plugins.StrictMarketplaces = true
 	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
@@ -556,17 +557,13 @@ func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinTrue(t *testing.T) {
 		t.Fatal("strictKnownMarketplaces should be present")
 	}
 	sources := raw.([]any)
-	if len(sources) != 1 {
-		t.Fatalf("expected 1 entry, got %d", len(sources))
-	}
-	entry := sources[0].(map[string]any)
-	if entry["source"] != "builtin" {
-		t.Errorf("expected source=builtin, got %v", entry["source"])
+	if len(sources) != 0 {
+		t.Errorf("expected empty list (no extra marketplaces), got %v", sources)
 	}
 }
 
-func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinFalse(t *testing.T) {
-	// builtin_marketplace: false → builtin entry must not appear.
+func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinFalse_EmptyList(t *testing.T) {
+	// builtin_marketplace: false with no extra_marketplaces → same result: empty list.
 	m := baseManifest()
 	m.Policy.Plugins.StrictMarketplaces = true
 	m.Policy.Plugins.BuiltinMarketplace = boolPtr(false)
@@ -577,7 +574,6 @@ func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinFalse(t *testing.T) {
 		t.Fatal("strictKnownMarketplaces should be present")
 	}
 	sources := raw.([]any)
-	// No extra marketplaces and builtin disabled → empty list.
 	if len(sources) != 0 {
 		t.Errorf("expected empty list, got %v", sources)
 	}
@@ -617,8 +613,9 @@ func TestBuildManagedSettings_Plugins_ExtraMarketplaces_ExtraKeyPresent(t *testi
 }
 
 func TestBuildManagedSettings_Plugins_StrictAndExtra_BothKeysPresent(t *testing.T) {
-	// strict + extra → strictKnownMarketplaces includes builtin + extra source;
-	// extraKnownMarketplaces is also present.
+	// strict + extra → strictKnownMarketplaces contains only the extra source
+	// (no "builtin" — Claude Code has no such source type); extraKnownMarketplaces
+	// is also present.
 	m := baseManifest()
 	m.Policy.Plugins.StrictMarketplaces = true
 	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
@@ -633,16 +630,12 @@ func TestBuildManagedSettings_Plugins_StrictAndExtra_BothKeysPresent(t *testing.
 		t.Fatal("strictKnownMarketplaces should be present")
 	}
 	sources := strictRaw.([]any)
-	if len(sources) != 2 {
-		t.Fatalf("expected 2 entries (builtin + extra), got %d", len(sources))
+	if len(sources) != 1 {
+		t.Fatalf("expected 1 entry (extra only), got %d", len(sources))
 	}
-	first := sources[0].(map[string]any)
-	if first["source"] != "builtin" {
-		t.Errorf("first entry should be builtin, got %v", first["source"])
-	}
-	second := sources[1].(map[string]any)
-	if second["source"] != "github" {
-		t.Errorf("second entry should be github, got %v", second["source"])
+	entry := sources[0].(map[string]any)
+	if entry["source"] != "github" {
+		t.Errorf("entry should be github, got %v", entry["source"])
 	}
 
 	if _, ok := settings["extraKnownMarketplaces"]; !ok {

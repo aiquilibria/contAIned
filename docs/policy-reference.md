@@ -429,9 +429,9 @@ Controls which Claude Code plugin marketplaces the agent may use and which plugi
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `strict_marketplaces` | bool | `false` | When `true`, emits `strictKnownMarketplaces` into `managed-settings.json` — only sources in the resolved list may be added; all others are blocked before any network or filesystem operation |
-| `builtin_marketplace` | bool | `true` | When `false`, excludes the Anthropic official marketplace from the resolved source list |
-| `extra_marketplaces` | list[PluginMarketplace] | `[]` | Additional approved marketplace sources; always pre-registered via `extraKnownMarketplaces` so they appear without a manual `/plugin marketplace add` step |
+| `strict_marketplaces` | bool | `false` | When `true`, emits `strictKnownMarketplaces` into `managed-settings.json` containing only the `extra_marketplaces` entries — all other sources are blocked. Note: Claude Code has no `"builtin"` source type, so the Anthropic official marketplace cannot be explicitly named; in strict mode with no extra marketplaces, all plugin sources are blocked |
+| `builtin_marketplace` | bool | `true` | When `true`, pre-registers the Anthropic official marketplace via `extraKnownMarketplaces` so it appears without a manual `/plugin marketplace add` step. Has no effect on `strictKnownMarketplaces` |
+| `extra_marketplaces` | list[PluginMarketplace] | `[]` | Additional approved marketplace sources; pre-registered via `extraKnownMarketplaces` and, when `strict_marketplaces: true`, the only sources permitted |
 | `preinstall` | list[PluginRef] | `[]` | Plugins baked into the image at `contained init` time, available from the first session |
 
 ### `PluginMarketplace` fields
