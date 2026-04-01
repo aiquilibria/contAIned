@@ -520,3 +520,132 @@ func TestPolicyPull_InvalidYAMLInput_ReturnsOriginal(t *testing.T) {
 		t.Errorf("expected original on invalid YAML input, got: %q", got)
 	}
 }
+
+// ── Plugin marketplace settings ───────────────────────────────────────────────
+
+func boolPtr(b bool) *bool { return &b }
+
+func TestBuildManagedSettings_Plugins_StrictFalse_KeyAbsent(t *testing.T) {
+	// strict_marketplaces: false (default) → key must not appear in output.
+	m := baseManifest()
+	settings := parsedSettings(t, m)
+	if _, ok := settings["strictKnownMarketplaces"]; ok {
+		t.Error("strictKnownMarketplaces should be absent when StrictMarketplaces is false")
+	}
+}
+
+func TestBuildManagedSettings_Plugins_NoExtra_ExtraKeyAbsent(t *testing.T) {
+	// No extra marketplaces → extraKnownMarketplaces must not appear.
+	m := baseManifest()
+	settings := parsedSettings(t, m)
+	if _, ok := settings["extraKnownMarketplaces"]; ok {
+		t.Error("extraKnownMarketplaces should be absent when ExtraMarketplaces is empty")
+	}
+}
+
+func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinTrue(t *testing.T) {
+	// strict_marketplaces: true, builtin_marketplace: true (default) →
+	// strictKnownMarketplaces contains {"source":"builtin"}.
+	m := baseManifest()
+	m.Policy.Plugins.StrictMarketplaces = true
+	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
+
+	settings := parsedSettings(t, m)
+	raw, ok := settings["strictKnownMarketplaces"]
+	if !ok {
+		t.Fatal("strictKnownMarketplaces should be present")
+	}
+	sources := raw.([]any)
+	if len(sources) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(sources))
+	}
+	entry := sources[0].(map[string]any)
+	if entry["source"] != "builtin" {
+		t.Errorf("expected source=builtin, got %v", entry["source"])
+	}
+}
+
+func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinFalse(t *testing.T) {
+	// builtin_marketplace: false → builtin entry must not appear.
+	m := baseManifest()
+	m.Policy.Plugins.StrictMarketplaces = true
+	m.Policy.Plugins.BuiltinMarketplace = boolPtr(false)
+
+	settings := parsedSettings(t, m)
+	raw, ok := settings["strictKnownMarketplaces"]
+	if !ok {
+		t.Fatal("strictKnownMarketplaces should be present")
+	}
+	sources := raw.([]any)
+	// No extra marketplaces and builtin disabled → empty list.
+	if len(sources) != 0 {
+		t.Errorf("expected empty list, got %v", sources)
+	}
+}
+
+func TestBuildManagedSettings_Plugins_ExtraMarketplaces_ExtraKeyPresent(t *testing.T) {
+	// extra_marketplaces populated → extraKnownMarketplaces present with correct structure.
+	m := baseManifest()
+	m.Policy.Plugins.ExtraMarketplaces = []manifest.PluginMarketplace{
+		{Source: "github", Repo: "acme-corp/plugins", Ref: "main"},
+	}
+
+	settings := parsedSettings(t, m)
+	raw, ok := settings["extraKnownMarketplaces"]
+	if !ok {
+		t.Fatal("extraKnownMarketplaces should be present")
+	}
+	extraMap := raw.(map[string]any)
+	if len(extraMap) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(extraMap))
+	}
+	entry, ok := extraMap["acme-corp-plugins"]
+	if !ok {
+		t.Fatalf("expected key 'acme-corp-plugins', got keys %v", extraMap)
+	}
+	entryMap := entry.(map[string]any)
+	src := entryMap["source"].(map[string]any)
+	if src["source"] != "github" {
+		t.Errorf("source.source: got %v", src["source"])
+	}
+	if src["repo"] != "acme-corp/plugins" {
+		t.Errorf("source.repo: got %v", src["repo"])
+	}
+	if src["ref"] != "main" {
+		t.Errorf("source.ref: got %v", src["ref"])
+	}
+}
+
+func TestBuildManagedSettings_Plugins_StrictAndExtra_BothKeysPresent(t *testing.T) {
+	// strict + extra → strictKnownMarketplaces includes builtin + extra source;
+	// extraKnownMarketplaces is also present.
+	m := baseManifest()
+	m.Policy.Plugins.StrictMarketplaces = true
+	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
+	m.Policy.Plugins.ExtraMarketplaces = []manifest.PluginMarketplace{
+		{Source: "github", Repo: "acme-corp/plugins"},
+	}
+
+	settings := parsedSettings(t, m)
+
+	strictRaw, ok := settings["strictKnownMarketplaces"]
+	if !ok {
+		t.Fatal("strictKnownMarketplaces should be present")
+	}
+	sources := strictRaw.([]any)
+	if len(sources) != 2 {
+		t.Fatalf("expected 2 entries (builtin + extra), got %d", len(sources))
+	}
+	first := sources[0].(map[string]any)
+	if first["source"] != "builtin" {
+		t.Errorf("first entry should be builtin, got %v", first["source"])
+	}
+	second := sources[1].(map[string]any)
+	if second["source"] != "github" {
+		t.Errorf("second entry should be github, got %v", second["source"])
+	}
+
+	if _, ok := settings["extraKnownMarketplaces"]; !ok {
+		t.Error("extraKnownMarketplaces should also be present")
+	}
+}

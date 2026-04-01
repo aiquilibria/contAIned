@@ -8,6 +8,24 @@
 # ecosystem_definitions (which maps it to the node toolchain), installs Node.js at
 # the pinned version, and adds registry.npmjs.org to the network allowlist.
 
+# To pre-install plugins in your operator manifest, use one of two mechanisms:
+#
+#   # Ecosystem-scoped: installed only when this ecosystem is active in a repo.
+#   ecosystem_definitions:
+#     typescript:
+#       plugins:
+#         - marketplace: claude-plugins-official
+#           plugin: typescript-lsp
+#
+#   # Global: always installed regardless of ecosystem (e.g. a GitHub integration).
+#   policy:
+#     plugins:
+#       preinstall:
+#         - marketplace: claude-plugins-official
+#           plugin: github
+#
+# See docs/policy-reference.md for full plugin policy options.
+
 ecosystems:
   typescript: "20"   # pin your project's Node.js major version here
 

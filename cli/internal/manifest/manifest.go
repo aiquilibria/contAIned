@@ -48,6 +48,10 @@ type EcosystemDef struct {
 	// when this ecosystem is active. These are injected into managed-settings.json
 	// so the Claude Code sandbox propagates them to every Bash subprocess.
 	Env map[string]string `yaml:"env,omitempty"`
+	// Plugins lists plugins to pre-install when this ecosystem is active.
+	// Combined with policy.plugins.preinstall at contained init time and
+	// deduplicated before baking into the image.
+	Plugins []PluginRef `yaml:"plugins,omitempty"`
 }
 
 type RuntimeConfig struct {
@@ -92,6 +96,7 @@ type PolicyConfig struct {
 	QA        QAConfig        `yaml:"qa"`
 	MCP       MCPConfig       `yaml:"mcp"`
 	Skills    SkillsConfig    `yaml:"skills"`
+	Plugins   PluginsConfig   `yaml:"plugins,omitempty"`
 	Sandbox   SandboxConfig   `yaml:"sandbox"`
 	mAInlined mAInlinedPolicy `yaml:"mAInlined"`
 }
@@ -143,6 +148,53 @@ type QACheck struct {
 
 type MCPConfig struct {
 	ApprovedServers []string `yaml:"approved_servers"`
+}
+
+// PluginMarketplace identifies a single approved marketplace source.
+// It maps directly to the Claude Code marketplace source object format.
+type PluginMarketplace struct {
+	// Source is the marketplace type: "builtin", "github", "npm", "hostPattern".
+	Source string `yaml:"source"`
+	// Repo is the GitHub repository (owner/name) when Source is "github".
+	Repo string `yaml:"repo,omitempty"`
+	// Ref is an optional git ref (branch, tag, commit) when Source is "github".
+	Ref string `yaml:"ref,omitempty"`
+	// Path is an optional subdirectory within the repo when Source is "github".
+	Path string `yaml:"path,omitempty"`
+	// HostPattern is a regex matched against the hostname when Source is "hostPattern".
+	HostPattern string `yaml:"host_pattern,omitempty"`
+	// Package is the npm package name when Source is "npm".
+	Package string `yaml:"package,omitempty"`
+}
+
+// PluginRef identifies a single plugin within a named marketplace.
+type PluginRef struct {
+	// Marketplace is the name of the registered marketplace (matches an entry
+	// in extraKnownMarketplaces or the builtin marketplace identifier).
+	Marketplace string `yaml:"marketplace"`
+	// Plugin is the plugin name within that marketplace.
+	Plugin string `yaml:"plugin"`
+}
+
+// PluginsConfig is the policy.plugins section of the manifest.
+type PluginsConfig struct {
+	// StrictMarketplaces enables strictKnownMarketplaces enforcement in
+	// managed-settings.json. When true, only sources in the resolved list
+	// (builtin + ExtraMarketplaces) may be added; all others are blocked
+	// before any network or filesystem operation. Default: false.
+	StrictMarketplaces bool `yaml:"strict_marketplaces,omitempty"`
+	// BuiltinMarketplace controls whether the Anthropic official marketplace
+	// is included in the resolved source list. nil is treated as true.
+	// Set to false to restrict the agent to operator-controlled sources only.
+	BuiltinMarketplace *bool `yaml:"builtin_marketplace,omitempty"`
+	// ExtraMarketplaces lists additional approved marketplace sources.
+	// These are always pre-registered via extraKnownMarketplaces so they are
+	// available without a manual /plugin marketplace add step.
+	ExtraMarketplaces []PluginMarketplace `yaml:"extra_marketplaces,omitempty"`
+	// Preinstall lists plugins to bake into the container image at
+	// contained init time. Available from the first session without any
+	// manual install step.
+	Preinstall []PluginRef `yaml:"preinstall,omitempty"`
 }
 
 type SkillsConfig struct {
@@ -253,5 +305,9 @@ func applyDefaults(m *Manifest) {
 	}
 	if m.Policy.Sigstore.FulcioURL == "" {
 		m.Policy.Sigstore.FulcioURL = "https://fulcio.sigstore.dev"
+	}
+	if m.Policy.Plugins.BuiltinMarketplace == nil {
+		t := true
+		m.Policy.Plugins.BuiltinMarketplace = &t
 	}
 }

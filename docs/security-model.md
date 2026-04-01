@@ -251,6 +251,13 @@ Agent-written code that passes QA checks and executes as part of the task could 
 
 **Residual risk.** If a registry domain is on the allowlist and the agent installs a malicious package via a Bash command that is not on the deny list, the package executes inside the container. The container boundary limits the blast radius to the workspace. The tracer records the Bash invocation.
 
+**Plugin supply chain.** Claude Code's plugin system — skills, agents, hooks, MCP servers, and LSP servers — introduces a separate supply chain surface that is independent of the package registry controls above. contAIned addresses this through `policy.plugins` in the manifest:
+
+- `strict_marketplaces: true` emits `strictKnownMarketplaces` into `managed-settings.json`, blocking any plugin source not in the resolved allowlist before any network or filesystem operation. Operators can disable the Anthropic built-in marketplace entirely (`builtin_marketplace: false`) and restrict the agent to a private, operator-controlled marketplace.
+- Ecosystem `plugins` entries and global `policy.plugins.preinstall` bake approved plugins into the image at `contained init` time, eliminating any runtime install step for the standard toolset. Plugins pre-installed in the image are part of the same trusted, policy-governed artifact as the hooks themselves.
+
+**Residual risk.** Plugins sourced from an approved marketplace can themselves introduce malicious code. `strict_marketplaces` gates *which sources* may be used — it does not vet the individual plugins within a source. Per-plugin vetting inside a marketplace is the operator's responsibility. Operators who need this level of control should maintain a private marketplace repository containing only reviewed plugins and bind to it exclusively via `strict_marketplaces` with `builtin_marketplace: false`.
+
 ### Operator Error and Overreliance
 
 **Scenario.** The operator approves an escalated action — typically a git commit — without reviewing what the agent actually did, accepting incorrect, insecure, or malicious changes into version control.
@@ -333,7 +340,7 @@ The table below maps the threat scenarios and controls described in this documen
 | Supply chain — image-layer policy, egress allowlist, publish blocking | [LLM03](https://genai.owasp.org/llmrisk/llm03-supply-chain/) | [AML.T0010](https://atlas.mitre.org/techniques/AML.T0010) |
 | Overreliance — QA gate, `#review`, diff store, escalation workflow | [LLM09](https://genai.owasp.org/llmrisk/llm09-misinformation/) | — |
 | Training data integrity — diff store, full write traceability | [LLM04](https://genai.owasp.org/llmrisk/llm04-data-and-model-poisoning/) | [AML.T0020](https://atlas.mitre.org/techniques/AML.T0020) |
-| Insecure plugin design — all tools intercepted by image-layer hooks | [LLM03](https://genai.owasp.org/llmrisk/llm03-supply-chain/) | — |
+| Insecure plugin design — all tools intercepted by image-layer hooks; `strictKnownMarketplaces` gates plugin sources; ecosystem `plugins` and `preinstall` bake approved plugins into the image at build time | [LLM03](https://genai.owasp.org/llmrisk/llm03-supply-chain/) | — |
 | Model theft — read hooks, egress proxy (no weights on-premises) | — | [AML.T0024](https://atlas.mitre.org/techniques/AML.T0024) |
 | Denial of service — Docker resource limits; per-developer deployment model | [LLM10](https://genai.owasp.org/llmrisk/llm10-unbounded-consumption/) | [AML.T0029](https://atlas.mitre.org/techniques/AML.T0029) |
 | RAG / vector DB poisoning | [LLM08](https://genai.owasp.org/llmrisk/llm08-vector-and-embedding-weaknesses/) | [AML.T0060](https://atlas.mitre.org/techniques/AML.T0060) — **not applicable** (no retrieval layer) |

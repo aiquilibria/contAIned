@@ -2,6 +2,7 @@ package manifest
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -198,6 +199,57 @@ func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error
 	)
 
 	return &merged, nil
+}
+
+// CollectPlugins returns the deduplicated list of plugins to pre-install at
+// image build time. It combines:
+//  1. operator.Policy.Plugins.Preinstall — the global always-installed set.
+//  2. The Plugins list from each EcosystemDef declared in repo.Ecosystems.
+//
+// Deduplication is by "marketplace:plugin" key; first occurrence wins.
+// repo may be nil, in which case only the preinstall list is returned.
+func CollectPlugins(operator *Manifest, repo *RepoManifest) []PluginRef {
+	seen := make(map[string]bool)
+	var collected []PluginRef
+
+	add := func(p PluginRef) {
+		key := p.Marketplace + ":" + p.Plugin
+		if !seen[key] {
+			seen[key] = true
+			collected = append(collected, p)
+		}
+	}
+
+	for _, p := range operator.Policy.Plugins.Preinstall {
+		add(p)
+	}
+
+	if repo != nil {
+		for ecoName := range repo.Ecosystems {
+			if def, ok := operator.EcosystemDefinitions[ecoName]; ok {
+				for _, p := range def.Plugins {
+					add(p)
+				}
+			}
+		}
+	}
+
+	return collected
+}
+
+// EncodePluginsArg encodes a plugin list as a base64-encoded newline-delimited
+// "marketplace:plugin" string suitable for passing as the PLUGINS_TO_INSTALL
+// Docker build arg. Returns "" when the list is empty.
+func EncodePluginsArg(plugins []PluginRef) string {
+	if len(plugins) == 0 {
+		return ""
+	}
+	var lines []string
+	for _, p := range plugins {
+		lines = append(lines, p.Marketplace+":"+p.Plugin)
+	}
+	raw := strings.Join(lines, "\n")
+	return base64.StdEncoding.EncodeToString([]byte(raw))
 }
 
 func domainSet(domains []string) map[string]bool {

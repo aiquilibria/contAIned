@@ -87,6 +87,31 @@ ecosystem_definitions:
       - registry.npmjs.org
 ```
 
+### `ecosystem_definitions[*].plugins`
+
+Type: `list[PluginRef]` | Default: `[]`
+
+An optional list of plugins to pre-install when this ecosystem is active for a given workspace (i.e. declared in the repo's `.contAIned_manifest.yaml`). Plugins are collected by `contained init`, deduplicated against `policy.plugins.preinstall`, and baked into the image via the `PLUGINS_TO_INSTALL` Docker build arg.
+
+```yaml
+ecosystem_definitions:
+  go:
+    toolchain: go
+    network_domains: [proxy.golang.org, sum.golang.org]
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: go-lsp
+  python:
+    network_domains: [pypi.org, files.pythonhosted.org]
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: python-lsp
+```
+
+Each `PluginRef` entry has two required fields: `marketplace` (the registered marketplace name) and `plugin` (the plugin identifier within that marketplace).
+
+---
+
 ## `runtime.docker.toolchains` (Mainlined manifest only)
 
 Sets **floor constraints** on toolchain versions. Repos declaring an ecosystem whose resolved toolchain key appears here must supply a version satisfying the constraint.
@@ -395,6 +420,82 @@ automatically by `policy pull` and must not be edited manually.
 `manifest_hash`, so every proof is cryptographically bound to the exact central
 policy version that was active when the image was built. When `url` is empty,
 these fields remain blank and only the local manifest content is hashed.
+
+---
+
+## `policy.plugins`
+
+Controls which Claude Code plugin marketplaces the agent may use and which plugins are pre-installed at image build time.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `strict_marketplaces` | bool | `false` | When `true`, emits `strictKnownMarketplaces` into `managed-settings.json` — only sources in the resolved list may be added; all others are blocked before any network or filesystem operation |
+| `builtin_marketplace` | bool | `true` | When `false`, excludes the Anthropic official marketplace from the resolved source list |
+| `extra_marketplaces` | list[PluginMarketplace] | `[]` | Additional approved marketplace sources; always pre-registered via `extraKnownMarketplaces` so they appear without a manual `/plugin marketplace add` step |
+| `preinstall` | list[PluginRef] | `[]` | Plugins baked into the image at `contained init` time, available from the first session |
+
+### `PluginMarketplace` fields
+
+Used in `extra_marketplaces`. Maps directly to the Claude Code marketplace source object format.
+
+| Field | Type | Description |
+|---|---|---|
+| `source` | string | Source type: `"github"`, `"npm"`, `"builtin"`, or `"hostPattern"` |
+| `repo` | string | GitHub repository (`owner/name`). Used when `source: github` |
+| `ref` | string | Git ref (branch, tag, or SHA). Used when `source: github` |
+| `path` | string | Subdirectory within the repository containing the plugin index. Used when `source: github` |
+| `host_pattern` | string | Hostname regex. Used when `source: hostPattern` |
+| `package` | string | npm package name. Used when `source: npm` |
+
+### `PluginRef` fields
+
+Used in `preinstall` and `ecosystem_definitions[*].plugins`.
+
+| Field | Type | Description |
+|---|---|---|
+| `marketplace` | string | The registered marketplace name (e.g. `claude-plugins-official`) |
+| `plugin` | string | The plugin identifier within that marketplace |
+
+### Per-plugin allowlisting
+
+Claude Code has no hook event for `/plugin install` — plugin installation slash commands bypass the hook system entirely. `strict_marketplaces` enforces at the marketplace source level, not the individual plugin level.
+
+Operators who need per-plugin control should create a private marketplace repository containing only the approved plugin index, then bind to it exclusively:
+
+```yaml
+policy:
+  plugins:
+    strict_marketplaces: true
+    builtin_marketplace: false      # disable the Anthropic official marketplace
+    extra_marketplaces:
+      - source: github
+        repo: your-org/approved-plugins
+        ref: main
+```
+
+This restricts the agent to exactly the plugins your organization has reviewed, with no dependency on any upstream marketplace.
+
+### Example
+
+```yaml
+ecosystem_definitions:
+  go:
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: go-lsp   # installed only when a repo declares the go ecosystem
+
+policy:
+  plugins:
+    strict_marketplaces: true
+    builtin_marketplace: true
+    extra_marketplaces:
+      - source: github
+        repo: acme-corp/plugins
+        ref: main
+    preinstall:
+      - marketplace: claude-plugins-official
+        plugin: github   # always installed regardless of ecosystem
+```
 
 ---
 

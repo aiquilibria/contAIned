@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -540,6 +541,158 @@ func TestMergeRepoManifest_NoDuplicateDomains(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("proxy.golang.org should appear exactly once, got %d", count)
+	}
+}
+
+// ── CollectPlugins ────────────────────────────────────────────────────────────
+
+func operatorWithPlugins() *Manifest {
+	m := operatorWithEcosystems()
+	m.Policy.Plugins.Preinstall = []PluginRef{
+		{Marketplace: "claude-plugins-official", Plugin: "global-plugin"},
+	}
+	m.EcosystemDefinitions["go"] = EcosystemDef{
+		Toolchain:      "go",
+		NetworkDomains: []string{"proxy.golang.org"},
+		Plugins: []PluginRef{
+			{Marketplace: "claude-plugins-official", Plugin: "go-lsp"},
+		},
+	}
+	m.EcosystemDefinitions["python"] = EcosystemDef{
+		NetworkDomains: []string{"pypi.org"},
+		Plugins: []PluginRef{
+			{Marketplace: "claude-plugins-official", Plugin: "python-lsp"},
+		},
+	}
+	return m
+}
+
+func TestCollectPlugins_NilRepo_OnlyPreinstall(t *testing.T) {
+	m := operatorWithPlugins()
+	plugins := CollectPlugins(m, nil)
+	if len(plugins) != 1 {
+		t.Fatalf("expected 1 plugin, got %d: %v", len(plugins), plugins)
+	}
+	if plugins[0].Plugin != "global-plugin" {
+		t.Errorf("unexpected plugin: %v", plugins[0])
+	}
+}
+
+func TestCollectPlugins_ActiveEcosystem_CollectsEcosystemPlugins(t *testing.T) {
+	m := operatorWithPlugins()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
+	plugins := CollectPlugins(m, repo)
+	// expect: global-plugin + go-lsp (order: preinstall first, then ecosystem)
+	if len(plugins) != 2 {
+		t.Fatalf("expected 2 plugins, got %d: %v", len(plugins), plugins)
+	}
+	names := map[string]bool{}
+	for _, p := range plugins {
+		names[p.Plugin] = true
+	}
+	if !names["global-plugin"] {
+		t.Error("expected global-plugin")
+	}
+	if !names["go-lsp"] {
+		t.Error("expected go-lsp")
+	}
+}
+
+func TestCollectPlugins_MultipleEcosystems_AllCollected(t *testing.T) {
+	m := operatorWithPlugins()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5", "python": ""},
+	}
+	plugins := CollectPlugins(m, repo)
+	if len(plugins) != 3 {
+		t.Fatalf("expected 3 plugins, got %d: %v", len(plugins), plugins)
+	}
+}
+
+func TestCollectPlugins_Deduplicated(t *testing.T) {
+	m := operatorWithPlugins()
+	// Add go-lsp to preinstall as well — should appear only once.
+	m.Policy.Plugins.Preinstall = append(m.Policy.Plugins.Preinstall,
+		PluginRef{Marketplace: "claude-plugins-official", Plugin: "go-lsp"},
+	)
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
+	plugins := CollectPlugins(m, repo)
+	count := 0
+	for _, p := range plugins {
+		if p.Plugin == "go-lsp" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("go-lsp should appear exactly once, got %d", count)
+	}
+}
+
+func TestCollectPlugins_NoPlugins_ReturnsNil(t *testing.T) {
+	m := validManifest()
+	plugins := CollectPlugins(m, nil)
+	if len(plugins) != 0 {
+		t.Errorf("expected empty, got %v", plugins)
+	}
+}
+
+func TestCollectPlugins_PreinstallOrderFirst(t *testing.T) {
+	m := operatorWithPlugins()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
+	plugins := CollectPlugins(m, repo)
+	// preinstall plugin must come before ecosystem plugin
+	if plugins[0].Plugin != "global-plugin" {
+		t.Errorf("expected global-plugin first, got %q", plugins[0].Plugin)
+	}
+}
+
+// ── EncodePluginsArg ──────────────────────────────────────────────────────────
+
+func TestEncodePluginsArg_Empty_ReturnsEmpty(t *testing.T) {
+	if got := EncodePluginsArg(nil); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+	if got := EncodePluginsArg([]PluginRef{}); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestEncodePluginsArg_SinglePlugin_Encoded(t *testing.T) {
+	plugins := []PluginRef{
+		{Marketplace: "claude-plugins-official", Plugin: "go-lsp"},
+	}
+	got := EncodePluginsArg(plugins)
+	if got == "" {
+		t.Fatal("expected non-empty base64 string")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(got)
+	if err != nil {
+		t.Fatalf("base64 decode error: %v", err)
+	}
+	if string(decoded) != "claude-plugins-official:go-lsp" {
+		t.Errorf("decoded: %q", string(decoded))
+	}
+}
+
+func TestEncodePluginsArg_MultiplePlugins_NewlineDelimited(t *testing.T) {
+	plugins := []PluginRef{
+		{Marketplace: "mp1", Plugin: "plugin-a"},
+		{Marketplace: "mp2", Plugin: "plugin-b"},
+	}
+	got := EncodePluginsArg(plugins)
+	decoded, err := base64.StdEncoding.DecodeString(got)
+	if err != nil {
+		t.Fatalf("base64 decode error: %v", err)
+	}
+	want := "mp1:plugin-a\nmp2:plugin-b"
+	if string(decoded) != want {
+		t.Errorf("decoded: got %q, want %q", string(decoded), want)
 	}
 }
 

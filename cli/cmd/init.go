@@ -316,6 +316,10 @@ func runInit(_ *cobra.Command, args []string) error {
 
 	fmt.Println()
 
+	// Collect plugins to pre-install at image build time.
+	plugins := manifest.CollectPlugins(m, repoManifest)
+	pluginsArg := manifest.EncodePluginsArg(plugins)
+
 	// Docker: build image + ensure volume + network.
 	printf := func(f string, a ...any) { fmt.Printf(f, a...) }
 	imageRebuilt, err := docker.DockerSetup(
@@ -325,6 +329,7 @@ func runInit(_ *cobra.Command, args []string) error {
 		manifestContent,
 		managedSettings,
 		claudeMd,
+		pluginsArg,
 		printf,
 	)
 	if err != nil {

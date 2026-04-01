@@ -135,6 +135,24 @@ ENV PATH="/opt/contained-venv/bin:/home/agent/.local/bin:/opt/claude-code:/usr/l
 
 USER agent
 
+# Pre-install plugins baked into the image at contained init time.
+# PLUGINS_TO_INSTALL is a base64-encoded newline-delimited list of
+# "marketplace:plugin" pairs collected from policy.plugins.preinstall and
+# active ecosystem_definitions[*].plugins in the operator manifest.
+#
+# TODO: verify that `claude --dangerously-skip-permissions plugin install
+#   --marketplace <mp> <plugin>` works non-interactively in the target Claude
+#   Code version. If the CLI form is unavailable, replace this step with direct
+#   population of the Claude Code plugin directory.
+ARG PLUGINS_TO_INSTALL=""
+RUN if [ -n "$PLUGINS_TO_INSTALL" ]; then \
+        echo "$PLUGINS_TO_INSTALL" | base64 -d | \
+        while IFS=: read -r mp plugin; do \
+            /opt/claude-code/claude --dangerously-skip-permissions \
+                plugin install --marketplace "$mp" "$plugin" || true; \
+        done; \
+    fi
+
 # Trust /workspace regardless of host UID/GID ownership
 RUN git config --global --add safe.directory /workspace
 

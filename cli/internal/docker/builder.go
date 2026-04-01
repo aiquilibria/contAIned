@@ -23,6 +23,97 @@ import (
 
 var version = ver.Version
 
+// buildPluginMarketplaceSettings derives the strictKnownMarketplaces and
+// extraKnownMarketplaces values from the manifest's plugin policy.
+//
+// Returns:
+//   - strict: slice of source objects for strictKnownMarketplaces, or nil when
+//     StrictMarketplaces is false (key should be omitted from output).
+//   - extra: map of name→{source:…} for extraKnownMarketplaces, or nil when
+//     ExtraMarketplaces is empty (key should be omitted from output).
+func buildPluginMarketplaceSettings(m *manifest.Manifest) (strict, extra any) {
+	p := m.Policy.Plugins
+
+	// extraKnownMarketplaces — always emit when extra marketplaces are present,
+	// regardless of strict mode, so they are auto-available without a manual
+	// /plugin marketplace add step.
+	if len(p.ExtraMarketplaces) > 0 {
+		extraMap := make(map[string]any, len(p.ExtraMarketplaces))
+		for _, mp := range p.ExtraMarketplaces {
+			key := marketplaceKey(mp)
+			extraMap[key] = map[string]any{
+				"source": marketplaceSourceObject(mp),
+			}
+		}
+		extra = extraMap
+	}
+
+	// strictKnownMarketplaces — only emit when strict mode is enabled.
+	if !p.StrictMarketplaces {
+		return nil, extra
+	}
+
+	// Use an empty non-nil slice so the key is always present when strict mode
+	// is on, even when both builtin and extra sources are disabled (total lockdown).
+	sources := make([]any, 0)
+	// Include the Anthropic builtin marketplace unless explicitly disabled.
+	builtin := p.BuiltinMarketplace == nil || *p.BuiltinMarketplace
+	if builtin {
+		sources = append(sources, map[string]any{"source": "builtin"})
+	}
+	for _, mp := range p.ExtraMarketplaces {
+		sources = append(sources, marketplaceSourceObject(mp))
+	}
+	return sources, extra
+}
+
+// marketplaceSourceObject converts a PluginMarketplace to the Claude Code
+// source object format used in strictKnownMarketplaces entries.
+func marketplaceSourceObject(mp manifest.PluginMarketplace) map[string]any {
+	obj := map[string]any{"source": mp.Source}
+	if mp.Repo != "" {
+		obj["repo"] = mp.Repo
+	}
+	if mp.Ref != "" {
+		obj["ref"] = mp.Ref
+	}
+	if mp.Path != "" {
+		obj["path"] = mp.Path
+	}
+	if mp.HostPattern != "" {
+		obj["hostPattern"] = mp.HostPattern
+	}
+	if mp.Package != "" {
+		obj["package"] = mp.Package
+	}
+	return obj
+}
+
+// marketplaceKey derives a stable map key for extraKnownMarketplaces from a
+// PluginMarketplace. Uses "repo" for github sources, "package" for npm,
+// "hostPattern" for hostPattern, and falls back to the source value itself.
+func marketplaceKey(mp manifest.PluginMarketplace) string {
+	switch mp.Source {
+	case "github":
+		// "acme-corp/plugins" → "acme-corp-plugins"
+		return strings.ReplaceAll(mp.Repo, "/", "-")
+	case "npm":
+		// "@acme/plugins" → "acme-plugins"
+		return strings.Trim(strings.ReplaceAll(mp.Package, "/", "-"), "@-")
+	case "hostPattern":
+		// Use a truncated sanitised form of the pattern.
+		key := strings.NewReplacer(
+			"\\.", "-", "^", "", "$", "", ".", "-",
+		).Replace(mp.HostPattern)
+		if len(key) > 40 {
+			key = key[:40]
+		}
+		return strings.Trim(key, "-")
+	default:
+		return mp.Source
+	}
+}
+
 // BuildManagedSettings generates the managed-settings.json content that is
 // baked into the Docker image. The dynamic sections (domain allow-list, MCP
 // server permissions, skill permissions) are derived from the manifest.
@@ -131,6 +222,15 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 		settings["env"] = m.Runtime.Docker.Env
 	}
 
+	// Inject plugin marketplace policy derived from policy.plugins.
+	strictMarketplaces, extraMarketplaces := buildPluginMarketplaceSettings(m)
+	if strictMarketplaces != nil {
+		settings["strictKnownMarketplaces"] = strictMarketplaces
+	}
+	if extraMarketplaces != nil {
+		settings["extraKnownMarketplaces"] = extraMarketplaces
+	}
+
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshalling managed-settings: %w", err)
@@ -204,6 +304,7 @@ func DockerSetup(
 	manifestContent string,
 	managedSettingsContent string,
 	claudeMdContent string,
+	pluginsToInstall string,
 	printf func(string, ...any),
 ) (bool, error) {
 	dockerBin, err := findDocker()
@@ -275,6 +376,9 @@ func DockerSetup(
 			"--build-arg", "MANAGED_SETTINGS_CONTENT=" + settingsB64,
 			"--build-arg", "CLAUDE_MD_CONTENT=" + claudeMdB64,
 			"-t", image,
+		}
+		if pluginsToInstall != "" {
+			buildArgs = append(buildArgs, "--build-arg", "PLUGINS_TO_INSTALL="+pluginsToInstall)
 		}
 
 		dockerfilePath := filepath.Join(buildContext, "Dockerfile")
