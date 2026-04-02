@@ -30,29 +30,48 @@ ecosystem_definitions:
       # so `go build` fails without this override. /tmp/claude is created in the
       # Dockerfile and is the same directory the sandbox sets TMPDIR to.
       GOCACHE: /tmp/claude/go-build
+    # plugins: LSP servers pre-installed when this ecosystem is active.
+    # plugins:
+    #   - marketplace: claude-plugins-official
+    #     plugin: go-lsp
   python:
     # Python is pre-installed in the base image; no toolchain key needed.
     network_domains:
       - pypi.org
       - files.pythonhosted.org
+    # plugins:
+    #   - marketplace: claude-plugins-official
+    #     plugin: python-lsp
   node:
     toolchain: node
     network_domains:
       - registry.npmjs.org
+    # plugins:
+    #   - marketplace: claude-plugins-official
+    #     plugin: node-lsp
   typescript:
     toolchain: node   # TypeScript runs on Node.js
     network_domains:
       - registry.npmjs.org
+    # plugins:
+    #   - marketplace: claude-plugins-official
+    #     plugin: typescript-lsp
   ruby:
     toolchain: ruby
     network_domains:
       - rubygems.org
       - api.rubygems.org
+    # plugins:
+    #   - marketplace: claude-plugins-official
+    #     plugin: ruby-lsp
   java:
     toolchain: java
     network_domains:
       - repo1.maven.org
       - search.maven.org
+    # plugins:
+    #   - marketplace: claude-plugins-official
+    #     plugin: java-lsp
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 runtime:
@@ -168,6 +187,37 @@ policy:
       - name: coverage
         command: ["python", "-m", "pytest", "tests/", "--cov", "--cov-report=term-missing", "--cov-fail-under=80", "-q"]
         when_changed: ["*.py"]
+
+  # ── Plugin marketplace enforcement ───────────────────────────────────────────
+  # Controls which Claude Code plugin marketplaces the agent may use.
+  #
+  # strict_marketplaces: when true, only the sources listed below may be added.
+  #   All other marketplace sources are blocked before any network/filesystem op.
+  #   Default: false (no marketplace restrictions).
+  #
+  # builtin_marketplace: include the Anthropic official marketplace in the
+  #   allowed sources. Set to false to restrict to operator-controlled sources
+  #   only. Default: true.
+  #
+  # extra_marketplaces: additional approved sources, pre-registered so they are
+  #   available without a manual /plugin marketplace add step.
+  #
+  # preinstall: plugins baked into the image at contained init time, available
+  #   from the first session.
+  #
+  # For per-plugin allowlisting, create a private marketplace containing only
+  # the approved plugin index and bind to it via strict_marketplaces + extra_marketplaces.
+  #
+  # plugins:
+  #   strict_marketplaces: true
+  #   builtin_marketplace: true
+  #   extra_marketplaces:
+  #     - source: github
+  #       repo: your-org/plugins
+  #       ref: main
+  #   preinstall:
+  #     - marketplace: claude-plugins-official
+  #       plugin: some-plugin
 
   # ── MCP server approvals ──────────────────────────────────────────────────────
   mcp:

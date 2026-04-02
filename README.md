@@ -419,7 +419,7 @@ contAIned separates two distinct governance concerns that are often conflated:
 
 | Concern | What it controls | Risk addressed | Manifest key |
 |---|---|---|---|
-| **Dependency governance** (TPRM / SCA / SBOM) | What toolchains and package ecosystems the agent may install | Supply chain — installing vulnerable or unapproved software | `ecosystem_definitions`, `runtime.docker.toolchains` |
+| **Dependency governance** (TPRM / SCA / SBOM) | What toolchains and package ecosystems the agent may install | Supply chain — installing vulnerable or unapproved software | `ecosystem_definitions`, `runtime.docker.toolchains`, `policy.plugins` |
 | **Egress governance** | What outbound domains the agent and its subprocesses may reach | Exfiltration — sending workspace data outside the project | `policy.network.allowed_domains` |
 
 Both concerns are owned exclusively by the manifest passed to `contained init`. Ecosystem declarations in the repo manifest are resolved against `ecosystem_definitions` in that manifest — a team cannot install a toolchain or reach a package registry that the manifest has not approved.
@@ -595,6 +595,48 @@ policy:
 ```
 
 Commands run with `shell=False` using exec-form arrays. A check whose binary is not installed is skipped automatically. Exit code 5 (no tests collected) is treated as a pass.
+
+### Plugin marketplace enforcement
+
+Claude Code supports plugins — skills, agents, hooks, MCP servers, and LSP servers distributed through *marketplaces*. contAIned gives operators three levers to govern plugin usage, all configured under `policy.plugins` in `manifest.yaml`:
+
+**`strict_marketplaces`** — when `true`, emits `strictKnownMarketplaces` into `managed-settings.json`. Only sources in the resolved list may be added; all other marketplace sources are blocked before any network or filesystem operation. Default: `false` (no restrictions).
+
+**`preinstall`** — plugins baked into the container image at `contained init` time, available from the first session without any manual install step. Use this for cross-cutting tools like a GitHub integration that should always be present regardless of which project the agent is working on.
+
+**Ecosystem `plugins`** — per-ecosystem plugin lists in `ecosystem_definitions`, pre-installed whenever that ecosystem is active in the workspace. The natural home for LSP servers (`go-lsp`, `python-lsp`, `typescript-lsp`) that should only be present when the relevant language is in use.
+
+```yaml
+# In your operator manifest:
+ecosystem_definitions:
+  go:
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: go-lsp   # installed only when a repo declares the go ecosystem
+
+policy:
+  plugins:
+    strict_marketplaces: true      # block unknown marketplace sources
+    builtin_marketplace: true      # include the Anthropic official marketplace
+    preinstall:
+      - marketplace: claude-plugins-official
+        plugin: github             # always installed regardless of ecosystem
+```
+
+**Per-plugin allowlisting.** Claude Code has no hook event for `/plugin install` — plugin installation slash commands bypass the hook system entirely. If you need to restrict individual plugins within a marketplace, the recommended path is to create a private marketplace repository containing only the approved plugin index, then bind to it exclusively:
+
+```yaml
+policy:
+  plugins:
+    strict_marketplaces: true
+    builtin_marketplace: false     # disable the Anthropic official marketplace
+    extra_marketplaces:
+      - source: github
+        repo: your-org/approved-plugins
+        ref: main
+```
+
+This limits the agent to exactly the plugins your organization has reviewed, with no dependency on the upstream marketplace. See [docs/policy-reference.md](docs/policy-reference.md) for the full `policy.plugins` schema.
 
 ---
 

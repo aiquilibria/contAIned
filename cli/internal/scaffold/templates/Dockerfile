@@ -109,8 +109,49 @@ try:
 except Exception:
     pass
 " 2>/dev/null)
+# Export extra_secrets into the environment. Each secret is mounted read-only
+# at /run/contained/secrets-env/<VAR_NAME> by the runner; exporting here keeps
+# values out of docker run args and docker inspect output.
+for _f in /run/contained/secrets-env/*; do
+    [ -f "$_f" ] || continue
+    export "$(basename "$_f")=$(cat "$_f")"
+done
 CMD="claude --plugin-dir /etc/contained/plugin"
 [ -n "$MODEL" ] && CMD="$CMD --model $MODEL"
+# Write ~/.netrc entries for git/curl HTTPS auth from already-exported secrets.
+# Each line in netrc-from-secrets.txt is "machine:ENV_VAR"; the env var was
+# exported above from /run/contained/secrets-env/ so its value is available now.
+if [ -f /etc/contained/netrc-from-secrets.txt ]; then
+    while IFS=: read -r _machine _env_var || [ -n "$_machine" ]; do
+        [ -z "$_machine" ] || [ -z "$_env_var" ] && continue
+        eval "_secret_val=\"\${${_env_var}:-}\""
+        if [ -n "$_secret_val" ]; then
+            printf 'machine %s login x-token password %s\n' "$_machine" "$_secret_val" >> ~/.netrc
+        fi
+    done < /etc/contained/netrc-from-secrets.txt
+    chmod 600 ~/.netrc 2>/dev/null || true
+fi
+# Restore pre-installed marketplace files into the host-mounted ~/.claude/plugins
+# so that plugin commands can resolve sources even before registration completes.
+# cp -rn is purely additive and never overwrites files the user already has.
+if [ -d /opt/contained-plugins-preinstalled ]; then
+    mkdir -p /home/agent/.claude/plugins
+    cp -rn /opt/contained-plugins-preinstalled/. /home/agent/.claude/plugins/ 2>/dev/null || true
+fi
+# Register pre-configured plugins into ~/.claude.json (the host-mounted settings
+# file that drives `claude plugin list`). A content-hash marker file ensures this
+# only runs when the plugin set changes, keeping subsequent startups fast.
+if [ -f /etc/contained/preinstall-plugins.txt ]; then
+    HASH=$(md5sum /etc/contained/preinstall-plugins.txt 2>/dev/null | cut -d' ' -f1 || echo "unknown")
+    MARKER="/home/agent/.claude/plugins/.contained-plugins-$HASH"
+    if [ ! -f "$MARKER" ]; then
+        while IFS=: read -r mp plugin || [ -n "$mp" ]; do
+            [ -z "$mp" ] || [ -z "$plugin" ] && continue
+            /opt/claude-code/claude --dangerously-skip-permissions plugin install "$plugin@$mp" >/dev/null 2>&1 || true
+        done < /etc/contained/preinstall-plugins.txt
+        touch "$MARKER" 2>/dev/null || true
+    fi
+fi
 exec $CMD "$@"
 ENTRYPOINT_EOF
 RUN chmod +x /etc/contained/entrypoint.sh
@@ -133,6 +174,52 @@ RUN mkdir -p /home/agent/.local/bin \
 
 ENV PATH="/opt/contained-venv/bin:/home/agent/.local/bin:/opt/claude-code:/usr/local/go/bin:/usr/local/ruby/bin:$PATH"
 
+USER agent
+
+# Marketplace repos are pre-cloned on the host by contained init (git clone +
+# external_plugins/ → plugins/ merge) and injected via the build context.
+# known_marketplaces.json maps name → source/installLocation for Claude Code.
+COPY --chown=agent:agent marketplaces/ /home/agent/.claude/plugins/marketplaces/
+COPY --chown=agent:agent known_marketplaces.json /home/agent/.claude/plugins/known_marketplaces.json
+
+# Pre-install plugins baked into the image at contained init time.
+# PLUGINS_TO_INSTALL is a base64-encoded newline-delimited list of
+# "marketplace:plugin" pairs collected from policy.plugins.preinstall and
+# active ecosystem_definitions[*].plugins in the operator manifest.
+#
+ARG PLUGINS_TO_INSTALL=""
+RUN if [ -n "$PLUGINS_TO_INSTALL" ]; then \
+        echo "$PLUGINS_TO_INSTALL" | base64 -d | \
+        while IFS=: read -r mp plugin; do \
+            if output=$(/opt/claude-code/claude --dangerously-skip-permissions \
+                    plugin install "$plugin@$mp" 2>&1); then \
+                echo "[contained] Installed $plugin@$mp"; \
+            else \
+                echo "[contained] FAILED: $plugin@$mp"; \
+                echo "$output" | while IFS= read -r errline; do \
+                    echo "[contained]   $errline"; \
+                done; \
+            fi; \
+        done; \
+    fi
+
+# Snapshot the pre-installed plugin state to /opt so the entrypoint can
+# restore it after the host's ~/.claude directory is bind-mounted at runtime
+# (which shadows everything written to ~/.claude during docker build).
+USER root
+RUN cp -rp /home/agent/.claude/plugins /opt/contained-plugins-preinstalled
+# Write the decoded plugin list so the entrypoint can re-register plugins into
+# the host-mounted ~/.claude.json at first container start.
+RUN if [ -n "$PLUGINS_TO_INSTALL" ]; then \
+        echo "$PLUGINS_TO_INSTALL" | base64 -d > /etc/contained/preinstall-plugins.txt; \
+    fi
+# Bake the netrc-from-secrets mapping so the entrypoint can generate ~/.netrc
+# entries for git/curl HTTPS auth from already-exported extra_secrets.
+# NETRC_FROM_SECRETS is a base64-encoded newline-delimited "machine:ENV_VAR" list.
+ARG NETRC_FROM_SECRETS=""
+RUN if [ -n "$NETRC_FROM_SECRETS" ]; then \
+        echo "$NETRC_FROM_SECRETS" | base64 -d > /etc/contained/netrc-from-secrets.txt; \
+    fi
 USER agent
 
 # Trust /workspace regardless of host UID/GID ownership

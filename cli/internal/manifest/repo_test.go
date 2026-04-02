@@ -1,6 +1,7 @@
 package manifest
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -543,6 +544,158 @@ func TestMergeRepoManifest_NoDuplicateDomains(t *testing.T) {
 	}
 }
 
+// ── CollectPlugins ────────────────────────────────────────────────────────────
+
+func operatorWithPlugins() *Manifest {
+	m := operatorWithEcosystems()
+	m.Policy.Plugins.Preinstall = []PluginRef{
+		{Marketplace: "claude-plugins-official", Plugin: "global-plugin"},
+	}
+	m.EcosystemDefinitions["go"] = EcosystemDef{
+		Toolchain:      "go",
+		NetworkDomains: []string{"proxy.golang.org"},
+		Plugins: []PluginRef{
+			{Marketplace: "claude-plugins-official", Plugin: "go-lsp"},
+		},
+	}
+	m.EcosystemDefinitions["python"] = EcosystemDef{
+		NetworkDomains: []string{"pypi.org"},
+		Plugins: []PluginRef{
+			{Marketplace: "claude-plugins-official", Plugin: "python-lsp"},
+		},
+	}
+	return m
+}
+
+func TestCollectPlugins_NilRepo_OnlyPreinstall(t *testing.T) {
+	m := operatorWithPlugins()
+	plugins := CollectPlugins(m, nil)
+	if len(plugins) != 1 {
+		t.Fatalf("expected 1 plugin, got %d: %v", len(plugins), plugins)
+	}
+	if plugins[0].Plugin != "global-plugin" {
+		t.Errorf("unexpected plugin: %v", plugins[0])
+	}
+}
+
+func TestCollectPlugins_ActiveEcosystem_CollectsEcosystemPlugins(t *testing.T) {
+	m := operatorWithPlugins()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
+	plugins := CollectPlugins(m, repo)
+	// expect: global-plugin + go-lsp (order: preinstall first, then ecosystem)
+	if len(plugins) != 2 {
+		t.Fatalf("expected 2 plugins, got %d: %v", len(plugins), plugins)
+	}
+	names := map[string]bool{}
+	for _, p := range plugins {
+		names[p.Plugin] = true
+	}
+	if !names["global-plugin"] {
+		t.Error("expected global-plugin")
+	}
+	if !names["go-lsp"] {
+		t.Error("expected go-lsp")
+	}
+}
+
+func TestCollectPlugins_MultipleEcosystems_AllCollected(t *testing.T) {
+	m := operatorWithPlugins()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5", "python": ""},
+	}
+	plugins := CollectPlugins(m, repo)
+	if len(plugins) != 3 {
+		t.Fatalf("expected 3 plugins, got %d: %v", len(plugins), plugins)
+	}
+}
+
+func TestCollectPlugins_Deduplicated(t *testing.T) {
+	m := operatorWithPlugins()
+	// Add go-lsp to preinstall as well — should appear only once.
+	m.Policy.Plugins.Preinstall = append(m.Policy.Plugins.Preinstall,
+		PluginRef{Marketplace: "claude-plugins-official", Plugin: "go-lsp"},
+	)
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
+	plugins := CollectPlugins(m, repo)
+	count := 0
+	for _, p := range plugins {
+		if p.Plugin == "go-lsp" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("go-lsp should appear exactly once, got %d", count)
+	}
+}
+
+func TestCollectPlugins_NoPlugins_ReturnsNil(t *testing.T) {
+	m := validManifest()
+	plugins := CollectPlugins(m, nil)
+	if len(plugins) != 0 {
+		t.Errorf("expected empty, got %v", plugins)
+	}
+}
+
+func TestCollectPlugins_PreinstallOrderFirst(t *testing.T) {
+	m := operatorWithPlugins()
+	repo := &RepoManifest{
+		Ecosystems: map[string]string{"go": "1.22.5"},
+	}
+	plugins := CollectPlugins(m, repo)
+	// preinstall plugin must come before ecosystem plugin
+	if plugins[0].Plugin != "global-plugin" {
+		t.Errorf("expected global-plugin first, got %q", plugins[0].Plugin)
+	}
+}
+
+// ── EncodePluginsArg ──────────────────────────────────────────────────────────
+
+func TestEncodePluginsArg_Empty_ReturnsEmpty(t *testing.T) {
+	if got := EncodePluginsArg(nil); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+	if got := EncodePluginsArg([]PluginRef{}); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestEncodePluginsArg_SinglePlugin_Encoded(t *testing.T) {
+	plugins := []PluginRef{
+		{Marketplace: "claude-plugins-official", Plugin: "go-lsp"},
+	}
+	got := EncodePluginsArg(plugins)
+	if got == "" {
+		t.Fatal("expected non-empty base64 string")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(got)
+	if err != nil {
+		t.Fatalf("base64 decode error: %v", err)
+	}
+	if string(decoded) != "claude-plugins-official:go-lsp" {
+		t.Errorf("decoded: %q", string(decoded))
+	}
+}
+
+func TestEncodePluginsArg_MultiplePlugins_NewlineDelimited(t *testing.T) {
+	plugins := []PluginRef{
+		{Marketplace: "mp1", Plugin: "plugin-a"},
+		{Marketplace: "mp2", Plugin: "plugin-b"},
+	}
+	got := EncodePluginsArg(plugins)
+	decoded, err := base64.StdEncoding.DecodeString(got)
+	if err != nil {
+		t.Fatalf("base64 decode error: %v", err)
+	}
+	want := "mp1:plugin-a\nmp2:plugin-b"
+	if string(decoded) != want {
+		t.Errorf("decoded: got %q, want %q", string(decoded), want)
+	}
+}
+
 // ── satisfiesConstraint ───────────────────────────────────────────────────────
 
 func TestSatisfiesConstraint_FloorConstraint(t *testing.T) {
@@ -590,6 +743,159 @@ func TestSatisfiesConstraint_ExactConstraint(t *testing.T) {
 		if got != c.want {
 			t.Errorf("satisfiesConstraint(%q, %q) = %v, want %v", c.constraint, c.version, got, c.want)
 		}
+	}
+}
+
+// ── CollectMarketplaceClones / EncodeMarketplaceClonesArg ─────────────────────
+
+func boolPtr(b bool) *bool { return &b }
+
+func baseOperator() *Manifest {
+	return &Manifest{}
+}
+
+func TestCollectMarketplaceClones_NoPlugins_Empty(t *testing.T) {
+	clones := CollectMarketplaceClones(baseOperator(), nil)
+	if len(clones) != 0 {
+		t.Errorf("expected empty, got %v", clones)
+	}
+}
+
+func TestCollectMarketplaceClones_BuiltinTrue_PluginUsesIt(t *testing.T) {
+	m := baseOperator()
+	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
+	plugins := []PluginRef{{Marketplace: "claude-plugins-official", Plugin: "github"}}
+	clones := CollectMarketplaceClones(m, plugins)
+	if len(clones) != 1 {
+		t.Fatalf("expected 1, got %v", clones)
+	}
+	if clones[0].Name != "claude-plugins-official" || clones[0].Repo != "anthropics/claude-plugins-official" {
+		t.Errorf("unexpected clone: %+v", clones[0])
+	}
+}
+
+func TestCollectMarketplaceClones_BuiltinTrue_NoPluginUsesIt_Empty(t *testing.T) {
+	m := baseOperator()
+	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
+	plugins := []PluginRef{{Marketplace: "other-mp", Plugin: "tool"}}
+	clones := CollectMarketplaceClones(m, plugins)
+	if len(clones) != 0 {
+		t.Errorf("expected empty (no plugin uses claude-plugins-official), got %v", clones)
+	}
+}
+
+func TestCollectMarketplaceClones_BuiltinFalse_Empty(t *testing.T) {
+	m := baseOperator()
+	m.Policy.Plugins.BuiltinMarketplace = boolPtr(false)
+	plugins := []PluginRef{{Marketplace: "claude-plugins-official", Plugin: "github"}}
+	clones := CollectMarketplaceClones(m, plugins)
+	if len(clones) != 0 {
+		t.Errorf("expected empty when builtin_marketplace false, got %v", clones)
+	}
+}
+
+func TestCollectMarketplaceClones_ExtraGithubMarketplace_Included(t *testing.T) {
+	m := baseOperator()
+	m.Policy.Plugins.ExtraMarketplaces = []PluginMarketplace{
+		{Source: "github", Repo: "acme-corp/plugins"},
+	}
+	plugins := []PluginRef{{Marketplace: "acme-corp-plugins", Plugin: "mytool"}}
+	clones := CollectMarketplaceClones(m, plugins)
+	if len(clones) != 1 {
+		t.Fatalf("expected 1, got %v", clones)
+	}
+	if clones[0].Name != "acme-corp-plugins" || clones[0].Repo != "acme-corp/plugins" {
+		t.Errorf("unexpected clone: %+v", clones[0])
+	}
+}
+
+func TestCollectMarketplaceClones_ExtraNonGithub_Excluded(t *testing.T) {
+	m := baseOperator()
+	m.Policy.Plugins.ExtraMarketplaces = []PluginMarketplace{
+		{Source: "npm", Package: "@acme/plugins"},
+	}
+	plugins := []PluginRef{{Marketplace: "acme-plugins", Plugin: "mytool"}}
+	clones := CollectMarketplaceClones(m, plugins)
+	if len(clones) != 0 {
+		t.Errorf("expected empty for non-github source, got %v", clones)
+	}
+}
+
+func TestEncodeMarketplaceClonesArg_Empty_ReturnsEmpty(t *testing.T) {
+	if got := EncodeMarketplaceClonesArg(nil); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestEncodeMarketplaceClonesArg_Roundtrip(t *testing.T) {
+	clones := []MarketplaceClone{
+		{Name: "claude-plugins-official", Repo: "anthropics/claude-plugins-official"},
+	}
+	encoded := EncodeMarketplaceClonesArg(clones)
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if string(decoded) != "claude-plugins-official:anthropics/claude-plugins-official\n" {
+		t.Errorf("unexpected decoded: %q", string(decoded))
+	}
+}
+
+// ── EncodeNetrcFromSecretsArg ─────────────────────────────────────────────────
+
+func TestEncodeNetrcFromSecretsArg_Empty_ReturnsEmpty(t *testing.T) {
+	if got := EncodeNetrcFromSecretsArg(nil); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestEncodeNetrcFromSecretsArg_NoNetrcMachine_ReturnsEmpty(t *testing.T) {
+	secrets := []ExtraSecret{
+		{Path: "~/.contained/secrets/foo", Env: "FOO_TOKEN"},
+	}
+	if got := EncodeNetrcFromSecretsArg(secrets); got != "" {
+		t.Errorf("expected empty string when no netrc_machine, got %q", got)
+	}
+}
+
+func TestEncodeNetrcFromSecretsArg_WithNetrcMachine_Roundtrip(t *testing.T) {
+	secrets := []ExtraSecret{
+		{Path: "~/.contained/secrets/github_token", Env: "GITHUB_PERSONAL_ACCESS_TOKEN", NetrcMachine: "github.com"},
+	}
+	encoded := EncodeNetrcFromSecretsArg(secrets)
+	if encoded == "" {
+		t.Fatal("expected non-empty encoded string")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	want := "github.com:GITHUB_PERSONAL_ACCESS_TOKEN\n"
+	if string(decoded) != want {
+		t.Errorf("unexpected decoded: %q (want %q)", string(decoded), want)
+	}
+}
+
+func TestEncodeNetrcFromSecretsArg_MultipleSecrets_OnlyNetrcMachineIncluded(t *testing.T) {
+	secrets := []ExtraSecret{
+		{Path: "~/.contained/secrets/github_token", Env: "GITHUB_TOKEN", NetrcMachine: "github.com"},
+		{Path: "~/.contained/secrets/other", Env: "OTHER_TOKEN"},
+		{Path: "~/.contained/secrets/gitlab_token", Env: "GITLAB_TOKEN", NetrcMachine: "gitlab.com"},
+	}
+	encoded := EncodeNetrcFromSecretsArg(secrets)
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(decoded), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d: %v", len(lines), lines)
+	}
+	if lines[0] != "github.com:GITHUB_TOKEN" {
+		t.Errorf("line 0: got %q", lines[0])
+	}
+	if lines[1] != "gitlab.com:GITLAB_TOKEN" {
+		t.Errorf("line 1: got %q", lines[1])
 	}
 }
 

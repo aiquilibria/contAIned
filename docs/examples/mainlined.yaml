@@ -21,7 +21,7 @@
 # an internal PyPI mirror instead of pypi.org.
 ecosystem_definitions:
   go:
-    toolchain: go                                                                                                     
+    toolchain: go
     deps:
       - golangci-lint
     network_domains:
@@ -31,31 +31,49 @@ ecosystem_definitions:
     env:
       GOCACHE: /tmp/claude/go-build
       GOPATH: /tmp/claude/gopath
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: gopls-lsp
   python:
     # Python is pre-installed in the base image; no toolchain key needed.
     network_domains:
       - pypi.org
       - files.pythonhosted.org
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: pyright-lsp
   node:
     toolchain: node
     network_domains:
       - registry.npmjs.org
     install: [npm, install]
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: typescript-lsp
   typescript:
     toolchain: node   # TypeScript runs on Node.js
     network_domains:
       - registry.npmjs.org
     install: [npm, install]
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: typescript-lsp
   ruby:
     toolchain: ruby
     network_domains:
       - rubygems.org
       - api.rubygems.org
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: ruby-lsp
   java:
     toolchain: java
     network_domains:
       - repo1.maven.org
       - search.maven.org
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: jdtls-lsp
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 runtime:
@@ -69,8 +87,10 @@ runtime:
     toolchains:
       go: ">=1.23"
       node: ">=20"
-    extra_mounts:
-      - ~/.netrc:/home/agent/.netrc:ro
+    extra_secrets:
+      - path: ~/.contained/secrets/github_token
+        env: GITHUB_PERSONAL_ACCESS_TOKEN
+        netrc_machine: github.com
   mAInlined:
     url: "https://mainlined.example.com"
 
@@ -83,7 +103,7 @@ policy:
 
   # ── Sigstore provenance ──────────────────────────────────────────────────────
   sigstore:
-    enabled: true
+    enabled: false
     rekor_url: https://rekor.sigstore.dev
     fulcio_url: https://fulcio.sigstore.dev
 
@@ -172,6 +192,19 @@ policy:
   # that run in addition to the repo's checks.
   qa:
     checks: []
+
+  # ── Plugin marketplace enforcement ───────────────────────────────────────────
+  # Restrict to the Anthropic official marketplace only. Repositories may not
+  # add other sources. The github plugin is always pre-installed so the agent
+  # can work with pull requests and issues without a manual install step.
+  # Ecosystem-specific LSP plugins (go-lsp, python-lsp, etc.) are defined above
+  # in ecosystem_definitions and are installed only when that ecosystem is active.
+  plugins:
+    strict_marketplaces: true
+    builtin_marketplace: true
+    preinstall:
+      - marketplace: claude-plugins-official
+        plugin: github
 
   # ── MCP server approvals ──────────────────────────────────────────────────────
   mcp:

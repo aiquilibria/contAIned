@@ -328,6 +328,168 @@ func TestValidate_ToolchainEmptyVersion_ReturnsError(t *testing.T) {
 	}
 }
 
+// ── policy.plugins ────────────────────────────────────────────────────────────
+
+func TestParse_Plugins_BuiltinMarketplaceDefaultsTrue(t *testing.T) {
+	// When builtin_marketplace is omitted, applyDefaults sets it to true.
+	yaml := `
+runtime:
+  docker:
+    image: x
+    network: n
+`
+	m, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Policy.Plugins.BuiltinMarketplace == nil {
+		t.Fatal("BuiltinMarketplace should not be nil after applyDefaults")
+	}
+	if !*m.Policy.Plugins.BuiltinMarketplace {
+		t.Error("BuiltinMarketplace default: want true, got false")
+	}
+}
+
+func TestParse_Plugins_BuiltinMarketplaceExplicitFalse(t *testing.T) {
+	yaml := `
+runtime:
+  docker:
+    image: x
+    network: n
+policy:
+  plugins:
+    builtin_marketplace: false
+`
+	m, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Policy.Plugins.BuiltinMarketplace == nil {
+		t.Fatal("BuiltinMarketplace should not be nil")
+	}
+	if *m.Policy.Plugins.BuiltinMarketplace {
+		t.Error("BuiltinMarketplace explicit false: want false, got true")
+	}
+}
+
+func TestParse_Plugins_StrictMarketplacesFalseIsZeroValue(t *testing.T) {
+	// Omitting strict_marketplaces should leave it as false (zero value).
+	yaml := `
+runtime:
+  docker:
+    image: x
+    network: n
+`
+	m, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Policy.Plugins.StrictMarketplaces {
+		t.Error("StrictMarketplaces should be false when omitted")
+	}
+}
+
+func TestParse_Plugins_RoundTrip(t *testing.T) {
+	bFalse := false
+	original := validManifest()
+	original.Policy.Plugins = PluginsConfig{
+		StrictMarketplaces: true,
+		BuiltinMarketplace: &bFalse,
+		ExtraMarketplaces: []PluginMarketplace{
+			{Source: "github", Repo: "acme/plugins", Ref: "main"},
+			{Source: "npm", Package: "@acme/plugins"},
+		},
+		Preinstall: []PluginRef{
+			{Marketplace: "acme-plugins", Plugin: "eslint-plugin"},
+		},
+	}
+
+	out, err := Serialise(original)
+	if err != nil {
+		t.Fatalf("serialise error: %v", err)
+	}
+
+	reparsed, err := Parse([]byte(out))
+	if err != nil {
+		t.Fatalf("reparse error: %v", err)
+	}
+
+	p := reparsed.Policy.Plugins
+	if !p.StrictMarketplaces {
+		t.Error("StrictMarketplaces round-trip: want true")
+	}
+	if p.BuiltinMarketplace == nil || *p.BuiltinMarketplace {
+		t.Error("BuiltinMarketplace round-trip: want false")
+	}
+	if len(p.ExtraMarketplaces) != 2 {
+		t.Fatalf("ExtraMarketplaces round-trip: got %d, want 2", len(p.ExtraMarketplaces))
+	}
+	if p.ExtraMarketplaces[0].Repo != "acme/plugins" {
+		t.Errorf("ExtraMarketplaces[0].Repo: got %q", p.ExtraMarketplaces[0].Repo)
+	}
+	if p.ExtraMarketplaces[1].Package != "@acme/plugins" {
+		t.Errorf("ExtraMarketplaces[1].Package: got %q", p.ExtraMarketplaces[1].Package)
+	}
+	if len(p.Preinstall) != 1 || p.Preinstall[0].Plugin != "eslint-plugin" {
+		t.Errorf("Preinstall round-trip: got %v", p.Preinstall)
+	}
+}
+
+func TestParse_Plugins_EmptySectionParsesWithoutError(t *testing.T) {
+	yaml := `
+runtime:
+  docker:
+    image: x
+    network: n
+policy:
+  plugins: {}
+`
+	m, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if m.Policy.Plugins.StrictMarketplaces {
+		t.Error("StrictMarketplaces should be false for empty section")
+	}
+	if len(m.Policy.Plugins.ExtraMarketplaces) != 0 {
+		t.Error("ExtraMarketplaces should be empty")
+	}
+	if len(m.Policy.Plugins.Preinstall) != 0 {
+		t.Error("Preinstall should be empty")
+	}
+}
+
+func TestParse_EcosystemDef_Plugins_RoundTrip(t *testing.T) {
+	yaml := `
+runtime:
+  docker:
+    image: x
+    network: n
+ecosystem_definitions:
+  python:
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: python-lsp
+`
+	m, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	def, ok := m.EcosystemDefinitions["python"]
+	if !ok {
+		t.Fatal("python ecosystem definition not found")
+	}
+	if len(def.Plugins) != 1 {
+		t.Fatalf("ecosystem plugins: got %d, want 1", len(def.Plugins))
+	}
+	if def.Plugins[0].Marketplace != "claude-plugins-official" {
+		t.Errorf("marketplace: got %q", def.Plugins[0].Marketplace)
+	}
+	if def.Plugins[0].Plugin != "python-lsp" {
+		t.Errorf("plugin: got %q", def.Plugins[0].Plugin)
+	}
+}
+
 // ── Serialise ─────────────────────────────────────────────────────────────────
 
 func TestSerialise_RoundTrip(t *testing.T) {

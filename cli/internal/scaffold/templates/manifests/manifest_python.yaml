@@ -8,6 +8,24 @@
 # Declaring the ecosystem tells `contained init` to add pypi.org and
 # files.pythonhosted.org to the network allowlist automatically.
 
+# To pre-install plugins in your operator manifest, use one of two mechanisms:
+#
+#   # Ecosystem-scoped: installed only when this ecosystem is active in a repo.
+#   ecosystem_definitions:
+#     python:
+#       plugins:
+#         - marketplace: claude-plugins-official
+#           plugin: python-lsp
+#
+#   # Global: always installed regardless of ecosystem (e.g. a GitHub integration).
+#   policy:
+#     plugins:
+#       preinstall:
+#         - marketplace: claude-plugins-official
+#           plugin: github
+#
+# See docs/policy-reference.md for full plugin policy options.
+
 ecosystems:
   python: ""   # pre-installed; set e.g. "3.12" as a version annotation if desired
 
