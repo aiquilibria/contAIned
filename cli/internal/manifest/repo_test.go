@@ -746,6 +746,159 @@ func TestSatisfiesConstraint_ExactConstraint(t *testing.T) {
 	}
 }
 
+// ── CollectMarketplaceClones / EncodeMarketplaceClonesArg ─────────────────────
+
+func boolPtr(b bool) *bool { return &b }
+
+func baseOperator() *Manifest {
+	return &Manifest{}
+}
+
+func TestCollectMarketplaceClones_NoPlugins_Empty(t *testing.T) {
+	clones := CollectMarketplaceClones(baseOperator(), nil)
+	if len(clones) != 0 {
+		t.Errorf("expected empty, got %v", clones)
+	}
+}
+
+func TestCollectMarketplaceClones_BuiltinTrue_PluginUsesIt(t *testing.T) {
+	m := baseOperator()
+	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
+	plugins := []PluginRef{{Marketplace: "claude-plugins-official", Plugin: "github"}}
+	clones := CollectMarketplaceClones(m, plugins)
+	if len(clones) != 1 {
+		t.Fatalf("expected 1, got %v", clones)
+	}
+	if clones[0].Name != "claude-plugins-official" || clones[0].Repo != "anthropics/claude-plugins-official" {
+		t.Errorf("unexpected clone: %+v", clones[0])
+	}
+}
+
+func TestCollectMarketplaceClones_BuiltinTrue_NoPluginUsesIt_Empty(t *testing.T) {
+	m := baseOperator()
+	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
+	plugins := []PluginRef{{Marketplace: "other-mp", Plugin: "tool"}}
+	clones := CollectMarketplaceClones(m, plugins)
+	if len(clones) != 0 {
+		t.Errorf("expected empty (no plugin uses claude-plugins-official), got %v", clones)
+	}
+}
+
+func TestCollectMarketplaceClones_BuiltinFalse_Empty(t *testing.T) {
+	m := baseOperator()
+	m.Policy.Plugins.BuiltinMarketplace = boolPtr(false)
+	plugins := []PluginRef{{Marketplace: "claude-plugins-official", Plugin: "github"}}
+	clones := CollectMarketplaceClones(m, plugins)
+	if len(clones) != 0 {
+		t.Errorf("expected empty when builtin_marketplace false, got %v", clones)
+	}
+}
+
+func TestCollectMarketplaceClones_ExtraGithubMarketplace_Included(t *testing.T) {
+	m := baseOperator()
+	m.Policy.Plugins.ExtraMarketplaces = []PluginMarketplace{
+		{Source: "github", Repo: "acme-corp/plugins"},
+	}
+	plugins := []PluginRef{{Marketplace: "acme-corp-plugins", Plugin: "mytool"}}
+	clones := CollectMarketplaceClones(m, plugins)
+	if len(clones) != 1 {
+		t.Fatalf("expected 1, got %v", clones)
+	}
+	if clones[0].Name != "acme-corp-plugins" || clones[0].Repo != "acme-corp/plugins" {
+		t.Errorf("unexpected clone: %+v", clones[0])
+	}
+}
+
+func TestCollectMarketplaceClones_ExtraNonGithub_Excluded(t *testing.T) {
+	m := baseOperator()
+	m.Policy.Plugins.ExtraMarketplaces = []PluginMarketplace{
+		{Source: "npm", Package: "@acme/plugins"},
+	}
+	plugins := []PluginRef{{Marketplace: "acme-plugins", Plugin: "mytool"}}
+	clones := CollectMarketplaceClones(m, plugins)
+	if len(clones) != 0 {
+		t.Errorf("expected empty for non-github source, got %v", clones)
+	}
+}
+
+func TestEncodeMarketplaceClonesArg_Empty_ReturnsEmpty(t *testing.T) {
+	if got := EncodeMarketplaceClonesArg(nil); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestEncodeMarketplaceClonesArg_Roundtrip(t *testing.T) {
+	clones := []MarketplaceClone{
+		{Name: "claude-plugins-official", Repo: "anthropics/claude-plugins-official"},
+	}
+	encoded := EncodeMarketplaceClonesArg(clones)
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if string(decoded) != "claude-plugins-official:anthropics/claude-plugins-official\n" {
+		t.Errorf("unexpected decoded: %q", string(decoded))
+	}
+}
+
+// ── EncodeNetrcFromSecretsArg ─────────────────────────────────────────────────
+
+func TestEncodeNetrcFromSecretsArg_Empty_ReturnsEmpty(t *testing.T) {
+	if got := EncodeNetrcFromSecretsArg(nil); got != "" {
+		t.Errorf("expected empty string, got %q", got)
+	}
+}
+
+func TestEncodeNetrcFromSecretsArg_NoNetrcMachine_ReturnsEmpty(t *testing.T) {
+	secrets := []ExtraSecret{
+		{Path: "~/.contained/secrets/foo", Env: "FOO_TOKEN"},
+	}
+	if got := EncodeNetrcFromSecretsArg(secrets); got != "" {
+		t.Errorf("expected empty string when no netrc_machine, got %q", got)
+	}
+}
+
+func TestEncodeNetrcFromSecretsArg_WithNetrcMachine_Roundtrip(t *testing.T) {
+	secrets := []ExtraSecret{
+		{Path: "~/.contained/secrets/github_token", Env: "GITHUB_PERSONAL_ACCESS_TOKEN", NetrcMachine: "github.com"},
+	}
+	encoded := EncodeNetrcFromSecretsArg(secrets)
+	if encoded == "" {
+		t.Fatal("expected non-empty encoded string")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	want := "github.com:GITHUB_PERSONAL_ACCESS_TOKEN\n"
+	if string(decoded) != want {
+		t.Errorf("unexpected decoded: %q (want %q)", string(decoded), want)
+	}
+}
+
+func TestEncodeNetrcFromSecretsArg_MultipleSecrets_OnlyNetrcMachineIncluded(t *testing.T) {
+	secrets := []ExtraSecret{
+		{Path: "~/.contained/secrets/github_token", Env: "GITHUB_TOKEN", NetrcMachine: "github.com"},
+		{Path: "~/.contained/secrets/other", Env: "OTHER_TOKEN"},
+		{Path: "~/.contained/secrets/gitlab_token", Env: "GITLAB_TOKEN", NetrcMachine: "gitlab.com"},
+	}
+	encoded := EncodeNetrcFromSecretsArg(secrets)
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(decoded), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines, got %d: %v", len(lines), lines)
+	}
+	if lines[0] != "github.com:GITHUB_TOKEN" {
+		t.Errorf("line 0: got %q", lines[0])
+	}
+	if lines[1] != "gitlab.com:GITLAB_TOKEN" {
+		t.Errorf("line 1: got %q", lines[1])
+	}
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 func writeRepoManifest(t *testing.T, content string) string {

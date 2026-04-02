@@ -33,7 +33,7 @@ ecosystem_definitions:
       GOPATH: /tmp/claude/gopath
     plugins:
       - marketplace: claude-plugins-official
-        plugin: go-lsp
+        plugin: gopls-lsp
   python:
     # Python is pre-installed in the base image; no toolchain key needed.
     network_domains:
@@ -41,7 +41,7 @@ ecosystem_definitions:
       - files.pythonhosted.org
     plugins:
       - marketplace: claude-plugins-official
-        plugin: python-lsp
+        plugin: pyright-lsp
   node:
     toolchain: node
     network_domains:
@@ -49,7 +49,7 @@ ecosystem_definitions:
     install: [npm, install]
     plugins:
       - marketplace: claude-plugins-official
-        plugin: node-lsp
+        plugin: typescript-lsp
   typescript:
     toolchain: node   # TypeScript runs on Node.js
     network_domains:
@@ -73,7 +73,7 @@ ecosystem_definitions:
       - search.maven.org
     plugins:
       - marketplace: claude-plugins-official
-        plugin: java-lsp
+        plugin: jdtls-lsp
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 runtime:
@@ -87,8 +87,10 @@ runtime:
     toolchains:
       go: ">=1.23"
       node: ">=20"
-    extra_mounts:
-      - ~/.netrc:/home/agent/.netrc:ro
+    extra_secrets:
+      - path: ~/.contained/secrets/github_token
+        env: GITHUB_PERSONAL_ACCESS_TOKEN
+        netrc_machine: github.com
   mAInlined:
     url: "https://mainlined.example.com"
 
@@ -101,7 +103,7 @@ policy:
 
   # ── Sigstore provenance ──────────────────────────────────────────────────────
   sigstore:
-    enabled: true
+    enabled: false
     rekor_url: https://rekor.sigstore.dev
     fulcio_url: https://fulcio.sigstore.dev
 

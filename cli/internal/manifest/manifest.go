@@ -63,6 +63,25 @@ type mAInlinedRuntimeConfig struct {
 	URL string `yaml:"url"`
 }
 
+// ExtraSecret declares a secret file on the host that is bind-mounted into
+// the container and exported as an environment variable by the entrypoint.
+// The file is mounted read-only at /run/contained/secrets-env/<Env> so the
+// value never appears in docker run arguments or docker inspect output.
+type ExtraSecret struct {
+	// Path is the host-side file that holds the secret value.
+	// A leading ~ is expanded to the operator's home directory.
+	// Example: ~/.contained/secrets/github_token
+	Path string `yaml:"path"`
+	// Env is the environment variable name to export inside the container.
+	// Example: GITHUB_PERSONAL_ACCESS_TOKEN
+	Env string `yaml:"env"`
+	// NetrcMachine, when non-empty, causes the entrypoint to write a ~/.netrc
+	// entry for this machine using the exported env var as the password.
+	// This covers git/curl HTTPS authentication without a separately mounted
+	// .netrc file. Example: github.com
+	NetrcMachine string `yaml:"netrc_machine,omitempty"`
+}
+
 type DockerConfig struct {
 	Image             string            `yaml:"image"`
 	Memory            string            `yaml:"memory"`
@@ -74,6 +93,10 @@ type DockerConfig struct {
 	// to docker run. A leading ~ is expanded to the operator's home directory.
 	// Example: ["~/.ssh:/home/agent/.ssh:ro"]
 	ExtraMounts []string `yaml:"extra_mounts,omitempty"`
+	// ExtraSecrets lists secrets to inject without exposing them as docker run
+	// --env flags. Each secret file is bind-mounted read-only and exported as
+	// an environment variable by the container entrypoint.
+	ExtraSecrets []ExtraSecret `yaml:"extra_secrets,omitempty"`
 	// Env holds merged environment variables collected from active ecosystems.
 	// Populated by MergeRepoManifest; not intended for direct YAML authoring.
 	Env map[string]string `yaml:"env,omitempty"`

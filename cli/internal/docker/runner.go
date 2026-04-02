@@ -116,6 +116,21 @@ func (r *Runner) baseArgs(dockerBin string) ([]string, error) {
 		args = append(args, "--volume", expanded)
 	}
 
+	// Bind-mount extra_secrets from the manifest. Each file is mounted read-only
+	// at /run/contained/secrets-env/<ENV_VAR_NAME> so the entrypoint can export
+	// it without the value appearing in docker run arguments or docker inspect.
+	for _, s := range r.cfg.ExtraSecrets {
+		expanded, err := expandHome(s.Path, home)
+		if err != nil {
+			return nil, fmt.Errorf("expanding extra_secret path %q: %w", s.Path, err)
+		}
+		if _, statErr := os.Stat(expanded); statErr == nil {
+			args = append(args, "--volume",
+				expanded+":/run/contained/secrets-env/"+s.Env+":ro",
+			)
+		}
+	}
+
 	// Bind-mount the mAInlined API key secret as read-only when configured.
 	// The container path is fixed at /run/contained/secrets/mainlined_api_key
 	// so enforcement hooks can always find it at a well-known location.

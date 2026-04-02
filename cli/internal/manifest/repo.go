@@ -237,19 +237,120 @@ func CollectPlugins(operator *Manifest, repo *RepoManifest) []PluginRef {
 	return collected
 }
 
+// MarketplaceClone holds the data needed to pre-clone a marketplace repo
+// during Docker build so that plugins with relative-path sources resolve.
+type MarketplaceClone struct {
+	Name string // marketplace slug, e.g. "claude-plugins-official"
+	Repo string // GitHub "owner/repo", e.g. "anthropics/claude-plugins-official"
+}
+
+// CollectMarketplaceClones returns the deduplicated set of GitHub-hosted
+// marketplace repos that need to be cloned into the image so that
+// "plugin@marketplace" references with relative-path sources (e.g.
+// external_plugins/github) resolve during docker build.
+//
+// Rules:
+//   - claude-plugins-official is included when builtin_marketplace is true
+//     and at least one plugin referencing it is in the install list.
+//   - Each extra_marketplace with source "github" is included when at least
+//     one plugin referencing it is in the install list.
+func CollectMarketplaceClones(operator *Manifest, plugins []PluginRef) []MarketplaceClone {
+	// Build a set of marketplace names actually used by the plugin list.
+	used := make(map[string]bool, len(plugins))
+	for _, p := range plugins {
+		used[p.Marketplace] = true
+	}
+
+	seen := make(map[string]bool)
+	var clones []MarketplaceClone
+	add := func(c MarketplaceClone) {
+		if !seen[c.Name] {
+			seen[c.Name] = true
+			clones = append(clones, c)
+		}
+	}
+
+	p := operator.Policy.Plugins
+	if p.BuiltinMarketplace != nil && *p.BuiltinMarketplace && used["claude-plugins-official"] {
+		add(MarketplaceClone{
+			Name: "claude-plugins-official",
+			Repo: "anthropics/claude-plugins-official",
+		})
+	}
+	for _, mp := range p.ExtraMarketplaces {
+		if mp.Source != "github" || mp.Repo == "" {
+			continue
+		}
+		name := marketplaceCloneKey(mp)
+		if used[name] {
+			add(MarketplaceClone{Name: name, Repo: mp.Repo})
+		}
+	}
+	return clones
+}
+
+// marketplaceCloneKey derives the marketplace slug from a PluginMarketplace,
+// matching the key used in extraKnownMarketplaces / known_marketplaces.json.
+func marketplaceCloneKey(mp PluginMarketplace) string {
+	// Reuse the same derivation as marketplaceKey in builder.go.
+	switch mp.Source {
+	case "github":
+		return strings.ReplaceAll(mp.Repo, "/", "-")
+	default:
+		return mp.Source
+	}
+}
+
+// encodeLinesArg encodes a non-empty slice of strings as a base64-encoded
+// newline-delimited value suitable for Docker build args. Returns "" when
+// lines is empty. trailingNewline should be true for args consumed by
+// "while IFS=… read" loops in the Dockerfile — POSIX read silently skips a
+// final line with no terminating newline.
+func encodeLinesArg(lines []string, trailingNewline bool) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	raw := strings.Join(lines, "\n")
+	if trailingNewline {
+		raw += "\n"
+	}
+	return base64.StdEncoding.EncodeToString([]byte(raw))
+}
+
+// EncodeMarketplaceClonesArg encodes a MarketplaceClone list as a
+// base64-encoded newline-delimited "name:owner/repo" string suitable for
+// passing as the MARKETPLACE_CLONES Docker build arg. Returns "" when empty.
+func EncodeMarketplaceClonesArg(clones []MarketplaceClone) string {
+	lines := make([]string, len(clones))
+	for i, c := range clones {
+		lines[i] = c.Name + ":" + c.Repo
+	}
+	return encodeLinesArg(lines, true)
+}
+
+// EncodeNetrcFromSecretsArg encodes the subset of extra_secrets that have a
+// NetrcMachine field as a base64-encoded newline-delimited "machine:ENV_VAR"
+// string suitable for passing as the NETRC_FROM_SECRETS Docker build arg.
+// Returns "" when no secrets have NetrcMachine set.
+func EncodeNetrcFromSecretsArg(secrets []ExtraSecret) string {
+	var lines []string
+	for _, s := range secrets {
+		if s.NetrcMachine != "" && s.Env != "" {
+			lines = append(lines, s.NetrcMachine+":"+s.Env)
+		}
+	}
+	return encodeLinesArg(lines, true)
+}
+
 // EncodePluginsArg encodes a plugin list as a base64-encoded newline-delimited
 // "marketplace:plugin" string suitable for passing as the PLUGINS_TO_INSTALL
 // Docker build arg. Returns "" when the list is empty.
 func EncodePluginsArg(plugins []PluginRef) string {
-	if len(plugins) == 0 {
-		return ""
+	lines := make([]string, len(plugins))
+	for i, p := range plugins {
+		lines[i] = p.Marketplace + ":" + p.Plugin
 	}
-	var lines []string
-	for _, p := range plugins {
-		lines = append(lines, p.Marketplace+":"+p.Plugin)
-	}
-	raw := strings.Join(lines, "\n")
-	return base64.StdEncoding.EncodeToString([]byte(raw))
+	return encodeLinesArg(lines, false)
 }
 
 func domainSet(domains []string) map[string]bool {

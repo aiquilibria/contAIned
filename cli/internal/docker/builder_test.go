@@ -543,22 +543,64 @@ func TestBuildManagedSettings_Plugins_NoExtra_ExtraKeyAbsent(t *testing.T) {
 	}
 }
 
-func TestBuildManagedSettings_Plugins_StrictTrue_NoExtra_EmptyList(t *testing.T) {
-	// strict_marketplaces: true with no extra_marketplaces → strictKnownMarketplaces
-	// is present but empty (total lockdown). Claude Code has no "builtin" source
-	// type, so builtin_marketplace does not add any entry to the array.
+func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinTrue_IncludesOfficial(t *testing.T) {
+	// strict_marketplaces: true + builtin_marketplace: true →
+	// strictKnownMarketplaces contains the official github source (not locked out),
+	// and extraKnownMarketplaces registers the name→source mapping so
+	// "plugin@claude-plugins-official" resolves during docker build.
 	m := baseManifest()
 	m.Policy.Plugins.StrictMarketplaces = true
 	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
 
 	settings := parsedSettings(t, m)
+
 	raw, ok := settings["strictKnownMarketplaces"]
 	if !ok {
 		t.Fatal("strictKnownMarketplaces should be present")
 	}
 	sources := raw.([]any)
-	if len(sources) != 0 {
-		t.Errorf("expected empty list (no extra marketplaces), got %v", sources)
+	if len(sources) != 1 {
+		t.Fatalf("expected 1 entry (official marketplace), got %d: %v", len(sources), sources)
+	}
+	entry := sources[0].(map[string]any)
+	if entry["source"] != "github" || entry["repo"] != "anthropics/claude-plugins-official" {
+		t.Errorf("expected official marketplace github entry, got %v", entry)
+	}
+
+	// extraKnownMarketplaces must register the name so docker build can resolve it.
+	extraRaw, ok := settings["extraKnownMarketplaces"]
+	if !ok {
+		t.Fatal("extraKnownMarketplaces should be present when builtin_marketplace: true")
+	}
+	extraMap := extraRaw.(map[string]any)
+	official, ok := extraMap["claude-plugins-official"]
+	if !ok {
+		t.Fatal("extraKnownMarketplaces should contain 'claude-plugins-official'")
+	}
+	officialSrc := official.(map[string]any)["source"].(map[string]any)
+	if officialSrc["source"] != "github" || officialSrc["repo"] != "anthropics/claude-plugins-official" {
+		t.Errorf("claude-plugins-official source: got %v", officialSrc)
+	}
+}
+
+func TestBuildManagedSettings_Plugins_BuiltinTrue_NoStrict_ExtraKeyPresent(t *testing.T) {
+	// builtin_marketplace: true without strict mode → extraKnownMarketplaces
+	// still registers the name so preinstall resolution works.
+	m := baseManifest()
+	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
+
+	settings := parsedSettings(t, m)
+
+	if _, ok := settings["strictKnownMarketplaces"]; ok {
+		t.Error("strictKnownMarketplaces should be absent when StrictMarketplaces is false")
+	}
+	extraRaw, ok := settings["extraKnownMarketplaces"]
+	if !ok {
+		t.Fatal("extraKnownMarketplaces should be present when builtin_marketplace: true")
+	}
+	extraMap := extraRaw.(map[string]any)
+	if _, ok := extraMap["claude-plugins-official"]; !ok {
+		t.Error("extraKnownMarketplaces should contain 'claude-plugins-official'")
 	}
 }
 
@@ -613,8 +655,8 @@ func TestBuildManagedSettings_Plugins_ExtraMarketplaces_ExtraKeyPresent(t *testi
 }
 
 func TestBuildManagedSettings_Plugins_StrictAndExtra_BothKeysPresent(t *testing.T) {
-	// strict + extra → strictKnownMarketplaces contains only the extra source
-	// (no "builtin" — Claude Code has no such source type); extraKnownMarketplaces
+	// strict + builtin + extra → strictKnownMarketplaces has 2 entries: the
+	// official marketplace slug and the extra source; extraKnownMarketplaces
 	// is also present.
 	m := baseManifest()
 	m.Policy.Plugins.StrictMarketplaces = true
@@ -630,15 +672,33 @@ func TestBuildManagedSettings_Plugins_StrictAndExtra_BothKeysPresent(t *testing.
 		t.Fatal("strictKnownMarketplaces should be present")
 	}
 	sources := strictRaw.([]any)
-	if len(sources) != 1 {
-		t.Fatalf("expected 1 entry (extra only), got %d", len(sources))
+	if len(sources) != 2 {
+		t.Fatalf("expected 2 entries (official + extra), got %d", len(sources))
 	}
-	entry := sources[0].(map[string]any)
-	if entry["source"] != "github" {
-		t.Errorf("entry should be github, got %v", entry["source"])
+	// First entry: official marketplace github source.
+	first := sources[0].(map[string]any)
+	if first["source"] != "github" || first["repo"] != "anthropics/claude-plugins-official" {
+		t.Errorf("first entry should be official marketplace, got %v", first)
+	}
+	// Second entry: extra github source.
+	second := sources[1].(map[string]any)
+	if second["source"] != "github" {
+		t.Errorf("second entry source: got %v", second["source"])
 	}
 
-	if _, ok := settings["extraKnownMarketplaces"]; !ok {
-		t.Error("extraKnownMarketplaces should also be present")
+	extraRaw, ok := settings["extraKnownMarketplaces"]
+	if !ok {
+		t.Fatal("extraKnownMarketplaces should be present")
+	}
+	// Both claude-plugins-official (from builtin) and acme-corp-plugins (from extra).
+	extraMap := extraRaw.(map[string]any)
+	if len(extraMap) != 2 {
+		t.Fatalf("expected 2 entries in extraKnownMarketplaces, got %d: %v", len(extraMap), extraMap)
+	}
+	if _, ok := extraMap["claude-plugins-official"]; !ok {
+		t.Error("extraKnownMarketplaces should contain 'claude-plugins-official'")
+	}
+	if _, ok := extraMap["acme-corp-plugins"]; !ok {
+		t.Error("extraKnownMarketplaces should contain 'acme-corp-plugins'")
 	}
 }

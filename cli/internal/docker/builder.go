@@ -34,17 +34,29 @@ var version = ver.Version
 func buildPluginMarketplaceSettings(m *manifest.Manifest) (strict, extra any) {
 	p := m.Policy.Plugins
 
-	// extraKnownMarketplaces — always emit when extra marketplaces are present,
-	// regardless of strict mode, so they are auto-available without a manual
-	// /plugin marketplace add step.
-	if len(p.ExtraMarketplaces) > 0 {
-		extraMap := make(map[string]any, len(p.ExtraMarketplaces))
-		for _, mp := range p.ExtraMarketplaces {
-			key := marketplaceKey(mp)
-			extraMap[key] = map[string]any{
-				"source": marketplaceSourceObject(mp),
-			}
+	// extraKnownMarketplaces — registers marketplace name→source mappings so
+	// that "name@marketplace" plugin references resolve without the user
+	// running /plugin marketplace add first.
+	//
+	// Always include claude-plugins-official when builtin_marketplace is true
+	// so that "plugin@claude-plugins-official" resolves during docker build
+	// (fresh agent user has no ~/.claude/plugins/known_marketplaces.json).
+	extraMap := make(map[string]any)
+	if p.BuiltinMarketplace != nil && *p.BuiltinMarketplace {
+		extraMap["claude-plugins-official"] = map[string]any{
+			"source": map[string]any{
+				"source": "github",
+				"repo":   "anthropics/claude-plugins-official",
+			},
 		}
+	}
+	for _, mp := range p.ExtraMarketplaces {
+		key := marketplaceKey(mp)
+		extraMap[key] = map[string]any{
+			"source": marketplaceSourceObject(mp),
+		}
+	}
+	if len(extraMap) > 0 {
 		extra = extraMap
 	}
 
@@ -53,14 +65,17 @@ func buildPluginMarketplaceSettings(m *manifest.Manifest) (strict, extra any) {
 		return nil, extra
 	}
 
-	// Use an empty non-nil slice so the key is always present when strict mode
-	// is on, even with no extra sources (total lockdown). Claude Code has no
-	// "builtin" source type, so the Anthropic official marketplace cannot be
-	// expressed as a source object — in strict mode it is blocked along with
-	// everything else unless added as an explicit extra_marketplace entry.
-	// The builtin_marketplace manifest field is reserved for future use once
-	// the Anthropic marketplace source reference is known.
+	// Build the strictKnownMarketplaces allowlist. When builtin_marketplace is
+	// true, include the Anthropic official marketplace by slug so it is not
+	// blocked by the lockdown (strictKnownMarketplaces: [] blocks everything
+	// including the auto-registered official marketplace).
 	sources := make([]any, 0)
+	if p.BuiltinMarketplace != nil && *p.BuiltinMarketplace {
+		sources = append(sources, map[string]any{
+			"source": "github",
+			"repo":   "anthropics/claude-plugins-official",
+		})
+	}
 	for _, mp := range p.ExtraMarketplaces {
 		sources = append(sources, marketplaceSourceObject(mp))
 	}
@@ -305,6 +320,8 @@ func DockerSetup(
 	managedSettingsContent string,
 	claudeMdContent string,
 	pluginsToInstall string,
+	marketplaceClones string,
+	netrcFromSecrets string,
 	printf func(string, ...any),
 ) (bool, error) {
 	dockerBin, err := findDocker()
@@ -357,7 +374,7 @@ func DockerSetup(
 				filepath.Base(workspace))
 		}
 
-		buildContext, err := prepareBuildContext(cfg.Toolchains, cfg.Deps)
+		buildContext, err := prepareBuildContext(cfg.Toolchains, cfg.Deps, marketplaceClones, printf)
 		if err != nil {
 			return false, err
 		}
@@ -380,9 +397,14 @@ func DockerSetup(
 		if pluginsToInstall != "" {
 			buildArgs = append(buildArgs, "--build-arg", "PLUGINS_TO_INSTALL="+pluginsToInstall)
 		}
+		if netrcFromSecrets != "" {
+			buildArgs = append(buildArgs, "--build-arg", "NETRC_FROM_SECRETS="+netrcFromSecrets)
+		}
 
 		dockerfilePath := filepath.Join(buildContext, "Dockerfile")
-		buildArgs = append(buildArgs, "-f", dockerfilePath, buildContext)
+		// --progress=plain ensures RUN-step stdout (e.g. plugin install lines)
+		// appears in CombinedOutput even when there is no TTY.
+		buildArgs = append(buildArgs, "--progress=plain", "-f", dockerfilePath, buildContext)
 
 		result, err := exec.Command(buildArgs[0], buildArgs[1:]...).CombinedOutput()
 		if err != nil {
@@ -390,6 +412,14 @@ func DockerSetup(
 			return false, fmt.Errorf("docker build failed:\n%s", string(result))
 		}
 		printf(" done\n")
+		// Surface any [contained] diagnostic lines emitted during the build
+		// (e.g. plugin install progress) so operators can confirm what happened.
+		for _, line := range strings.Split(string(result), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if strings.Contains(trimmed, "[contained]") && !strings.HasPrefix(trimmed, "#") {
+				printf("  %s\n", trimmed)
+			}
+		}
 	}
 
 	// Create named volume (idempotent).
@@ -507,7 +537,7 @@ func GenerateDepsScript(deps []string) string {
 // source tree (embedded in the binary via pysource.Source), the generated
 // Dockerfile, and the toolchains install script. The caller is responsible
 // for removing the directory when done.
-func prepareBuildContext(toolchains map[string]string, deps []string) (string, error) {
+func prepareBuildContext(toolchains map[string]string, deps []string, marketplaceClones string, printf func(string, ...any)) (string, error) {
 	dockerfileContent, err := scaffold.TemplateContent("templates/Dockerfile")
 	if err != nil {
 		return "", err
@@ -552,7 +582,142 @@ func prepareBuildContext(toolchains map[string]string, deps []string) (string, e
 		os.RemoveAll(tmp)
 		return "", err
 	}
+
+	// Marketplace repos: clone on the host so Docker build needs no network.
+	// The Dockerfile COPYs marketplaces/ and known_marketplaces.json from here.
+	if err := os.MkdirAll(filepath.Join(tmp, "marketplaces"), 0o755); err != nil {
+		os.RemoveAll(tmp)
+		return "", fmt.Errorf("creating marketplaces dir: %w", err)
+	}
+	if marketplaceClones != "" {
+		if err := prepareMarketplaces(tmp, marketplaceClones, printf); err != nil {
+			os.RemoveAll(tmp)
+			return "", fmt.Errorf("preparing marketplace repos: %w", err)
+		}
+	} else {
+		// No marketplace clones — write empty map so the Dockerfile COPY always
+		// has a known_marketplaces.json to pick up.
+		if err := os.WriteFile(filepath.Join(tmp, "known_marketplaces.json"), []byte("{}"), 0o644); err != nil {
+			os.RemoveAll(tmp)
+			return "", fmt.Errorf("writing known_marketplaces.json: %w", err)
+		}
+	}
+
 	return tmp, nil
+}
+
+// prepareMarketplaces clones each marketplace repo from GitHub into the build
+// context, merges external_plugins/ into plugins/, strips .git/, and writes
+// known_marketplaces.json so Claude Code can resolve plugin installs.
+func prepareMarketplaces(buildContext, marketplaceClonesB64 string, printf func(string, ...any)) error {
+	raw, err := base64.StdEncoding.DecodeString(marketplaceClonesB64)
+	if err != nil {
+		return fmt.Errorf("decoding marketplace clones: %w", err)
+	}
+
+	type mpEntry struct{ Name, Repo string }
+	var entries []mpEntry
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			entries = append(entries, mpEntry{parts[0], parts[1]})
+		}
+	}
+
+	knownMarketplaces := map[string]any{}
+	mpBase := filepath.Join(buildContext, "marketplaces")
+
+	for _, e := range entries {
+		mpDir := filepath.Join(mpBase, e.Name)
+		printf("  Cloning marketplace %s …\n", e.Name)
+		cmd := exec.Command("git", "clone", "--depth", "1", "--quiet",
+			"https://github.com/"+e.Repo+".git", mpDir)
+		if out, cloneErr := cmd.CombinedOutput(); cloneErr != nil {
+			return fmt.Errorf("cloning %s: %s", e.Repo, strings.TrimSpace(string(out)))
+		}
+
+		// Remove .git/ to keep build context small.
+		_ = os.RemoveAll(filepath.Join(mpDir, ".git"))
+
+		// Merge external_plugins/ into plugins/ so claude plugin install finds them.
+		extDir := filepath.Join(mpDir, "external_plugins")
+		pluginsDir := filepath.Join(mpDir, "plugins")
+		if err := os.MkdirAll(pluginsDir, 0o755); err != nil {
+			return fmt.Errorf("mkdir plugins for %s: %w", e.Name, err)
+		}
+		if info, err := os.Stat(extDir); err == nil && info.IsDir() {
+			items, err := os.ReadDir(extDir)
+			if err != nil {
+				return fmt.Errorf("reading external_plugins for %s: %w", e.Name, err)
+			}
+			for _, item := range items {
+				dst := filepath.Join(pluginsDir, item.Name())
+				if _, statErr := os.Stat(dst); os.IsNotExist(statErr) {
+					if err := copyDirTree(filepath.Join(extDir, item.Name()), dst); err != nil {
+						return fmt.Errorf("copying %s: %w", item.Name(), err)
+					}
+					}
+			}
+		}
+
+		knownMarketplaces[e.Name] = map[string]any{
+			"source":          map[string]any{"source": "github", "repo": e.Repo},
+			"installLocation": "/home/agent/.claude/plugins/marketplaces/" + e.Name,
+			"lastUpdated":     "2026-01-01T00:00:00.000Z",
+		}
+	}
+
+	data, err := json.Marshal(knownMarketplaces)
+	if err != nil {
+		return fmt.Errorf("marshalling known_marketplaces: %w", err)
+	}
+	return os.WriteFile(filepath.Join(buildContext, "known_marketplaces.json"), data, 0o644)
+}
+
+// copyDirTree recursively copies the directory tree rooted at src to dst.
+func copyDirTree(src, dst string) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return err
+			}
+			return os.MkdirAll(target, info.Mode())
+		}
+		return copyOneFile(path, target)
+	})
+}
+
+// copyOneFile copies src to dst, preserving the source file's permission bits.
+func copyOneFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
