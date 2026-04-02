@@ -129,7 +129,6 @@ func (r *Runner) baseArgs(dockerBin string) ([]string, error) {
 		}
 	}
 
-
 	args = append(args, r.cfg.Image)
 	return args, nil
 }

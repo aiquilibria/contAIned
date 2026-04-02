@@ -660,7 +660,7 @@ func prepareMarketplaces(buildContext, marketplaceClonesB64 string, printf func(
 					if err := copyDirTree(filepath.Join(extDir, item.Name()), dst); err != nil {
 						return fmt.Errorf("copying %s: %w", item.Name(), err)
 					}
-					}
+				}
 			}
 		}
 
