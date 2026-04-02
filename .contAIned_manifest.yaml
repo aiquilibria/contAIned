@@ -9,6 +9,7 @@
 
 ecosystems:                                                                                        
   go: "1.25.7"   # CLI build and tests
+  python: "3.13.4"
 
 policy:
   qa:
