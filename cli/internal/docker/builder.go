@@ -194,6 +194,7 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 				map[string]any{"matcher": "Read|Glob|Grep", "hooks": []any{h("restrict_reads")}},
 				map[string]any{"matcher": "Write|Edit|MultiEdit", "hooks": []any{h("restrict_writes"), h("tracer_pre")}},
 				map[string]any{"matcher": "Bash", "hooks": []any{h("restrict_bash")}},
+				map[string]any{"matcher": "WebFetch|WebSearch", "hooks": []any{h("restrict_network")}},
 			},
 			"PostToolUse": []any{
 				map[string]any{"matcher": "Write|Edit|MultiEdit", "hooks": []any{h("tracer_post")}},

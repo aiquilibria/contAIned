@@ -122,6 +122,8 @@ Agent tool call
                        /etc/claude-code/, and other control-plane paths
   restrict_bash.py     Block dangerous Bash patterns (rm -rf, sudo,
                        curl/wget, raw socket tools); escalate git mutations
+  restrict_network.py  Hard-deny WebFetch/WebSearch to domains outside
+                       policy.network.allowed_domains
       │
       │  (denied calls stop here; allowed calls proceed)
       │
@@ -173,7 +175,7 @@ An agent session has four distinct outbound channels:
 
 When `policy.network.enabled: true`, `policy.network.allowed_domains` drives two enforcement mechanisms baked into the image:
 
-**`WebFetch` / `WebSearch`** — each domain in the allowlist generates a `WebFetch(domain:<domain>)` allow rule in `managed-settings.json`. Requests to allowed domains are auto-approved. Requests to any other domain trigger the `PermissionRequest` hook, which surfaces an operator approval prompt and logs the request. No outbound fetch proceeds without an explicit allow rule or deliberate operator approval.
+**`WebFetch` / `WebSearch`** — each domain in the allowlist generates a `WebFetch(domain:<domain>)` allow rule in `managed-settings.json`. Requests to allowed domains are auto-approved. Requests to any other domain are hard-denied by the `restrict_network` PreToolUse hook before Claude Code proceeds — no operator prompt is shown and no request is made.
 
 **Bash subprocesses and agent-written scripts** — `managed-settings.json` sets `sandbox.network.allowedDomains` with `allowManagedDomainsOnly: true`. Claude Code's sandbox (bubblewrap on Linux) routes subprocess HTTP/HTTPS traffic through an OS-level filter that blocks requests to non-listed domains with `403 Forbidden`. Because this is enforced at the kernel/namespace level, it cannot be bypassed by modifying environment variables.
 
@@ -232,7 +234,7 @@ Agent-written code that passes QA checks and executes as part of the task could 
 | `restrict_reads.py` | Blocks `Read`/`Glob`/`Grep` on secret file patterns (`.env`, `*.pem`, `id_rsa`, …) | Hook-enforced; cannot be disabled at runtime |
 | `restrict_bash.py` | Blocks `cat`, `head`, `tail` on the same patterns; blocks `curl`, `wget`, `nc` | Hook-enforced |
 | `sandbox.network.allowedDomains` | Blocks Bash subprocess HTTP/HTTPS to non-allowed domains at the OS level (bubblewrap) | Kernel-enforced; cannot be bypassed via env vars |
-| `WebFetch` allow rules + `PermissionRequest` hook | Non-allowed `WebFetch`/`WebSearch` surface operator approval prompt; logged | Requires deliberate operator approval; no silent pass |
+| `WebFetch` allow rules + `restrict_network` hook | Allowed `WebFetch`/`WebSearch` are auto-approved; non-allowed are hard-denied before execution | Hook-enforced; cannot be disabled at runtime |
 
 **Residual scenario — indirect reads via agent-written scripts.** The read hooks block direct file access, but an agent could write a Python script that loads `.env` at runtime via `python-dotenv` or `os.environ`, then writes derived values to another workspace file. The hook layer sees `python3 script.py`, not the secret value. The result is captured in `tracer.db` and visible on `#review`. It does not leave the container unless the operator approves a git commit that includes the file.
 

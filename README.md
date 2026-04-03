@@ -83,7 +83,7 @@ contAIned fills that gap:
 | Operator review before changes are accepted | ✗ | ✗ | ✗ | ✓ |
 | QA gate blocks agent from finishing prematurely | ✗ | ✗ | ✗ | ✓ |
 | Policy baked into image; tamper-proof at runtime | ✗ | ✗ | ✗ | ✓ |
-| Egress filtering — outbound network allowlist | ✗ | ✗ | ◑ (firewall only; no WebFetch control) | ◑ (sandbox network + operator approval flow; prevents accidental exfiltration) |
+| Egress filtering — outbound network allowlist | ✗ | ✗ | ◑ (firewall only; no WebFetch control) | ✓ (sandbox network blocks subprocesses; `restrict_network` hook hard-denies WebFetch/WebSearch to non-allowlisted domains) |
 | Works on Linux in CI/CD | ✓ | ✗ (MicroVM) | ◑ (VS Code–focused) | ✓ |
 
 contAIned and `/sandbox` are complementary, not competing. Enabling both means subprocess writes are blocked at the OS level *and* SDK tool calls are blocked at the hook level — two independent enforcement layers from two different trust boundaries.
@@ -269,6 +269,7 @@ Creates (in the workspace):
     restrict_reads.py    ← PreToolUse: read path enforcement
     restrict_writes.py   ← PreToolUse: write path enforcement
     restrict_bash.py     ← PreToolUse: bash command restrictions
+    restrict_network.py  ← PreToolUse: WebFetch/WebSearch allowlist enforcement
     audit.py             ← PostToolUse: append-only audit log
     qa.py                ← Stop: quality gate
   manifest.yaml          ← source of truth; baked into the image at build time
@@ -348,9 +349,10 @@ Every tool call passes through three layers, all registered in the image-layer m
 ```
 Tool call
     │
-    ├── PreToolUse hook (restrict_writes.py / restrict_reads.py / restrict_bash.py)
-    │     Path-based enforcement — deny access outside the workspace;
-    │     block writes to control-plane files (.contAIned/, managed-settings.json)
+    ├── PreToolUse hook (restrict_writes.py / restrict_reads.py / restrict_bash.py / restrict_network.py)
+    │     Path-based and domain-based enforcement — deny access outside the workspace;
+    │     block writes to control-plane files (.contAIned/, managed-settings.json);
+    │     hard-deny WebFetch/WebSearch to non-allowlisted domains
     │
     ├── Deny rules (managed-settings.json)
     │     Pattern-based — rm -rf, sudo, curl, git push, etc.
@@ -391,7 +393,7 @@ An agent session has multiple channels for sending data out of the workspace: Cl
 
 contAIned addresses this with two complementary mechanisms, both driven by `policy.network.allowed_domains` in `manifest.yaml`:
 
-- **`WebFetch` / `WebSearch`** — requests to allowed domains are auto-approved. Requests to any other domain surface an operator confirmation prompt (via the `PermissionRequest` hook) and are logged. No request proceeds without either an explicit allow rule or operator approval.
+- **`WebFetch` / `WebSearch`** — requests to allowed domains are auto-approved via `managed-settings.json` allow rules. Requests to any other domain are hard-denied by the `restrict_network` hook before Claude Code can proceed; no operator prompt is shown and no request is made.
 - **Bash subprocesses and agent-written scripts** — Claude Code's built-in sandbox enforces the `allowedDomains` list at the OS level (bubblewrap on Linux). HTTP traffic to non-allowed domains is blocked with a `403 Forbidden` regardless of the tool used.
 
 Configure the allowlist in `.contAIned/manifest.yaml`, then rebuild the image:

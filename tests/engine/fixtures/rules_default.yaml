@@ -1,0 +1,65 @@
+# Default rule fixtures for engine tests.
+# Mirrors the example rules from docs/internal/cedar-inspired-engine.md §3.3.
+
+rules:
+  # --- Secrets ---
+  - id: v1:secrets:block-secret-files
+    effect: forbid
+    action: [Read, Write, Edit, MultiEdit, Glob, Grep]
+    resource_type: FilePath
+    when:
+      - resource.is_secret == true
+    unless:
+      - resource.is_safe_variant == true
+    reason: "Secret files (credentials, keys, .env) may not be accessed."
+    tags: [secrets]
+
+  # --- Control-plane protection ---
+  - id: v1:control-plane:block-writes
+    effect: forbid
+    action: [Write, Edit, MultiEdit]
+    resource_type: FilePath
+    when:
+      - resource.in_control_plane == true
+    reason: "Control-plane files (.contAIned/) may not be modified by the agent."
+    tags: [control-plane]
+
+  # --- Bash: shell delegation ---
+  - id: v1:bash:block-shell-delegation
+    effect: forbid
+    action: [Bash]
+    resource_type: BashCommand
+    when:
+      - resource.verb in ["bash", "sh", "eval", "xargs", "env", "exec", "nohup", "dash", "zsh"]
+    reason: "Shell delegation verbs are not permitted."
+    tags: [bash, shell-delegation]
+
+  # --- Bash: destructive commands ---
+  - id: v1:bash:block-destructive
+    effect: forbid
+    action: [Bash]
+    resource_type: BashCommand
+    when:
+      - resource.verb == "rm"
+    reason: "Destructive file deletion is not permitted."
+    tags: [bash, destructive]
+
+  # --- Bash: privilege escalation ---
+  - id: v1:bash:block-privilege-escalation
+    effect: forbid
+    action: [Bash]
+    resource_type: BashCommand
+    when:
+      - resource.verb == "sudo"
+    reason: "Privilege escalation is not permitted."
+    tags: [bash, privilege-escalation]
+
+  # --- Network ---
+  - id: v1:network:allowlist
+    effect: forbid
+    action: [WebFetch, WebSearch]
+    resource_type: NetworkResource
+    when:
+      - resource.in_allowlist == false
+    reason: "Network request to a domain outside the operator allowlist."
+    tags: [network]

@@ -2,27 +2,58 @@
 """
 PreToolUse hook — restricts Write, Edit, MultiEdit.
 
-Checks in order:
-  1. Control-plane protection  — .contAIned/ writes are ALWAYS denied (not configurable)
-  2. Settings protection       — .claude/settings.json is ALWAYS denied (not configurable)
-  3. Secret file               — driven by policy.secrets.writes
+Structural pre-checks (always enforced, not configurable):
+  1. Control-plane protection — .contAIned/ writes are always denied.
+  2. Settings protection      — .claude/settings.json is always denied.
 
-Workspace boundary is enforced by the Docker container at the kernel level.
+Policy checks (engine-driven):
+  3. Secret-file protection   — from policy.secrets.rules via contained.engine.
 
-Exits 0 to allow, 2 to deny (reason on stderr fed back to agent).
-Denials are written to the audit log before blocking.
+MultiEdit is dispatched per target: any denied target denies the whole call.
+Falls back to _policy.py pattern matching if the engine is unavailable.
+
+Outcomes:
+  DENY     → JSON permissionDecision:deny  + exit 0
+  ALLOW    → JSON permissionDecision:allow + exit 0
+  ESCALATE → JSON permissionDecision:ask   + exit 0
+  DEFER    → exit 0 (pass through to Claude Code's pipeline)
 """
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-from _policy import load_policy  # noqa: E402
+
+def _deny(reason: str) -> None:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }))
 
 
-def log_denial(event, target, reason):
-    """Append a denial entry to the audit log. Never raises — audit must not block."""
+def _allow() -> None:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+        }
+    }))
+
+
+def _ask() -> None:
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+        }
+    }))
+
+
+def _log(event: dict, target: str, policy_data: dict) -> None:
+    """Append a structured audit entry to pipeline.jsonl. Never raises."""
     try:
         project_root = Path(event.get("cwd", "."))
         audit_log = project_root / ".contAIned" / "audit" / "pipeline.jsonl"
@@ -32,14 +63,12 @@ def log_denial(event, target, reason):
             "session_id": event.get("session_id"),
             "tool":       event.get("tool_name"),
             "input":      {"file_path": target},
-            "outcome":    "denied",
-            "reason":     reason,
+            "policy":     policy_data,
         }
         with audit_log.open("a") as f:
             f.write(json.dumps(entry) + "\n")
     except OSError:
         pass
-    # Mirror denial into tracer.db so it is queryable alongside allowed events.
     try:
         from contained.tracer import contAInedTracer  # noqa: PLC0415
         _db = str(Path(event.get("cwd", ".")) / ".contAIned" / "tracer.db")
@@ -47,25 +76,17 @@ def log_denial(event, target, reason):
             session_id=event.get("agent_id") or event.get("session_id"),
             tool=event.get("tool_name", ""),
             tool_input={"file_path": target},
-            outcome="denied",
-            reason=reason,
+            outcome=policy_data.get("outcome", "denied"),
+            reason=policy_data.get("reason"),
         )
     except Exception:
         pass
 
 
-def enforce(action, event, target, msg):
-    """Act on *action*: block exits 2; allow/escalate pass through."""
-    if action == "block":
-        log_denial(event, target, msg)
-        print(msg, file=sys.stderr)
-        sys.exit(2)
-
-
 try:
     event = json.load(sys.stdin)
 except json.JSONDecodeError:
-    sys.exit(0)  # malformed input — pass through, don't block
+    sys.exit(0)
 
 tool       = event.get("tool_name", "")
 tool_input = event.get("tool_input", {})
@@ -73,63 +94,116 @@ tool_input = event.get("tool_input", {})
 if tool not in ("Write", "Edit", "MultiEdit"):
     sys.exit(0)
 
-target = tool_input.get("file_path", "")
+cwd          = event.get("cwd", ".")
+project_root = Path(cwd).resolve()
+contAIned_dir = project_root / ".contAIned"
+
+# ── Structural pre-check 1: .contAIned/ control-plane (always enforced) ───────
+# Resolve the primary target for structural pre-checks (file_path for Write/Edit;
+# first target for MultiEdit).
+_primary = (
+    tool_input.get("file_path", "")
+    if tool in ("Write", "Edit")
+    else (tool_input.get("edits") or [{}])[0].get("file_path", "")
+)
+
+if _primary:
+    resolved = Path(_primary).resolve()
+    _in_cp = False
+    try:
+        resolved.relative_to(contAIned_dir)
+        _in_cp = True
+    except ValueError:
+        pass
+    if not _in_cp:
+        _in_cp = ".contAIned" in resolved.parts
+    if _in_cp:
+        reason = (
+            f"Write denied: '{_primary}' is inside the .contAIned/ control-plane directory.\n"
+            "Hook and policy files are managed by contAIned and must not be edited directly."
+        )
+        _log(event, _primary, {"outcome": "deny", "reason": reason})
+        _deny(reason)
+        sys.exit(0)
+
+    # ── Structural pre-check 2: .claude/settings.json ─────────────────────────
+    claude_settings = (project_root / ".claude" / "settings.json").resolve()
+    _is_claude_settings = (resolved == claude_settings) or (
+        ".claude" in resolved.parts and resolved.name == "settings.json"
+    )
+    if _is_claude_settings:
+        reason = (
+            f"Write denied: '{_primary}' is the Claude Code settings file.\n"
+            "Hook registration is managed by contAIned and must not be edited directly."
+        )
+        _log(event, _primary, {"outcome": "deny", "reason": reason})
+        _deny(reason)
+        sys.exit(0)
+
+# ── Engine path ───────────────────────────────────────────────────────────────
+try:
+    from contained.engine import (
+        build_file_path_entity,
+        evaluate,
+        extract_file_targets,
+        load_rules,
+        load_secrets_patterns,
+    )
+    from contained.engine.entities import Outcome, build_agent_session, build_context
+
+    principal = build_agent_session(event)
+    context   = build_context(event)
+    rules     = load_rules()
+    patterns  = load_secrets_patterns()
+    targets   = extract_file_targets(tool, tool_input)
+
+    if not targets:
+        sys.exit(0)
+
+    for target in targets:
+        entity   = build_file_path_entity(target, secrets_patterns=patterns)
+        decision = evaluate(rules, tool, entity, principal, context=context)
+
+        if decision.outcome == Outcome.DENY:
+            _log(event, target, {
+                "outcome": "deny",
+                "rule_id": decision.rule_id,
+                "reason":  decision.reason,
+            })
+            _deny(decision.reason or f"Write denied: {target}")
+            sys.exit(0)
+
+        if decision.outcome == Outcome.ALLOW:
+            _allow()
+            sys.exit(0)
+
+        if decision.outcome == Outcome.ESCALATE:
+            _ask()
+            sys.exit(0)
+
+        # DEFER — continue checking remaining targets
+
+    sys.exit(0)
+
+# ── Fallback: _policy.py pattern matching ─────────────────────────────────────
+except ImportError:
+    pass
+
+sys.path.insert(0, str(Path(__file__).parent))
+from _policy import load_policy  # noqa: E402
+
+policy  = load_policy(cwd)
+target  = tool_input.get("file_path", "")
 if not target:
     sys.exit(0)
 
-cwd          = event.get("cwd", ".")
-policy       = load_policy(cwd)
-project_root = Path(cwd).resolve()
-contAIned_dir = project_root / ".contAIned"
-resolved     = Path(target).resolve()
-
-# ── Check 1: inside .contAIned/ control-plane (always enforced, not configurable) ─
-# Primary check: absolute-path prefix (requires cwd to resolve correctly).
-# Belt-and-suspenders: path-component membership — catches symlink/CWD edge cases
-# where project_root resolves to an unexpected path and relative_to() raises ValueError
-# even though the target genuinely lives inside .contAIned/.
-_in_control_plane = False
-try:
-    resolved.relative_to(contAIned_dir)
-    _in_control_plane = True
-except ValueError:
-    pass
-if not _in_control_plane:
-    _in_control_plane = ".contAIned" in resolved.parts
-
-if _in_control_plane:
-    log_denial(event, target, f"write into control-plane directory: {target}")
-    print(
-        f"Write denied: \'{target}\' is inside the .contAIned/ control-plane directory.\n"
-        "Hook and policy files are managed by contAIned and must not be edited directly.",
-        file=sys.stderr,
-    )
-    sys.exit(2)
-
-# ── Check 2: .claude/settings.json — Claude Code hook registration file ───────
-# Same dual check: absolute equality first, component-name fallback second.
-claude_settings = (project_root / ".claude" / "settings.json").resolve()
-_is_claude_settings = (resolved == claude_settings) or (
-    ".claude" in resolved.parts and resolved.name == "settings.json"
-)
-if _is_claude_settings:
-    log_denial(event, target, f"write to Claude Code settings file: {target}")
-    print(
-        f"Write denied: \'{target}\' is the Claude Code settings file.\n"
-        "Hook registration is managed by contAIned and must not be edited directly.",
-        file=sys.stderr,
-    )
-    sys.exit(2)
-
-# ── Check 3: secret file ───────────────────────────────────────────────────────
-for _action, _patterns, _reason in policy["secrets"]["_compiled_rules"]:
-    if any(p.search(str(resolved)) for p in _patterns):
+resolved_target = Path(target).resolve()
+for _action, _pats, _reason in policy["secrets"]["_compiled_rules"]:
+    if any(p.search(str(resolved_target)) for p in _pats):
         if _action == "allow":
-            break  # safe variant — permit
-        enforce(
-            _action, event, target,
-            _reason or f"Write denied: \'{target}\' looks like a secret file.",
-        )
-        break
+            break
+        _log(event, target, {"outcome": "deny", "reason": _reason})
+        _deny(_reason or f"Write denied: '{target}' looks like a secret file.")
+        sys.exit(0)
 
 sys.exit(0)

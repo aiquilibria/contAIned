@@ -1,0 +1,213 @@
+package cmd
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v3"
+
+	"contained.dev/cli/internal/manifest"
+)
+
+var migrateCmd = &cobra.Command{
+	Use:   "migrate",
+	Short: "Migrate a manifest from legacy policy sections to unified policy.rules",
+	Long: `Translate policy.secrets.rules, policy.bash.rules, and policy.network
+from the legacy fragmented format into the unified Cedar-inspired policy.rules list.
+
+The output manifest is written to --output (default: manifest.v2.yaml) with
+a migration header explaining each rule's origin. Review the output, then replace
+your existing manifest:
+
+  contained migrate --manifest .contAIned/manifest.yaml
+  contained migrate --manifest .contAIned/manifest.yaml --output policy.v2.yaml
+
+The legacy policy.secrets.rules section is preserved in the output because the
+entity builder (which computes resource.is_secret and resource.is_safe_variant)
+still reads patterns from it. Only the enforcement logic moves to policy.rules.`,
+	RunE:         runMigrate,
+	SilenceUsage: true,
+}
+
+var (
+	migrateManifestPath string
+	migrateOutputPath   string
+)
+
+func init() {
+	migrateCmd.Flags().StringVar(&migrateManifestPath, "manifest", "", "Path to the manifest to migrate (required)")
+	migrateCmd.Flags().StringVar(&migrateOutputPath, "output", "manifest.v2.yaml", "Output file path")
+	_ = migrateCmd.MarkFlagRequired("manifest")
+	rootCmd.AddCommand(migrateCmd)
+}
+
+func runMigrate(_ *cobra.Command, _ []string) error {
+	dim := color.New(color.Faint)
+	bold := color.New(color.Bold)
+	green := color.New(color.FgGreen)
+	yellow := color.New(color.FgYellow)
+
+	bold.Printf("\ncontAIned migrate\n\n")
+	dim.Printf("  Input:  %s\n", migrateManifestPath)
+	dim.Printf("  Output: %s\n\n", migrateOutputPath)
+
+	raw, err := os.ReadFile(migrateManifestPath)
+	if err != nil {
+		return fmt.Errorf("reading manifest %s: %w", migrateManifestPath, err)
+	}
+	m, err := manifest.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("parsing manifest: %w", err)
+	}
+
+	if len(m.Policy.Rules) > 0 {
+		dim.Println("  Manifest already uses policy.rules — nothing to migrate.")
+		return nil
+	}
+
+	translated, notes := translateLegacyPolicy(m)
+	if len(translated) == 0 {
+		yellow.Println("  No policy rules found to migrate (bash, secrets, network are empty).")
+		return nil
+	}
+
+	// Populate policy.rules and clear the bash section (now redundant).
+	// Secrets section is kept — it still drives is_secret / is_safe_variant computation.
+	// Network section is kept — it drives the allowed_domains check in the hook.
+	m.Policy.Rules = translated
+	m.Policy.Bash.Rules = nil
+
+	outYAML, err := yaml.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("serialising migrated manifest: %w", err)
+	}
+
+	header := buildMigrationHeader(notes)
+	full := header + string(outYAML)
+
+	if err := os.WriteFile(migrateOutputPath, []byte(full), 0o644); err != nil {
+		return fmt.Errorf("writing output: %w", err)
+	}
+
+	green.Printf("  Wrote %d rule(s) to %s\n\n", len(translated), migrateOutputPath)
+	if len(notes) > 0 {
+		dim.Println("  Migration notes:")
+		for _, n := range notes {
+			dim.Printf("    • %s\n", n)
+		}
+		fmt.Println()
+	}
+	dim.Println("  Next steps:")
+	dim.Printf("    1. Review %s\n", migrateOutputPath)
+	dim.Printf("    2. Replace your manifest and run:\n")
+	dim.Printf("       contained init --manifest %s --rebuild\n", migrateOutputPath)
+	return nil
+}
+
+// translateLegacyPolicy converts legacy policy sections into PolicyRule objects.
+// Returns the rules and migration notes for the operator.
+func translateLegacyPolicy(m *manifest.Manifest) ([]manifest.PolicyRule, []string) {
+	var rules []manifest.PolicyRule
+	var notes []string
+
+	fileActions := []string{"Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"}
+	networkActions := []string{"WebFetch", "WebSearch"}
+
+	// ── Secrets rules ────────────────────────────────────────────────────────
+	for _, sr := range m.Policy.Secrets.Rules {
+		ruleID := "v1:secrets:" + sr.Name
+		switch sr.Action {
+		case "allow":
+			rules = append(rules, manifest.PolicyRule{
+				ID:           ruleID,
+				Effect:       "permit",
+				Action:       fileActions,
+				ResourceType: "FilePath",
+				When:         []string{"resource.is_safe_variant == true"},
+				Reason:       sr.Reason,
+				Tags:         []string{"v1", "secrets"},
+			})
+			notes = append(notes, fmt.Sprintf(
+				"%s: patterns %v remain in policy.secrets.rules for is_secret / is_safe_variant computation",
+				ruleID, sr.Patterns,
+			))
+		case "block":
+			rules = append(rules, manifest.PolicyRule{
+				ID:           ruleID,
+				Effect:       "forbid",
+				Action:       fileActions,
+				ResourceType: "FilePath",
+				When:         []string{"resource.is_secret == true"},
+				Unless:       []string{"resource.is_safe_variant == true"},
+				Reason:       sr.Reason,
+				Tags:         []string{"v1", "secrets"},
+			})
+		default:
+			notes = append(notes, fmt.Sprintf(
+				"policy.secrets.rules[%s]: unknown action %q — skipped", sr.Name, sr.Action,
+			))
+		}
+	}
+
+	// ── Bash rules ───────────────────────────────────────────────────────────
+	for _, br := range m.Policy.Bash.Rules {
+		effect := "forbid"
+		if br.Action == "allow" {
+			effect = "permit"
+		}
+		for i, pattern := range br.Patterns {
+			rules = append(rules, manifest.PolicyRule{
+				ID:           fmt.Sprintf("v1:bash:%s:%d", br.Name, i),
+				Effect:       effect,
+				Action:       []string{"Bash"},
+				ResourceType: "BashCommand",
+				When:         []string{fmt.Sprintf("resource.raw matches_re '%s'", pattern)},
+				Reason:       br.Reason,
+				Tags:         []string{"v1", "bash"},
+			})
+		}
+	}
+
+	// ── Network rules ────────────────────────────────────────────────────────
+	if m.Policy.Network.Enabled {
+		rules = append(rules, manifest.PolicyRule{
+			ID:           "v1:network:allowlist",
+			Effect:       "forbid",
+			Action:       networkActions,
+			ResourceType: "NetworkResource",
+			When:         []string{"resource.in_allowlist == false"},
+			Reason:       "Network request to a domain outside the operator allowlist.",
+			Tags:         []string{"v1", "network"},
+		})
+		notes = append(notes, "policy.network.allowed_domains is preserved for the hook's allow-list check")
+	}
+
+	return rules, notes
+}
+
+func buildMigrationHeader(notes []string) string {
+	var sb strings.Builder
+	sb.WriteString("# Generated by: contained migrate\n")
+	sb.WriteString("# Format: policy.rules (Phase 2+ Cedar-inspired schema)\n")
+	sb.WriteString("#\n")
+	sb.WriteString("# policy.secrets.rules is kept because the entity builder reads patterns from\n")
+	sb.WriteString("# it to compute resource.is_secret and resource.is_safe_variant. Only the\n")
+	sb.WriteString("# enforcement logic has moved to policy.rules.\n")
+	sb.WriteString("#\n")
+	sb.WriteString("# policy.bash.rules has been removed — its patterns are now in policy.rules\n")
+	sb.WriteString("# as matches_re conditions on resource.raw.\n")
+	if len(notes) > 0 {
+		sb.WriteString("#\n")
+		sb.WriteString("# Migration notes:\n")
+		for _, n := range notes {
+			sb.WriteString("#   - ")
+			sb.WriteString(n)
+			sb.WriteString("\n")
+		}
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}

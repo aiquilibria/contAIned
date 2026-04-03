@@ -111,6 +111,11 @@ type AgentConfig struct {
 }
 
 type PolicyConfig struct {
+	// Rules is the Phase 2+ unified policy rule list (Cedar-inspired YAML format).
+	// When present, the legacy Secrets/Bash/Network sections are ignored by the
+	// engine (they continue to be parsed for backwards-compat tooling).
+	// When absent, the engine's compat adapter translates the legacy sections.
+	Rules     []PolicyRule    `yaml:"rules,omitempty"`
 	Sigstore  SigstoreConfig  `yaml:"sigstore"`
 	Secrets   SecretsConfig   `yaml:"secrets"`
 	Bash      BashConfig      `yaml:"bash"`
@@ -122,6 +127,35 @@ type PolicyConfig struct {
 	Plugins   PluginsConfig   `yaml:"plugins,omitempty"`
 	Sandbox   SandboxConfig   `yaml:"sandbox"`
 	mAInlined mAInlinedPolicy `yaml:"mAInlined"`
+}
+
+// PolicyRule is a single Cedar-inspired rule in the unified policy.rules list.
+// The unified format replaces the fragmented secrets/bash/network sections.
+// Run `contained migrate` to convert an existing manifest to this format.
+type PolicyRule struct {
+	// ID uniquely identifies the rule. Use the form "v1:<section>:<name>"
+	// (e.g. "v1:secrets:dotenv"). Must be unique across all rules.
+	ID string `yaml:"id"`
+	// Effect is one of "permit", "forbid", or "escalate".
+	Effect string `yaml:"effect"`
+	// Action lists the tool names this rule applies to (e.g. ["Read", "Glob"]).
+	// Use "*" to match any action.
+	Action interface{} `yaml:"action"` // string or []string
+	// ResourceType restricts the rule to a specific entity type
+	// (FilePath, GlobPattern, BashCommand, NetworkResource, or "*").
+	ResourceType string `yaml:"resource_type"`
+	// When is a list of conditions that must ALL hold for the rule to match.
+	When []string `yaml:"when,omitempty"`
+	// Unless is a list of conditions where ANY true value negates the rule.
+	Unless []string `yaml:"unless,omitempty"`
+	// Reason is a human-readable explanation shown when the rule triggers.
+	Reason string `yaml:"reason,omitempty"`
+	// Tags are arbitrary labels for filtering and audit queries.
+	Tags []string `yaml:"tags,omitempty"`
+	// Define holds the attribute patterns for effect:define classifier rules.
+	// Preserved as a raw map so arbitrary attribute names (is_secret, in_tmp,
+	// etc.) round-trip through parse→merge→serialise without loss.
+	Define map[string]any `yaml:"define,omitempty"`
 }
 
 type SigstoreConfig struct {

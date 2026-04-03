@@ -1,0 +1,397 @@
+# contAIned mAInlined manifest — example (v2 policy.rules schema)
+#
+# This is the v2 equivalent of mainlined.yaml, migrated to the Phase 2+
+# policy.rules format. All policy enforcement logic has moved from the legacy
+# policy.secrets/bash sections into the unified policy.rules list. The legacy
+# sections are retained only where required by the entity builder:
+#
+#   policy.secrets.rules  — still drives is_secret / is_safe_variant attributes
+#   policy.network.allowed_domains — still drives resource.in_allowlist attribute
+#
+# Run `contained migrate` to automatically convert legacy manifests to this
+# format. See docs/examples/context_aware.yaml for Phase 3 context.* extensions.
+#
+# Deploy this via:
+#   contained init --mainlined https://mainlined.example.com
+# or:
+#   contained init --manifest docs/examples/mainlined_v2.yaml
+#
+# See docs/policy-reference.md for full schema documentation.
+
+# ── Ecosystem definitions ─────────────────────────────────────────────────────
+# Maps ecosystem names (declared by repos in .contAIned_manifest.yaml) to the
+# toolchain they install and the network domains they require. Operators may
+# customise these entries — for example, pointing python's network_domains at
+# an internal PyPI mirror instead of pypi.org.
+ecosystem_definitions:
+  go:
+    toolchain: go
+    deps:
+      - golangci-lint
+    network_domains:
+      - proxy.golang.org
+      - sum.golang.org
+      - storage.googleapis.com
+    env:
+      GOCACHE: /tmp/claude/go-build
+      GOPATH: /tmp/claude/gopath
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: gopls-lsp
+  python:
+    # Python is pre-installed in the base image; no toolchain key needed.
+    network_domains:
+      - pypi.org
+      - files.pythonhosted.org
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: pyright-lsp
+  node:
+    toolchain: node
+    network_domains:
+      - registry.npmjs.org
+    install: [npm, install]
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: typescript-lsp
+  typescript:
+    toolchain: node   # TypeScript runs on Node.js
+    network_domains:
+      - registry.npmjs.org
+    install: [npm, install]
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: typescript-lsp
+  ruby:
+    toolchain: ruby
+    network_domains:
+      - rubygems.org
+      - api.rubygems.org
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: ruby-lsp
+  java:
+    toolchain: java
+    network_domains:
+      - repo1.maven.org
+      - search.maven.org
+    plugins:
+      - marketplace: claude-plugins-official
+        plugin: jdtls-lsp
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+runtime:
+  docker:
+    image: contained:latest
+    memory: 2g
+    cpus: 2
+    network: contAIned-net
+    agent_config_volume: contAIned-agent-config
+    # Toolchain floor constraints: repos may pin any version satisfying these.
+    toolchains:
+      go: ">=1.23"
+      node: ">=20"
+    extra_secrets:
+      - path: ~/.contained/secrets/github_token
+        env: GITHUB_PERSONAL_ACCESS_TOKEN
+        netrc_machine: github.com
+
+# ── Agent ─────────────────────────────────────────────────────────────────────
+agent:
+  model: claude-sonnet-4-6
+  budget_tokens: 1024
+
+policy:
+
+  # ── Sigstore provenance ──────────────────────────────────────────────────────
+  sigstore:
+    enabled: false
+    rekor_url: https://rekor.sigstore.dev
+    fulcio_url: https://fulcio.sigstore.dev
+
+  # ── Network allowlist ─────────────────────────────────────────────────────────
+  # Required: drives resource.in_allowlist attribute used by v1:network:block rule.
+  # Anthropic infrastructure is required for all sessions. Package registry
+  # domains for declared ecosystems are added automatically at `contained init`
+  # time from ecosystem_definitions above — no manual entries needed here.
+  # Add project-specific external APIs below as required.
+  network:
+    allowed_domains:
+      - api.anthropic.com
+      - code.claude.com
+      - docs.anthropic.com
+      # GitHub
+      - github.com
+      - ssh.github.com
+
+  # ── Policy rules (unified schema) ────────────────────────────────────────────
+  #
+  # All policy in one place: classifiers (effect: define) declare what resources
+  # are, enforcement rules (effect: forbid / permit / escalate) act on them.
+  #
+  # forbid always overrides permit. DEFER (no rule matched) is pass-through.
+  rules:
+
+    # ── File-path classifier ───────────────────────────────────────────────────
+    # Declares computed attributes on FilePath entities.  The enforcement rules
+    # below reference these attributes via ``resource.<attr> == true``.
+    #
+    # in_tmp, in_workspace, and in_control_plane are computed directly by the
+    # entity builder from the resolved path; their patterns here are for
+    # documentation and future tooling only.
+    # is_safe_variant must be listed before is_secret (first-match-wins).
+
+    - id: v1:define:secret-file-patterns
+      effect: define
+      resource_type: FilePath
+      define:
+        in_tmp:
+          patterns: ['^/tmp/']
+        is_safe_variant:
+          patterns: ['\.(example|sample|template)']
+        is_secret:
+          patterns:
+            - '(^|[/\\])\.env(\.[^/\\]+)?$'
+            - '\.(pem|key|p12|pfx|jks|keystore)$'
+            - '(^|[/\\])id_(rsa|dsa|ecdsa|ed25519)$'
+            - '(^|[/\\])(credentials|secrets|service_account)\.(json|yaml|yml)$'
+            - '\.(secret|secrets)$'
+      tags: [secrets, workspace]
+
+    # ── Secret file protection ─────────────────────────────────────────────────
+    # Blocks Read/Write/Edit/Glob/Grep on files flagged is_secret=true, unless
+    # the file is a safe variant (e.g. .env.example).
+
+    - id: v1:secrets:block-secret-access
+      effect: forbid
+      action: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"]
+      resource_type: FilePath
+      when:
+        - resource.is_secret == true
+      unless:
+        - resource.is_safe_variant == true
+      reason: "Secret files (credentials, keys, .env) may not be accessed."
+      tags: [secrets]
+
+    # ── Control-plane protection ───────────────────────────────────────────────
+    # Agent must not modify hook scripts, tracer DB, or other control-plane files.
+
+    - id: v1:control-plane:block-writes
+      effect: forbid
+      action: ["Write", "Edit", "MultiEdit"]
+      resource_type: FilePath
+      when:
+        - resource.in_control_plane == true
+      reason: "The contAIned control plane may not be modified by the agent."
+      tags: [control-plane]
+
+    # ── Workspace read scope ───────────────────────────────────────────────────
+    # Restrict reads to /workspace (plus /tmp for build artefacts and scratch).
+
+    - id: v1:workspace:block-out-of-workspace-reads
+      effect: forbid
+      action: ["Read", "Glob", "Grep"]
+      resource_type: FilePath
+      when:
+        - resource.in_workspace == false
+      unless:
+        - resource.in_tmp == true
+      reason: "Reads outside /workspace are not permitted."
+      tags: [workspace]
+
+    - id: v1:control-plane:block-reads
+      effect: forbid
+      action: ["Read", "Grep"]
+      resource_type: FilePath
+      when:
+        - resource.in_control_plane == true
+      unless:
+        - resource.in_tmp == true
+      reason: "Reads inside the contAIned control plane are not permitted."
+      tags: [control-plane]
+
+    # ── Workspace write scope ──────────────────────────────────────────────────
+    # Restrict writes to /workspace (plus /tmp for build artefacts and scratch).
+
+    - id: v1:workspace:block-out-of-workspace-writes
+      effect: forbid
+      action: ["Write", "Edit", "MultiEdit"]
+      resource_type: FilePath
+      when:
+        - resource.in_workspace == false
+      unless:
+        - resource.in_tmp == true
+      reason: "Writes outside /workspace are not permitted."
+      tags: [workspace]
+
+    # ── Network policy ─────────────────────────────────────────────────────────
+    # Only domains in policy.network.allowed_domains (plus ecosystem domains
+    # added at init time) are reachable via WebFetch/WebSearch.
+
+    - id: v1:network:block-out-of-allowlist
+      effect: forbid
+      action: ["WebFetch", "WebSearch"]
+      resource_type: NetworkResource
+      when:
+        - resource.in_allowlist == false
+      reason: "Network request to a domain outside the operator allowlist."
+      tags: [network]
+
+    # ── Bash: safe git read-only commands ─────────────────────────────────────
+    # Explicitly permit common read-only git subcommands so they are never
+    # caught by a downstream forbid rule added by a repo manifest.
+
+    - id: v1:bash:permit-safe-git-reads
+      effect: permit
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb == "git"
+        - resource.subcommand in ["status", "log", "diff", "show", "branch", "remote"]
+      tags: [bash, git]
+
+    # git stash list uses a third token (list) rather than a subcommand, so it
+    # needs its own rule using positional_args.
+
+    - id: v1:bash:permit-git-stash-list
+      effect: permit
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb == "git"
+        - resource.subcommand == "stash"
+        - resource.positional_args contains "list"
+      tags: [bash, git]
+
+    # ── Bash: safe read-only shell tools ──────────────────────────────────────
+
+    - id: v1:bash:permit-safe-read-only
+      effect: permit
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb in ["ls", "pwd", "echo", "which", "grep", "rg", "find", "cat", "wc", "cd", "tree"]
+      tags: [bash]
+
+    # ── Bash: destructive file deletion ───────────────────────────────────────
+
+    - id: v1:bash:block-destructive
+      effect: forbid
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb == "rm"
+      reason: "Destructive file deletion is not permitted."
+      tags: [bash]
+
+    # ── Bash: privilege escalation ─────────────────────────────────────────────
+
+    - id: v1:bash:block-privilege-escalation
+      effect: forbid
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb == "sudo"
+      reason: "Privilege escalation is not permitted."
+      tags: [bash]
+
+    # ── Bash: outbound network tools ───────────────────────────────────────────
+    # curl/wget/nc/ncat bypass the WebFetch network allowlist and must be blocked.
+
+    - id: v1:bash:block-network-exfiltration
+      effect: forbid
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb in ["curl", "wget", "nc", "ncat"]
+      reason: "Outbound network calls from Bash are not permitted."
+      tags: [bash, network]
+
+    # ── Bash: package publishing ───────────────────────────────────────────────
+    # npm publish and pip/twine upload push packages to external registries and
+    # require explicit operator approval before they can proceed.
+
+    - id: v1:bash:block-npm-publish
+      effect: forbid
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb == "npm"
+        - resource.subcommand == "publish"
+      reason: "Package publishing requires explicit operator approval."
+      tags: [bash, publish]
+
+    - id: v1:bash:block-pip-twine-upload
+      effect: forbid
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb in ["pip", "twine"]
+        - resource.subcommand == "upload"
+      reason: "Package publishing requires explicit operator approval."
+      tags: [bash, publish]
+
+    # ── Bash: cd scope restriction ─────────────────────────────────────────────
+    # Prevent cd to paths outside /workspace.  Relative cd (e.g. "cd src") has
+    # no target_path and is always permitted; this rule fires only on absolute
+    # or ~-prefixed paths.  cd to /tmp is allowed as scratch space.
+    # Note: permit-safe-read-only grants cd as a verb; forbid takes precedence.
+
+    - id: v1:bash:block-cd-out-of-workspace
+      effect: forbid
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb == "cd"
+        - resource.target_path is not null
+        - resource.target_in_workspace == false
+      unless:
+        - resource.target_in_tmp == true
+      reason: "cd to paths outside /workspace is not permitted."
+      tags: [bash, workspace]
+
+  # ── Audit logging ─────────────────────────────────────────────────────────────
+  audit:
+    enabled: true
+
+  # ── QA gate ───────────────────────────────────────────────────────────────────
+  # Leave empty here — repositories define their own QA checks via
+  # .contAIned_manifest.yaml. The mAInlined manifest may add shared checks
+  # that run in addition to the repo's checks.
+  qa:
+    checks: []
+
+  # ── Plugin marketplace enforcement ───────────────────────────────────────────
+  # Restrict to the Anthropic official marketplace only. Repositories may not
+  # add other sources. The github plugin is always pre-installed so the agent
+  # can work with pull requests and issues without a manual install step.
+  # Ecosystem-specific LSP plugins (go-lsp, python-lsp, etc.) are defined above
+  # in ecosystem_definitions and are installed only when that ecosystem is active.
+  plugins:
+    strict_marketplaces: true
+    builtin_marketplace: true
+    preinstall:
+      - marketplace: claude-plugins-official
+        plugin: github
+
+  # ── MCP server approvals ──────────────────────────────────────────────────────
+  mcp:
+    approved_servers: []
+
+  # ── Skill approvals ───────────────────────────────────────────────────────────
+  skills:
+    approved_skills: []
+
+  # ── mAInlined policy coordination ─────────────────────────────────────────────
+  mAInlined:
+    url: "https://mainlined.example.com"
+    policy_name: "default"
+    policy_ref: "main"
+    policy_version: ""
+
+  # ── Sandbox ───────────────────────────────────────────────────────────────────
+  sandbox:
+    enabled: true
+    filesystem:
+      denyWrite:
+        - .contAIned

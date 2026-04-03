@@ -1,0 +1,167 @@
+# contAIned operator manifest — context-aware policy rules (Phase 3)
+#
+# This example shows how to write policy.rules that reference context.*
+# attributes, allowing rules to behave differently depending on the current
+# task phase, QA status, or tool call count.
+#
+# Context attributes available in Phase 3:
+#   context.task_phase:      "initialization" | "active" | "qa" | "review"
+#   context.qa_status:       "passing" | "failing" | "not_run" | "unknown"
+#   context.tool_call_count: int — number of tool calls in this session so far
+#
+# Context attributes are populated at each hook call from the tracer database.
+# They are distinct from principal.* attributes (which are set once per session)
+# in that they reflect dynamic, per-call state.
+#
+# Run `contained migrate` to convert legacy policy.secrets/bash/network sections
+# to the policy.rules format used here.
+
+runtime:
+  docker:
+    image: contained:latest
+    memory: 2g
+    cpus: 2
+    network: contAIned-net
+    agent_config_volume: contAIned-agent-config
+
+agent:
+  model: claude-sonnet-4-6
+  budget_tokens: 1024
+
+policy:
+
+  sigstore:
+    enabled: true
+    rekor_url: https://rekor.sigstore.dev
+    fulcio_url: https://fulcio.sigstore.dev
+
+  network:
+    enabled: true
+    allowed_domains:
+      - api.anthropic.com
+      - code.claude.com
+      - docs.anthropic.com
+      - github.com
+
+  rules:
+
+    # ── Secret-file classifier ────────────────────────────────────────────────
+    # Declares is_secret and is_safe_variant on FilePath entities.
+
+    - id: v1:define:secret-file-patterns
+      effect: define
+      resource_type: FilePath
+      define:
+        is_safe_variant:
+          patterns: ['\.(example|sample|template)']
+        is_secret:
+          patterns: ['(^|[/\\])\.env(\.[^/\\]+)?$']
+      tags: [secrets]
+
+    # ── Secret file protection ────────────────────────────────────────────────
+
+    - id: v1:secrets:block-secret-access
+      effect: forbid
+      action: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"]
+      resource_type: FilePath
+      when:
+        - resource.is_secret == true
+      unless:
+        - resource.is_safe_variant == true
+      reason: "Secret files may not be accessed."
+      tags: [secrets]
+
+    # ── Control-plane protection ──────────────────────────────────────────────
+
+    - id: v1:control-plane:block-writes
+      effect: forbid
+      action: ["Write", "Edit", "MultiEdit"]
+      resource_type: FilePath
+      when:
+        - resource.in_control_plane == true
+      reason: "The contAIned control plane may not be modified by the agent."
+      tags: [control-plane]
+
+    # ── Network policy ────────────────────────────────────────────────────────
+
+    - id: v1:network:block-out-of-allowlist
+      effect: forbid
+      action: ["WebFetch", "WebSearch"]
+      resource_type: NetworkResource
+      when:
+        - resource.in_allowlist == false
+      reason: "Network request to a domain outside the operator allowlist."
+      tags: [network]
+
+    # ── Context-aware: Phase 3 examples ──────────────────────────────────────
+    #
+    # Rules below use context.* attributes populated at each hook call.
+    # They require Phase 3 engine support (contained >= Phase 3 build).
+
+    # Example 1: restrict git push to operator review phase.
+    #
+    # During active coding the agent is free to stage and commit, but a push
+    # that triggers CI and potentially deploys should only happen when the
+    # operator has explicitly entered review mode (e.g. via the #review command
+    # or by advancing the task to review phase). All other push attempts are
+    # denied with a clear explanation.
+    - id: v3:bash:restrict-git-push-to-review
+      effect: forbid
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb == "git"
+        - resource.subcommand == "push"
+        - context.task_phase != "review"
+      reason: >
+        git push is only permitted during operator review phase.
+        The current task phase is not "review". If you have completed
+        the task and want to push, ask the operator to enter review mode.
+      tags: [bash, git, context-aware]
+
+    # Example 2: escalate network access during session initialization.
+    #
+    # The first few tool calls of a session (initialization phase) are high-risk
+    # for prompt injection via malicious content fetched before the agent has a
+    # stable working context. Escalating all network calls during initialization
+    # forces operator review of any early fetch/search calls.
+    - id: v3:network:escalate-during-initialization
+      effect: escalate
+      action: [WebFetch, WebSearch]
+      resource_type: NetworkResource
+      when:
+        - context.task_phase == "initialization"
+      reason: >
+        Network access during session initialization requires operator approval.
+        This guards against prompt injection via early-session content fetches.
+      tags: [network, context-aware]
+
+    # Example 3: deny all tool calls once a budget threshold is reached.
+    #
+    # Prevents runaway sessions from consuming unbounded tool calls. Operators
+    # can adjust the threshold or remove this rule entirely.
+    - id: v3:session:block-over-budget
+      effect: forbid
+      action: ["*"]
+      resource_type: "*"
+      when:
+        - context.tool_call_count > 500
+      reason: >
+        Session tool call budget exceeded (500 calls). The session will not
+        make further tool calls. Please start a new session.
+      tags: [budget, context-aware]
+
+  audit:
+    enabled: true
+
+  mcp:
+    approved_servers: []
+
+  skills:
+    approved_skills: []
+
+sandbox:
+  enabled: true
+  filesystem:
+    denyWrite:
+      - .contAIned

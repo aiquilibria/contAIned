@@ -6,10 +6,26 @@
 #   3. policy  — all governance settings read by the hook scripts,
 #                including build-time provenance (sigstore).
 #
-# Action values accepted by policy settings:
-#   block    — deny the operation outright; agent receives a clear reason
-#   allow    — permit unconditionally
-#   escalate — pass through to the SDK's canUseTool callback for operator approval
+# ── Policy rule formats ────────────────────────────────────────────────────────
+# Phase 2+  (recommended): unified policy.rules list with Cedar-inspired YAML.
+#   Run `contained migrate` to convert an existing manifest automatically.
+#   Example:
+#     policy:
+#       rules:
+#         - id: "v1:secrets:dotenv"
+#           effect: forbid
+#           action: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"]
+#           resource_type: FilePath
+#           when: ["resource.is_secret == true"]
+#           unless: ["resource.is_safe_variant == true"]
+#           reason: "Secret files may not be accessed."
+#
+# Phase 1   (deprecated): fragmented policy.secrets / policy.bash / policy.network
+#   sections — still supported but emit a deprecation warning at runtime.
+#   Action values:
+#     block    — deny the operation outright; agent receives a clear reason
+#     allow    — permit unconditionally
+#     escalate — pass through to the SDK's canUseTool callback for operator approval
 #
 # Note: writes to .contAIned/ are always denied regardless of policy settings —
 # control-plane protection is hardcoded and not configurable.
@@ -155,6 +171,10 @@ policy:
       - name: package_publish
         patterns: ['^(npm\s+publish|pip\s+upload|twine\s+upload)\b']
         reason: "Package publishing requires explicit operator approval."
+        action: block
+      - name: block-shell-delegation
+        patterns: ['^(bash|sh|eval|xargs|env|exec|nohup|dash|zsh)\s']
+        reason: "Shell delegation verbs are not permitted (prevents bypass of compound-command detection)."
         action: block
 
   # ── Network policy ────────────────────────────────────────────────────────────

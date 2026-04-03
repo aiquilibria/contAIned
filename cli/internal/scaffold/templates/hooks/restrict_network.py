@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PreToolUse hook — restricts Read, Glob, and Grep tool calls.
+PreToolUse hook — restricts WebFetch and WebSearch tool calls.
 
 Policy is evaluated by the Cedar-inspired engine (contained.engine).
-Falls back to _policy.py pattern matching if the engine is unavailable.
+Falls back to domain allowlist pattern matching if the engine is unavailable.
 
 Outcomes:
   DENY     → JSON permissionDecision:deny  + exit 0
@@ -45,7 +45,7 @@ def _ask() -> None:
     }))
 
 
-def _log(event: dict, target: str, policy_data: dict) -> None:
+def _log(event: dict, url: str, policy_data: dict) -> None:
     """Append a structured audit entry to pipeline.jsonl. Never raises."""
     try:
         project_root = Path(event.get("cwd", "."))
@@ -55,7 +55,7 @@ def _log(event: dict, target: str, policy_data: dict) -> None:
             "ts":         datetime.now(timezone.utc).isoformat(),
             "session_id": event.get("session_id"),
             "tool":       event.get("tool_name"),
-            "input":      {"target": target},
+            "input":      {"url": url},
             "policy":     policy_data,
         }
         with audit_log.open("a") as f:
@@ -66,9 +66,9 @@ def _log(event: dict, target: str, policy_data: dict) -> None:
         from contained.tracer import contAInedTracer  # noqa: PLC0415
         _db = str(Path(event.get("cwd", ".")) / ".contAIned" / "tracer.db")
         contAInedTracer(_db).log_event(
-            session_id=event.get("agent_id") or event.get("session_id"),
+            session_id=event.get("agent_id") or event.get("session_id") or "",
             tool=event.get("tool_name", ""),
-            tool_input={"file_path": target},
+            tool_input={"url": url},
             outcome=policy_data.get("outcome", "denied"),
             reason=policy_data.get("reason"),
         )
@@ -84,89 +84,72 @@ except json.JSONDecodeError:
 tool       = event.get("tool_name", "")
 tool_input = event.get("tool_input", {})
 
-if tool not in ("Read", "Glob", "Grep"):
+if tool not in ("WebFetch", "WebSearch"):
+    sys.exit(0)
+
+url = tool_input.get("url", "") or tool_input.get("query", "")
+if not url:
     sys.exit(0)
 
 # ── Engine path ───────────────────────────────────────────────────────────────
 try:
     from contained.engine import (
-        build_file_path_entity,
-        build_glob_pattern_entity,
+        build_network_resource_entity,
         evaluate,
-        extract_file_targets,
-        is_glob_tool,
+        load_allowed_domains,
         load_rules,
-        load_secrets_patterns,
     )
     from contained.engine.entities import Outcome, build_agent_session, build_context
 
     principal = build_agent_session(event)
     context   = build_context(event)
     rules     = load_rules()
-    patterns  = load_secrets_patterns()
-    targets   = extract_file_targets(tool, tool_input)
+    domains   = load_allowed_domains()
+    entity    = build_network_resource_entity(url, domains)
+    decision  = evaluate(rules, tool, entity, principal, context=context)
 
-    if not targets:
+    if decision.outcome == Outcome.DENY:
+        _log(event, url, {
+            "outcome": "deny",
+            "rule_id": decision.rule_id,
+            "reason":  decision.reason,
+        })
+        _deny(decision.reason or f"Network access denied: {url}")
         sys.exit(0)
 
-    glob = is_glob_tool(tool)
+    if decision.outcome == Outcome.ALLOW:
+        _allow()
+        sys.exit(0)
 
-    for target in targets:
-        if glob:
-            entity = build_glob_pattern_entity(target)
-        else:
-            entity = build_file_path_entity(target, secrets_patterns=patterns)
-        decision = evaluate(rules, tool, entity, principal, context=context)
+    if decision.outcome == Outcome.ESCALATE:
+        _ask()
+        sys.exit(0)
 
-        if decision.outcome == Outcome.DENY:
-            _log(event, target, {
-                "outcome":  "deny",
-                "rule_id":  decision.rule_id,
-                "reason":   decision.reason,
-            })
-            _deny(decision.reason or f"Access denied: {target}")
-            sys.exit(0)
-
-        if decision.outcome == Outcome.ALLOW:
-            _allow()
-            sys.exit(0)
-
-        if decision.outcome == Outcome.ESCALATE:
-            _ask()
-            sys.exit(0)
-
-        # DEFER — continue checking remaining targets
-
+    # DEFER — fall through
     sys.exit(0)
 
-# ── Fallback: _policy.py pattern matching ─────────────────────────────────────
+# ── Fallback: allowlist check from _policy.py ─────────────────────────────────
 except ImportError:
     pass
 
 sys.path.insert(0, str(Path(__file__).parent))
 from _policy import load_policy  # noqa: E402
 
+from urllib.parse import urlparse  # noqa: E402
+
 cwd    = event.get("cwd", ".")
 policy = load_policy(cwd)
 
-if tool == "Read":
-    target = tool_input.get("file_path", "")
-elif tool == "Grep":
-    target = tool_input.get("path", "")
-elif tool == "Glob":
-    target = tool_input.get("pattern", "")
-else:
+if not policy.get("network", {}).get("enabled", True):
     sys.exit(0)
 
-if not target:
+parsed  = urlparse(url)
+domain  = parsed.netloc or parsed.path
+allowed = policy.get("network", {}).get("allowed_domains", [])
+
+if domain in allowed:
     sys.exit(0)
 
-for _action, _patterns, _reason in policy["secrets"]["_compiled_rules"]:
-    if any(p.search(target) for p in _patterns):
-        if _action == "allow":
-            break
-        _log(event, target, {"outcome": "deny", "reason": _reason})
-        _deny(_reason or f"Access denied: secret files (credentials, keys, .env) may not be read.")
-        sys.exit(0)
-
+_log(event, url, {"outcome": "deny", "reason": f"Domain '{domain}' is not in the network allowlist."})
+_deny(f"Network access to '{domain}' is not permitted. Domain is not in the allowlist.")
 sys.exit(0)
