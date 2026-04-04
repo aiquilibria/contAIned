@@ -45,6 +45,7 @@ dev = [
     "pyright==1.1.408",
     "pytest==9.0.2",
     "pytest-cov==7.0.0",
+    "pytest-benchmark==5.1.0",
     "ruff==0.15.7",
     "hypothesis==6.151.10",
 ]
@@ -54,6 +55,7 @@ dev = [
     "pyright==1.1.408",
     "pytest==9.0.2",
     "pytest-cov==7.0.0",
+    "pytest-benchmark==5.1.0",
     "ruff==0.15.7",
     "hypothesis==6.151.10",
 ]
