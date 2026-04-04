@@ -271,17 +271,30 @@ func runInit(_ *cobra.Command, args []string) error {
 		mAInlinedAPIKey = reg.APIKey
 		mAInlinedUsed = mAInlinedParsed
 
-		// The registration endpoint may omit policy_version; extract it from
-		// the returned policy_yaml (at policy.mAInlined.policy_version) if so.
+		// The registration endpoint may omit policy_ref / policy_version.
+		// Fall back to values already present in the input manifest so that
+		// a re-init (--rebuild) with a pre-populated manifest never sends
+		// empty required fields to the provenance intimation endpoint.
+		policyRefB := reg.PolicyRef
+		if policyRefB == "" {
+			policyRefB = m.Init.Mainlined.PolicyRef
+		}
+		if policyRefB == "" {
+			policyRefB = m.Init.Mainlined.PolicyName // last resort
+		}
 		policyVersionB := reg.PolicyVersion
 		if policyVersionB == "" {
 			if parsed, parseErr := manifest.Parse([]byte(reg.PolicyYAML)); parseErr == nil {
 				policyVersionB = manifest.ExtractPolicyVersion(parsed)
 			}
 		}
+		if policyVersionB == "" {
+			policyVersionB = m.Init.Mainlined.PolicyVersion
+		}
 		m.Init.Mainlined = manifest.MainlinedConfig{
 			URL:           initmAInlinedURL,
-			PolicyRef:     reg.PolicyRef,
+			PolicyName:    m.Init.Mainlined.PolicyName,
+			PolicyRef:     policyRefB,
 			PolicyVersion: policyVersionB,
 			PolicyYAML:    reg.PolicyYAML,
 		}
@@ -387,20 +400,26 @@ func runInit(_ *cobra.Command, args []string) error {
 			// Only when mAInlined was used for this init; skip when sigstore.enabled: false
 			// (already inside that guard) or when mAInlined was not configured.
 			if mAInlinedUsed != nil {
-				dim.Printf("  Intimating provenance to mAInlined …\n")
-				mainlined.IntimateProvenance(
-					*mAInlinedUsed,
-					mAInlinedAPIKey,
-					prov.OperatorIdentity,
-					target,
-					initmAInlinedURL,
-					m.Init.Mainlined.PolicyRef,
-					m.Init.Mainlined.PolicyVersion,
-					m.Init.Container.Image,
-					prov.ImageDigest,
-					prov.RekorLogIndex,
-					m.Init.Sigstore.RekorURL,
-				)
+				if m.Init.Mainlined.PolicyRef == "" || m.Init.Mainlined.PolicyVersion == "" {
+					fmt.Printf("  Skipping provenance intimation — policy_ref or policy_version not set "+
+						"(ref=%q version=%q).\n",
+						m.Init.Mainlined.PolicyRef, m.Init.Mainlined.PolicyVersion)
+				} else {
+					dim.Printf("  Intimating provenance to mAInlined …\n")
+					mainlined.IntimateProvenance(
+						*mAInlinedUsed,
+						mAInlinedAPIKey,
+						prov.OperatorIdentity,
+						target,
+						initmAInlinedURL,
+						m.Init.Mainlined.PolicyRef,
+						m.Init.Mainlined.PolicyVersion,
+						m.Init.Container.Image,
+						prov.ImageDigest,
+						prov.RekorLogIndex,
+						m.Init.Sigstore.RekorURL,
+					)
+				}
 			}
 		}
 	}

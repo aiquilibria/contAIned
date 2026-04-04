@@ -69,13 +69,13 @@ type MainlinedConfig struct {
 // the container do not read this section at runtime.
 type InitConfig struct {
 	Container ContainerConfig `yaml:"container"`
-	Agent     AgentConfig    `yaml:"agent"`
-	Sigstore  SigstoreConfig `yaml:"sigstore"`
-	Plugins   PluginsConfig  `yaml:"plugins,omitempty"`
-	MCP       MCPConfig      `yaml:"mcp"`
-	Skills    SkillsConfig   `yaml:"skills"`
+	Agent     AgentConfig     `yaml:"agent"`
+	Sigstore  SigstoreConfig  `yaml:"sigstore"`
+	Plugins   PluginsConfig   `yaml:"plugins,omitempty"`
+	MCP       MCPConfig       `yaml:"mcp"`
+	Skills    SkillsConfig    `yaml:"skills"`
 	Mainlined MainlinedConfig `yaml:"mainlined,omitempty"`
-	Sandbox   SandboxConfig  `yaml:"sandbox"`
+	Sandbox   SandboxConfig   `yaml:"sandbox"`
 }
 
 // ExtraSecret declares a secret file on the host that is bind-mounted into
