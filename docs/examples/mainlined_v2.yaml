@@ -103,7 +103,7 @@ init:
     budget_tokens: 1024
 
   sigstore:
-    enabled: false
+    enabled: true
     rekor_url: https://rekor.sigstore.dev
     fulcio_url: https://fulcio.sigstore.dev
 
