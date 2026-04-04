@@ -88,6 +88,9 @@ _fp_outside = build_file_path_entity("/etc/passwd", _SECRETS)
 _bash_git = build_bash_command_entity("git status", _SECRETS)
 _bash_rm = build_bash_command_entity("rm -rf /tmp/x", _SECRETS)
 _bash_cd = build_bash_command_entity("cd /workspace/cli", _SECRETS)
+_bash_sh_c = build_bash_command_entity(
+    'sh -c "cd /workspace/cli && go build ./..."', _SECRETS
+)
 _net_ok = build_network_resource_entity("https://api.anthropic.com/v1/messages", _ALLOWED_DOMAINS)
 _net_bad = build_network_resource_entity("https://evil.com/exfil", _ALLOWED_DOMAINS)
 
@@ -119,6 +122,15 @@ def test_build_bash_rm(benchmark):
 def test_build_bash_cd(benchmark):
     benchmark.name = "build BashCommand (cd /workspace/cli)"
     benchmark(build_bash_command_entity, "cd /workspace/cli", _SECRETS)
+
+
+def test_build_bash_sh_c(benchmark):
+    benchmark.name = "build BashCommand (sh -c compound)"
+    benchmark(
+        build_bash_command_entity,
+        'sh -c "cd /workspace/cli && go build ./..."',
+        _SECRETS,
+    )
 
 
 def test_build_network_allowed(benchmark):
@@ -171,6 +183,12 @@ def test_evaluate_bash_cd(benchmark):
     """cd /workspace/cli → ALLOW (permit-safe-read-only; target_in_workspace)."""
     benchmark.name = "evaluate Bash cd → ALLOW"
     benchmark(evaluate, _RULES, "Bash", _bash_cd, _SESSION, {})
+
+
+def test_evaluate_bash_sh_c(benchmark):
+    """sh -c compound → DENY (block-shell-delegation)."""
+    benchmark.name = "evaluate Bash sh -c → DENY"
+    benchmark(evaluate, _RULES, "Bash", _bash_sh_c, _SESSION, {})
 
 
 def test_evaluate_webfetch_allowed(benchmark):
@@ -246,6 +264,20 @@ def test_pipeline_webfetch_blocked(benchmark):
     def _run():
         e = build_network_resource_entity("https://evil.com/exfil", _ALLOWED_DOMAINS)
         evaluate(_RULES, "WebFetch", e, _SESSION, {})
+
+    result = benchmark(_run)
+    assert benchmark.stats["mean"] * 1e6 < LATENCY_BUDGET_US
+    return result
+
+
+def test_pipeline_bash_sh_c(benchmark):
+    benchmark.name = "pipeline Bash sh -c → DENY"
+
+    def _run():
+        e = build_bash_command_entity(
+            'sh -c "cd /workspace/cli && go build ./..."', _SECRETS
+        )
+        evaluate(_RULES, "Bash", e, _SESSION, {})
 
     result = benchmark(_run)
     assert benchmark.stats["mean"] * 1e6 < LATENCY_BUDGET_US

@@ -88,6 +88,7 @@ def test_manifest_loads_all_rules():
         "v1:bash:block-network-exfiltration",
         "v1:bash:block-npm-publish",
         "v1:bash:block-pip-twine-upload",
+        "v1:bash:block-shell-delegation",
         "v1:bash:block-cd-out-of-workspace",
     }
     assert expected <= ids, f"Missing rules: {expected - ids}"
@@ -483,6 +484,43 @@ class TestBlockPipTwineUpload:
     def test_twine_check_is_not_denied(self):
         d = _ev("Bash", _bash("twine check dist/"))
         assert d.rule_id != "v1:bash:block-pip-twine-upload"
+
+
+# ---------------------------------------------------------------------------
+# v1:bash:block-shell-delegation
+# ---------------------------------------------------------------------------
+
+
+class TestBlockShellDelegation:
+    def test_sh_c_compound_is_denied(self):
+        d = _ev("Bash", _bash('sh -c "cd /workspace/cli && go build ./..."'))
+        assert d.outcome == Outcome.DENY
+        assert d.rule_id == "v1:bash:block-shell-delegation"
+
+    def test_bash_c_compound_is_denied(self):
+        d = _ev("Bash", _bash('bash -c "rm -rf /tmp/x"'))
+        assert d.outcome == Outcome.DENY
+        assert d.rule_id == "v1:bash:block-shell-delegation"
+
+    def test_eval_is_denied(self):
+        d = _ev("Bash", _bash("eval 'go build ./...'"))
+        assert d.outcome == Outcome.DENY
+        assert d.rule_id == "v1:bash:block-shell-delegation"
+
+    def test_dash_is_denied(self):
+        d = _ev("Bash", _bash("dash -c 'echo hi'"))
+        assert d.outcome == Outcome.DENY
+        assert d.rule_id == "v1:bash:block-shell-delegation"
+
+    def test_go_build_direct_is_not_denied_by_this_rule(self):
+        """Direct go build (no shell delegation) must not be caught."""
+        d = _ev("Bash", _bash("go build ./..."))
+        assert d.rule_id != "v1:bash:block-shell-delegation"
+
+    def test_python_is_not_denied_by_this_rule(self):
+        """python/python3 are not shell delegation verbs."""
+        d = _ev("Bash", _bash("python3 -m pytest tests/"))
+        assert d.rule_id != "v1:bash:block-shell-delegation"
 
 
 # ---------------------------------------------------------------------------

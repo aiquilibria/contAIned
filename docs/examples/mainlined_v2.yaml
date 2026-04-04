@@ -338,6 +338,24 @@ runtime:
       reason: "Outbound network calls from Bash are not permitted."
       tags: [bash, network]
 
+    # ── Bash: shell delegation ─────────────────────────────────────────────────
+    # sh/bash/eval used as a verb delegates to a sub-shell where compound
+    # operators (&& || ; |) can be hidden inside a quoted argument string.
+    # The entity builder cannot see inside the quoted string, so is_compound is
+    # False and the compound-command detection is bypassed.  This rule closes
+    # that gap by forbidding the delegation pattern entirely.
+    # QA hook checks run sh -c "..." as subprocess calls (not Bash tool calls)
+    # and are unaffected by this rule.
+
+    - id: v1:bash:block-shell-delegation
+      effect: forbid
+      action: [Bash]
+      resource_type: BashCommand
+      when:
+        - resource.verb in ["sh", "bash", "dash", "zsh", "ksh", "fish", "eval"]
+      reason: "Shell delegation (sh -c, bash -c, eval, etc.) hides compound operators from sandbox evaluation."
+      tags: [bash, compound]
+
     # ── Bash: package publishing ───────────────────────────────────────────────
     # npm publish and pip/twine upload push packages to external registries and
     # require explicit operator approval before they can proceed.
