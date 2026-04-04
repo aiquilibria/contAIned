@@ -430,10 +430,10 @@ try:
                         if _policy_yaml_str:
                             try:
                                 _policy_doc = _yaml.safe_load(_policy_yaml_str) or {}
+                                # v2 schema: init.mainlined.url; v1 fallback: policy.mAInlined.url
                                 _policy_base_url = (
-                                    _policy_doc.get("policy", {})
-                                    .get("mAInlined", {})
-                                    .get("url", "")
+                                    _policy_doc.get("init", {}).get("mainlined", {}).get("url", "")
+                                    or _policy_doc.get("policy", {}).get("mAInlined", {}).get("url", "")
                                 )
                             except Exception:
                                 pass
