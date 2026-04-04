@@ -414,7 +414,11 @@ try:
                         import yaml as _yaml  # noqa: PLC0415
                         from urllib.parse import urlparse, urlunparse  # noqa: PLC0415
                         _manifest = _yaml.safe_load(_manifest_path.read_text()) or {}
-                        _mainlined_sec = _manifest.get("mainlined", {})
+                        # v2 schema: init.mainlined; v1 fallback: root mainlined
+                        _mainlined_sec = (
+                            _manifest.get("init", {}).get("mainlined", {})
+                            or _manifest.get("mainlined", {})
+                        )
                         _bootstrap_url = _mainlined_sec.get("url", "")
                         # Prefer the in-container URL from policy_yaml (Docker network
                         # alias, e.g. "http://mainlined:8080") over mainlined.url which
