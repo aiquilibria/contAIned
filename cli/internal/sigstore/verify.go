@@ -26,7 +26,7 @@ func VerifyWorkspace(root_ string) (*Provenance, error) {
 		return nil, fmt.Errorf("loading manifest: %w", err)
 	}
 
-	if !m.Policy.Sigstore.Enabled {
+	if !m.Init.Sigstore.Enabled {
 		return nil, nil // disabled — not an error
 	}
 
@@ -49,7 +49,7 @@ func VerifyWorkspace(root_ string) (*Provenance, error) {
 		return nil, fmt.Errorf("locating docker: %w", err)
 	}
 
-	image := m.Runtime.Docker.Image
+	image := m.Init.Container.Image
 	actualDigest, err := GetImageDigest(dockerBin, image)
 	if err != nil {
 		return nil, fmt.Errorf("inspecting image: %w", err)
@@ -71,7 +71,7 @@ func VerifyWorkspace(root_ string) (*Provenance, error) {
 		)
 	}
 
-	rekorURL := m.Policy.Sigstore.RekorURL
+	rekorURL := m.Init.Sigstore.RekorURL
 
 	// For new bundles the signed artifact is a JSON payload (image_digest +
 	// policy_ref + policy_version). Legacy bundles signed only the raw digest

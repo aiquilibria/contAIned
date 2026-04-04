@@ -1,35 +1,18 @@
 # contAIned repo manifest — Python ecosystem
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
-# Only ecosystems and policy.qa.checks are permitted here; all policy settings
-# (network, secrets, bash rules, sigstore, etc.) are owned by the operator manifest.
+# Only ecosystems and runtime.qa.checks are permitted here; all other settings
+# (network, sigstore, plugins, etc.) are owned by the operator manifest.
 #
 # Python is pre-installed in the base image — no version pin is needed.
 # Declaring the ecosystem tells `contained init` to add pypi.org and
 # files.pythonhosted.org to the network allowlist automatically.
 
-# To pre-install plugins in your operator manifest, use one of two mechanisms:
-#
-#   # Ecosystem-scoped: installed only when this ecosystem is active in a repo.
-#   ecosystem_definitions:
-#     python:
-#       plugins:
-#         - marketplace: claude-plugins-official
-#           plugin: python-lsp
-#
-#   # Global: always installed regardless of ecosystem (e.g. a GitHub integration).
-#   policy:
-#     plugins:
-#       preinstall:
-#         - marketplace: claude-plugins-official
-#           plugin: github
-#
-# See docs/policy-reference.md for full plugin policy options.
-
 ecosystems:
-  python: ""   # pre-installed; set e.g. "3.12" as a version annotation if desired
+  python:
+    version: "3.13.4"   # annotate your project's Python version; no toolchain install
 
-policy:
+runtime:
   qa:
     checks:
       - name: lint

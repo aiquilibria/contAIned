@@ -1,6 +1,6 @@
-# contAIned operator manifest — context-aware policy rules (Phase 3)
+# contAIned operator manifest — context-aware policy rules
 #
-# This example shows how to write policy.rules that reference context.*
+# This example shows how to write runtime.rules that reference context.*
 # attributes, allowing rules to behave differently depending on the current
 # task phase, QA status, or tool call count.
 #
@@ -13,28 +13,39 @@
 # They are distinct from principal.* attributes (which are set once per session)
 # in that they reflect dynamic, per-call state.
 #
-# Run `contained migrate` to convert legacy policy.secrets/bash/network sections
-# to the policy.rules format used here.
+# Run `contained migrate` to convert legacy manifests to the runtime.rules
+# format used here.
 
-runtime:
-  docker:
+init:
+  container:
     image: contained:latest
     memory: 2g
     cpus: 2
     network: contAIned-net
     agent_config_volume: contAIned-agent-config
 
-agent:
-  model: claude-sonnet-4-6
-  budget_tokens: 1024
-
-policy:
+  agent:
+    model: claude-sonnet-4-6
+    budget_tokens: 1024
 
   sigstore:
     enabled: true
     rekor_url: https://rekor.sigstore.dev
     fulcio_url: https://fulcio.sigstore.dev
 
+  mcp:
+    approved_servers: []
+
+  skills:
+    approved_skills: []
+
+  sandbox:
+    enabled: true
+    filesystem:
+      denyWrite:
+        - .contAIned
+
+runtime:
   network:
     enabled: true
     allowed_domains:
@@ -150,18 +161,3 @@ policy:
         Session tool call budget exceeded (500 calls). The session will not
         make further tool calls. Please start a new session.
       tags: [budget, context-aware]
-
-  audit:
-    enabled: true
-
-  mcp:
-    approved_servers: []
-
-  skills:
-    approved_skills: []
-
-sandbox:
-  enabled: true
-  filesystem:
-    denyWrite:
-      - .contAIned

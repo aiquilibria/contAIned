@@ -10,28 +10,27 @@ import (
 )
 
 // Manifest is the top-level structure of .contAIned/manifest.yaml.
+// It has three sections mirroring the lifecycle of each setting:
+//   - Ecosystems: operator-defined runtime definitions; repos opt in by name + version.
+//   - Init: build-time config baked into the Docker image at `contained init`.
+//   - Runtime: per-tool-call enforcement rules evaluated by hooks.
 type Manifest struct {
-	Runtime              RuntimeConfig           `yaml:"runtime"`
-	Agent                AgentConfig             `yaml:"agent"`
-	Policy               PolicyConfig            `yaml:"policy"`
-	EcosystemDefinitions map[string]EcosystemDef `yaml:"ecosystem_definitions,omitempty"`
-	Mainlined            MainlinedSection        `yaml:"mainlined,omitempty"`
-}
-
-// MainlinedSection records the mAInlined registration result baked into the
-// manifest so enforcement hooks can operate entirely offline.
-type MainlinedSection struct {
-	URL           string `yaml:"url,omitempty"`
-	PolicyRef     string `yaml:"policy_ref,omitempty"`
-	PolicyVersion string `yaml:"policy_version,omitempty"`
-	PolicyYAML    string `yaml:"policy_yaml,omitempty"`
+	Ecosystems map[string]EcosystemDef `yaml:"ecosystems,omitempty"`
+	Init       InitConfig              `yaml:"init"`
+	Runtime    RuntimePolicy           `yaml:"runtime"`
 }
 
 // EcosystemDef describes what an ecosystem label means in terms of toolchain
-// installation and network access. Operators define these in the mAInlined
-// manifest; repositories declare which ecosystems they use via RepoManifest.Ecosystems.
+// installation and network access. Both the operator manifest (ecosystem_definitions)
+// and the repo manifest (ecosystems) use this struct. In the operator manifest,
+// Version is a constraint (e.g. ">=1.23"); in the repo manifest, Version is a
+// concrete pin (e.g. "1.25.7") that must satisfy the operator's constraint.
+// All fields other than Version are operator-only and are rejected in repo manifests.
 type EcosystemDef struct {
-	// Toolchain is the runtime.docker.toolchains key to install (e.g. "go",
+	// Version is interpreted by context: a semver constraint in the operator
+	// manifest (e.g. ">=1.23"), a concrete version pin in the repo manifest.
+	Version string `yaml:"version,omitempty"`
+	// Toolchain is the init.container.toolchains key to install (e.g. "go",
 	// "node"). Empty means the runtime is pre-installed in the base image.
 	Toolchain string `yaml:"toolchain,omitempty"`
 	// Deps lists additional tools or packages to pre-install in the container
@@ -54,13 +53,29 @@ type EcosystemDef struct {
 	Plugins []PluginRef `yaml:"plugins,omitempty"`
 }
 
-type RuntimeConfig struct {
-	mAInlined mAInlinedRuntimeConfig `yaml:"mAInlined"`
-	Docker    DockerConfig           `yaml:"docker"`
+// MainlinedConfig is the init.mainlined section. It holds both the operator's
+// mAInlined server coordinates (URL, PolicyName, PolicyRef) and the fetched
+// result (PolicyVersion, PolicyYAML) written back by `contained init`.
+type MainlinedConfig struct {
+	URL           string `yaml:"url,omitempty"`
+	PolicyName    string `yaml:"policy_name,omitempty"`
+	PolicyRef     string `yaml:"policy_ref,omitempty"`
+	PolicyVersion string `yaml:"policy_version,omitempty"`
+	PolicyYAML    string `yaml:"policy_yaml,omitempty"`
 }
 
-type mAInlinedRuntimeConfig struct {
-	URL string `yaml:"url"`
+// InitConfig holds all build-time / init-time configuration that is resolved
+// and baked into the Docker image at `contained init`. Hooks running inside
+// the container do not read this section at runtime.
+type InitConfig struct {
+	Container ContainerConfig `yaml:"container"`
+	Agent     AgentConfig    `yaml:"agent"`
+	Sigstore  SigstoreConfig `yaml:"sigstore"`
+	Plugins   PluginsConfig  `yaml:"plugins,omitempty"`
+	MCP       MCPConfig      `yaml:"mcp"`
+	Skills    SkillsConfig   `yaml:"skills"`
+	Mainlined MainlinedConfig `yaml:"mainlined,omitempty"`
+	Sandbox   SandboxConfig  `yaml:"sandbox"`
 }
 
 // ExtraSecret declares a secret file on the host that is bind-mounted into
@@ -82,7 +97,7 @@ type ExtraSecret struct {
 	NetrcMachine string `yaml:"netrc_machine,omitempty"`
 }
 
-type DockerConfig struct {
+type ContainerConfig struct {
 	Image             string            `yaml:"image"`
 	Memory            string            `yaml:"memory"`
 	CPUs              int               `yaml:"cpus"`
@@ -110,23 +125,12 @@ type AgentConfig struct {
 	BudgetTokens int    `yaml:"budget_tokens"`
 }
 
-type PolicyConfig struct {
-	// Rules is the Phase 2+ unified policy rule list (Cedar-inspired YAML format).
-	// When present, the legacy Secrets/Bash/Network sections are ignored by the
-	// engine (they continue to be parsed for backwards-compat tooling).
-	// When absent, the engine's compat adapter translates the legacy sections.
-	Rules     []PolicyRule    `yaml:"rules,omitempty"`
-	Sigstore  SigstoreConfig  `yaml:"sigstore"`
-	Secrets   SecretsConfig   `yaml:"secrets"`
-	Bash      BashConfig      `yaml:"bash"`
-	Network   NetworkConfig   `yaml:"network"`
-	Audit     AuditConfig     `yaml:"audit"`
-	QA        QAConfig        `yaml:"qa"`
-	MCP       MCPConfig       `yaml:"mcp"`
-	Skills    SkillsConfig    `yaml:"skills"`
-	Plugins   PluginsConfig   `yaml:"plugins,omitempty"`
-	Sandbox   SandboxConfig   `yaml:"sandbox"`
-	mAInlined mAInlinedPolicy `yaml:"mAInlined"`
+// RuntimePolicy holds all per-tool-call enforcement configuration evaluated
+// by hooks at agent runtime. Init-time config lives in InitConfig instead.
+type RuntimePolicy struct {
+	Network NetworkConfig `yaml:"network"`
+	Rules   []PolicyRule  `yaml:"rules,omitempty"`
+	QA      QAConfig      `yaml:"qa"`
 }
 
 // PolicyRule is a single Cedar-inspired rule in the unified policy.rules list.
@@ -164,29 +168,9 @@ type SigstoreConfig struct {
 	FulcioURL string `yaml:"fulcio_url"`
 }
 
-type SecretsConfig struct {
-	Rules []Rule `yaml:"rules"`
-}
-
-type BashConfig struct {
-	Rules []Rule `yaml:"rules"`
-}
-
-// Rule is a named pattern-action entry used in secrets and bash policy blocks.
-type Rule struct {
-	Name     string   `yaml:"name"`
-	Patterns []string `yaml:"patterns"`
-	Reason   string   `yaml:"reason,omitempty"`
-	Action   string   `yaml:"action"` // "allow", "block", "escalate"
-}
-
 type NetworkConfig struct {
 	Enabled        bool     `yaml:"enabled"`
 	AllowedDomains []string `yaml:"allowed_domains"`
-}
-
-type AuditConfig struct {
-	Enabled bool `yaml:"enabled"`
 }
 
 type QAConfig struct {
@@ -258,26 +242,9 @@ type SkillsConfig struct {
 	ApprovedSkills []string `yaml:"approved_skills"`
 }
 
-type mAInlinedPolicy struct {
-	URL           string `yaml:"url"`
-	PolicyName    string `yaml:"policy_name"`
-	PolicyRef     string `yaml:"policy_ref"`
-	PolicyVersion string `yaml:"policy_version"`
-}
-
-// ExtractPolicyVersion extracts policy.mAInlined.policy_version from a raw
-// manifest YAML string via unstructured map access. This is necessary because
-// PolicyConfig.mAInlined is an unexported field that yaml.v3 cannot unmarshal
-// into via reflection.
-func ExtractPolicyVersion(yamlContent string) string {
-	var raw map[string]any
-	if err := yaml.Unmarshal([]byte(yamlContent), &raw); err != nil {
-		return ""
-	}
-	policy, _ := raw["policy"].(map[string]any)
-	mAInlined, _ := policy["mAInlined"].(map[string]any)
-	v, _ := mAInlined["policy_version"].(string)
-	return v
+// ExtractPolicyVersion returns the policy_version from a parsed manifest.
+func ExtractPolicyVersion(m *Manifest) string {
+	return m.Init.Mainlined.PolicyVersion
 }
 
 type SandboxConfig struct {
@@ -342,29 +309,29 @@ func Load(root string) (*Manifest, error) {
 // applyDefaults fills in zero-value fields with sensible defaults so callers
 // don't need to guard against empty strings.
 func applyDefaults(m *Manifest) {
-	if m.Runtime.Docker.Image == "" {
-		m.Runtime.Docker.Image = "contained:latest"
+	if m.Init.Container.Image == "" {
+		m.Init.Container.Image = "contained:latest"
 	}
-	if m.Runtime.Docker.Memory == "" {
-		m.Runtime.Docker.Memory = "2g"
+	if m.Init.Container.Memory == "" {
+		m.Init.Container.Memory = "2g"
 	}
-	if m.Runtime.Docker.CPUs == 0 {
-		m.Runtime.Docker.CPUs = 2
+	if m.Init.Container.CPUs == 0 {
+		m.Init.Container.CPUs = 2
 	}
-	if m.Runtime.Docker.Network == "" {
-		m.Runtime.Docker.Network = "contAIned-net"
+	if m.Init.Container.Network == "" {
+		m.Init.Container.Network = "contAIned-net"
 	}
-	if m.Runtime.Docker.AgentConfigVolume == "" {
-		m.Runtime.Docker.AgentConfigVolume = "contAIned-agent-config"
+	if m.Init.Container.AgentConfigVolume == "" {
+		m.Init.Container.AgentConfigVolume = "contAIned-agent-config"
 	}
-	if m.Policy.Sigstore.RekorURL == "" {
-		m.Policy.Sigstore.RekorURL = "https://rekor.sigstore.dev"
+	if m.Init.Sigstore.RekorURL == "" {
+		m.Init.Sigstore.RekorURL = "https://rekor.sigstore.dev"
 	}
-	if m.Policy.Sigstore.FulcioURL == "" {
-		m.Policy.Sigstore.FulcioURL = "https://fulcio.sigstore.dev"
+	if m.Init.Sigstore.FulcioURL == "" {
+		m.Init.Sigstore.FulcioURL = "https://fulcio.sigstore.dev"
 	}
-	if m.Policy.Plugins.BuiltinMarketplace == nil {
+	if m.Init.Plugins.BuiltinMarketplace == nil {
 		t := true
-		m.Policy.Plugins.BuiltinMarketplace = &t
+		m.Init.Plugins.BuiltinMarketplace = &t
 	}
 }

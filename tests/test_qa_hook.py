@@ -168,7 +168,7 @@ def _run_hook_with_manifest(tmp_path: Path, manifest: dict, event: dict) -> dict
 class TestQAHookIntegration:
     def test_3_9_empty_checks_passes_trivially(self, tmp_path):
         """3.9: no checks → no block decision."""
-        manifest = {"policy": {"qa": {"checks": []}}}
+        manifest = {"runtime": {"qa": {"checks": []}}}
         event = {"cwd": str(tmp_path), "session_id": "test-session"}
         out = _run_hook_with_manifest(tmp_path, manifest, event)
         assert out.get("decision") != "block"
@@ -177,7 +177,7 @@ class TestQAHookIntegration:
     def test_3_8_when_changed_skips_check_when_no_matching_files(self, tmp_path):
         """3.8: check with when_changed: ["*.ts"] skipped when no .ts files touched."""
         manifest = {
-            "policy": {
+            "runtime": {
                 "qa": {
                     "checks": [
                         {"name": "ts-build", "command": ["false"], "when_changed": ["*.ts"]},
@@ -196,7 +196,7 @@ class TestQAHookIntegration:
     def test_3_7_non_python_check_runs(self, tmp_path):
         """3.7: a non-Python check (true) runs and passes."""
         manifest = {
-            "policy": {
+            "runtime": {
                 "qa": {
                     "checks": [
                         ["true"],
@@ -213,7 +213,7 @@ class TestQAHookIntegration:
     def test_failing_check_blocks(self, tmp_path):
         """A check whose command exits nonzero produces a block decision."""
         manifest = {
-            "policy": {
+            "runtime": {
                 "qa": {
                     "checks": [
                         {"name": "always-fail", "command": ["false"]},
@@ -230,7 +230,7 @@ class TestQAHookIntegration:
     def test_missing_command_binary_skips(self, tmp_path):
         """A check whose binary doesn't exist is skipped, not failed."""
         manifest = {
-            "policy": {
+            "runtime": {
                 "qa": {
                     "checks": [
                         ["__no_such_binary_xyzzy__"],

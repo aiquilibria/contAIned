@@ -1,30 +1,32 @@
-# contAIned mAInlined manifest — example (v2 policy.rules schema)
+# contAIned mAInlined manifest — example (v2 schema)
 #
-# This is the v2 equivalent of mainlined.yaml, migrated to the Phase 2+
-# policy.rules format. All policy enforcement logic has moved from the legacy
-# policy.secrets/bash sections into the unified policy.rules list. The legacy
-# sections are retained only where required by the entity builder:
+# This is the reference mAInlined manifest updated to the v2 lifecycle-aware
+# schema. Three top-level sections by lifecycle phase:
 #
-#   policy.secrets.rules  — still drives is_secret / is_safe_variant attributes
-#   policy.network.allowed_domains — still drives resource.in_allowlist attribute
+#   ecosystems — operator-defined runtime definitions; repos opt in by name + version.
+#   init       — build-time config baked into the Docker image at `contained init`.
+#   runtime    — per-tool-call enforcement rules evaluated by hooks.
 #
-# Run `contained migrate` to automatically convert legacy manifests to this
-# format. See docs/examples/context_aware.yaml for Phase 3 context.* extensions.
+# All policy enforcement logic lives in runtime.rules (Cedar-inspired PARC format).
+# init.* supersedes the old runtime.docker / agent / policy.sigstore / policy.plugins
+# sections. runtime.* supersedes the old policy.network / policy.rules / policy.qa.
 #
-# Deploy this via:
+# Deploy via:
 #   contained init --mainlined https://mainlined.example.com
 # or:
 #   contained init --manifest docs/examples/mainlined_v2.yaml
 #
 # See docs/policy-reference.md for full schema documentation.
 
-# ── Ecosystem definitions ─────────────────────────────────────────────────────
+# ── Ecosystem definitions ──────────────────────────────────────────────────────
 # Maps ecosystem names (declared by repos in .contAIned_manifest.yaml) to the
-# toolchain they install and the network domains they require. Operators may
-# customise these entries — for example, pointing python's network_domains at
-# an internal PyPI mirror instead of pypi.org.
-ecosystem_definitions:
+# toolchain they install, network domains they require, and optional plugins.
+# Operators set version constraints (e.g. ">=1.23"); repos pin concrete versions
+# (e.g. "1.25.7"). Ecosystem network_domains are merged into runtime.network at
+# init time — no manual entries needed in runtime.network.
+ecosystems:
   go:
+    version: ">=1.23"     # floor constraint; repo must satisfy
     toolchain: go
     deps:
       - golangci-lint
@@ -79,9 +81,9 @@ ecosystem_definitions:
       - marketplace: claude-plugins-official
         plugin: jdtls-lsp
 
-# ── Runtime ───────────────────────────────────────────────────────────────────
-runtime:
-  docker:
+# ── Init (build-time) ──────────────────────────────────────────────────────────
+init:
+  container:
     image: contained:latest
     memory: 2g
     cpus: 2
@@ -96,26 +98,56 @@ runtime:
         env: GITHUB_PERSONAL_ACCESS_TOKEN
         netrc_machine: github.com
 
-# ── Agent ─────────────────────────────────────────────────────────────────────
-agent:
-  model: claude-sonnet-4-6
-  budget_tokens: 1024
+  agent:
+    model: claude-sonnet-4-6
+    budget_tokens: 1024
 
-policy:
-
-  # ── Sigstore provenance ──────────────────────────────────────────────────────
   sigstore:
     enabled: false
     rekor_url: https://rekor.sigstore.dev
     fulcio_url: https://fulcio.sigstore.dev
 
-  # ── Network allowlist ─────────────────────────────────────────────────────────
-  # Required: drives resource.in_allowlist attribute used by v1:network:block rule.
-  # Anthropic infrastructure is required for all sessions. Package registry
-  # domains for declared ecosystems are added automatically at `contained init`
-  # time from ecosystem_definitions above — no manual entries needed here.
-  # Add project-specific external APIs below as required.
+  # Plugin marketplace enforcement.
+  # Restrict to the Anthropic official marketplace only. Repositories may not
+  # add other sources. The github plugin is always pre-installed so the agent
+  # can work with pull requests and issues without a manual install step.
+  # Ecosystem-specific LSP plugins are defined above in ecosystems and are
+  # installed only when that ecosystem is active.
+  plugins:
+    strict_marketplaces: true
+    builtin_marketplace: true
+    preinstall:
+      - marketplace: claude-plugins-official
+        plugin: github
+
+  mcp:
+    approved_servers: []
+
+  skills:
+    approved_skills: []
+
+  mainlined:
+    url: "https://mainlined.example.com"
+    policy_name: "default"
+    policy_ref: "main"
+    policy_version: ""
+
+  sandbox:
+    enabled: true
+    filesystem:
+      denyWrite:
+        - .contAIned
+
+# ── Runtime (hook enforcement) ─────────────────────────────────────────────────
+runtime:
+
+  # Network allowlist.
+  # Required: drives resource.in_allowlist attribute used by the
+  # v1:network:block-out-of-allowlist rule. Anthropic infrastructure is required
+  # for all sessions. Ecosystem network_domains are merged in automatically at
+  # `contained init` time — no manual entries needed for declared ecosystems.
   network:
+    enabled: true
     allowed_domains:
       - api.anthropic.com
       - code.claude.com
@@ -124,16 +156,15 @@ policy:
       - github.com
       - ssh.github.com
 
-  # ── Policy rules (unified schema) ────────────────────────────────────────────
-  #
-  # All policy in one place: classifiers (effect: define) declare what resources
-  # are, enforcement rules (effect: forbid / permit / escalate) act on them.
-  #
-  # forbid always overrides permit. DEFER (no rule matched) is pass-through.
+  # Cedar-inspired unified rules.
+  # All policy enforcement logic in one place: classifiers (effect: define)
+  # declare what resources are; enforcement rules (effect: forbid / permit /
+  # escalate) act on them. forbid always overrides permit. No matching rule is
+  # DEFER (pass-through).
   rules:
 
     # ── File-path classifier ───────────────────────────────────────────────────
-    # Declares computed attributes on FilePath entities.  The enforcement rules
+    # Declares computed attributes on FilePath entities. The enforcement rules
     # below reference these attributes via ``resource.<attr> == true``.
     #
     # in_tmp, in_workspace, and in_control_plane are computed directly by the
@@ -225,7 +256,7 @@ policy:
       tags: [workspace]
 
     # ── Network policy ─────────────────────────────────────────────────────────
-    # Only domains in policy.network.allowed_domains (plus ecosystem domains
+    # Only domains in runtime.network.allowed_domains (plus ecosystem domains
     # added at init time) are reachable via WebFetch/WebSearch.
 
     - id: v1:network:block-out-of-allowlist
@@ -332,9 +363,9 @@ policy:
       tags: [bash, publish]
 
     # ── Bash: cd scope restriction ─────────────────────────────────────────────
-    # Prevent cd to paths outside /workspace.  Relative cd (e.g. "cd src") has
+    # Prevent cd to paths outside /workspace. Relative cd (e.g. "cd src") has
     # no target_path and is always permitted; this rule fires only on absolute
-    # or ~-prefixed paths.  cd to /tmp is allowed as scratch space.
+    # or ~-prefixed paths. cd to /tmp is allowed as scratch space.
     # Note: permit-safe-read-only grants cd as a verb; forbid takes precedence.
 
     - id: v1:bash:block-cd-out-of-workspace
@@ -350,48 +381,9 @@ policy:
       reason: "cd to paths outside /workspace is not permitted."
       tags: [bash, workspace]
 
-  # ── Audit logging ─────────────────────────────────────────────────────────────
-  audit:
-    enabled: true
-
-  # ── QA gate ───────────────────────────────────────────────────────────────────
+  # QA gate.
   # Leave empty here — repositories define their own QA checks via
   # .contAIned_manifest.yaml. The mAInlined manifest may add shared checks
   # that run in addition to the repo's checks.
   qa:
     checks: []
-
-  # ── Plugin marketplace enforcement ───────────────────────────────────────────
-  # Restrict to the Anthropic official marketplace only. Repositories may not
-  # add other sources. The github plugin is always pre-installed so the agent
-  # can work with pull requests and issues without a manual install step.
-  # Ecosystem-specific LSP plugins (go-lsp, python-lsp, etc.) are defined above
-  # in ecosystem_definitions and are installed only when that ecosystem is active.
-  plugins:
-    strict_marketplaces: true
-    builtin_marketplace: true
-    preinstall:
-      - marketplace: claude-plugins-official
-        plugin: github
-
-  # ── MCP server approvals ──────────────────────────────────────────────────────
-  mcp:
-    approved_servers: []
-
-  # ── Skill approvals ───────────────────────────────────────────────────────────
-  skills:
-    approved_skills: []
-
-  # ── mAInlined policy coordination ─────────────────────────────────────────────
-  mAInlined:
-    url: "https://mainlined.example.com"
-    policy_name: "default"
-    policy_ref: "main"
-    policy_version: ""
-
-  # ── Sandbox ───────────────────────────────────────────────────────────────────
-  sandbox:
-    enabled: true
-    filesystem:
-      denyWrite:
-        - .contAIned

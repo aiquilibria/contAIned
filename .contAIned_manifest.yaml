@@ -1,17 +1,19 @@
 # contAIned repo manifest
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
-# Only ecosystems and policy.qa.checks are permitted here;
-# all policy settings are owned by the mAInlined manifest.
+# Only ecosystems and runtime.qa.checks are permitted here;
+# all other policy settings are owned by the operator manifest.
 #
 # `contained init` merges this file on top of the operator manifest at
 # image build time. Any change here triggers an image rebuild.
 
-ecosystems:                                                                                        
-  go: "1.25.7"   # CLI build and tests
-  python: "3.13.4"
+ecosystems:
+  go:
+    version: "1.25.7"   # CLI build and tests
+  python:
+    version: "3.13.4"
 
-policy:
+runtime:
   qa:
     checks:
       - name: lint

@@ -32,7 +32,7 @@ var version = ver.Version
 //   - extra: map of name→{source:…} for extraKnownMarketplaces, or nil when
 //     ExtraMarketplaces is empty (key should be omitted from output).
 func buildPluginMarketplaceSettings(m *manifest.Manifest) (strict, extra any) {
-	p := m.Policy.Plugins
+	p := m.Init.Plugins
 
 	// extraKnownMarketplaces — registers marketplace name→source mappings so
 	// that "name@marketplace" plugin references resolve without the user
@@ -133,7 +133,7 @@ func marketplaceKey(mp manifest.PluginMarketplace) string {
 // baked into the Docker image. The dynamic sections (domain allow-list, MCP
 // server permissions, skill permissions) are derived from the manifest.
 func BuildManagedSettings(m *manifest.Manifest) (string, error) {
-	allowedDomains := m.Policy.Network.AllowedDomains
+	allowedDomains := m.Runtime.Network.AllowedDomains
 	if len(allowedDomains) == 0 {
 		allowedDomains = []string{
 			"api.anthropic.com",
@@ -171,10 +171,10 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 	for _, domain := range allowedDomains {
 		allowRules = append(allowRules, "WebFetch(domain:"+domain+")")
 	}
-	for _, server := range m.Policy.MCP.ApprovedServers {
+	for _, server := range m.Init.MCP.ApprovedServers {
 		allowRules = append(allowRules, "mcp__"+server+"__*")
 	}
-	for _, skill := range m.Policy.Skills.ApprovedSkills {
+	for _, skill := range m.Init.Skills.ApprovedSkills {
 		allowRules = append(allowRules, "Skill("+skill+")")
 	}
 
@@ -234,8 +234,8 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 	// Inject ecosystem-derived env vars (e.g. GOCACHE for Go).
 	// These are populated by MergeRepoManifest from the ecosystem_definitions
 	// entries for each active ecosystem declared by the repo manifest.
-	if len(m.Runtime.Docker.Env) > 0 {
-		settings["env"] = m.Runtime.Docker.Env
+	if len(m.Init.Container.Env) > 0 {
+		settings["env"] = m.Init.Container.Env
 	}
 
 	// Inject plugin marketplace policy derived from policy.plugins.
@@ -264,7 +264,7 @@ func PolicyPull(manifestContent string) string {
 		return manifestContent
 	}
 
-	mAInlined, _ := nestedMap(parsed, "policy", "mAInlined")
+	mAInlined, _ := nestedMap(parsed, "init", "mainlined")
 	url := strings.TrimRight(stringVal(mAInlined["url"]), "/")
 	policyName := strings.TrimSpace(stringVal(mAInlined["policy_name"]))
 	if url == "" || policyName == "" {
@@ -298,8 +298,8 @@ func PolicyPull(manifestContent string) string {
 	mAInlined["policy_version"] = policyVersion
 
 	// Write back into the parsed map.
-	if pol, ok := parsed["policy"].(map[string]any); ok {
-		pol["mAInlined"] = mAInlined
+	if initSection, ok := parsed["init"].(map[string]any); ok {
+		initSection["mainlined"] = mAInlined
 	}
 
 	out, err := yaml.Marshal(parsed)
@@ -314,7 +314,7 @@ func PolicyPull(manifestContent string) string {
 //
 // Returns true if the image was (re)built, false if it was up to date.
 func DockerSetup(
-	cfg manifest.DockerConfig,
+	cfg manifest.ContainerConfig,
 	workspace string,
 	rebuild bool,
 	manifestContent string,
@@ -761,28 +761,28 @@ func nestedMap(m map[string]any, keys ...string) (map[string]any, bool) {
 // and handles the injection there), when the domain is already present, or
 // when the resolved URL is loopback.
 func InjectMaInlinedDomain(m *manifest.Manifest) {
-	if len(m.Policy.Network.AllowedDomains) == 0 {
+	if len(m.Runtime.Network.AllowedDomains) == 0 {
 		return
 	}
 	host := maInlinedHostname(m)
 	if host == "" {
 		return
 	}
-	for _, d := range m.Policy.Network.AllowedDomains {
+	for _, d := range m.Runtime.Network.AllowedDomains {
 		if d == host {
 			return
 		}
 	}
-	m.Policy.Network.AllowedDomains = append(m.Policy.Network.AllowedDomains, host)
+	m.Runtime.Network.AllowedDomains = append(m.Runtime.Network.AllowedDomains, host)
 }
 
 // maInlinedHostname returns the non-loopback hostname from the mAInlined URL,
 // preferring policy_yaml's policy.mAInlined.url (Docker-network alias) over
 // mainlined.url (host-side bootstrap URL that may be localhost). Returns "".
 func maInlinedHostname(m *manifest.Manifest) string {
-	rawURL := extractPolicyMainlinedURL(m.Mainlined.PolicyYAML)
+	rawURL := extractPolicyMainlinedURL(m.Init.Mainlined.PolicyYAML)
 	if rawURL == "" {
-		rawURL = m.Mainlined.URL
+		rawURL = m.Init.Mainlined.URL
 	}
 	if rawURL == "" {
 		return ""
@@ -811,8 +811,8 @@ func extractPolicyMainlinedURL(policyYAML string) string {
 	if err := yaml.Unmarshal([]byte(policyYAML), &raw); err != nil {
 		return ""
 	}
-	pol, _ := raw["policy"].(map[string]any)
-	ml, _ := pol["mAInlined"].(map[string]any)
+	pol, _ := raw["init"].(map[string]any)
+	ml, _ := pol["mainlined"].(map[string]any)
 	u, _ := ml["url"].(string)
 	return u
 }

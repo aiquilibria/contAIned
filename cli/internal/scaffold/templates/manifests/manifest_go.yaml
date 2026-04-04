@@ -1,36 +1,19 @@
 # contAIned repo manifest — Go ecosystem
 #
 # Commit this file to .contAIned_manifest.yaml in your repository root.
-# Only ecosystems and policy.qa.checks are permitted here; all policy settings
-# (network, secrets, bash rules, sigstore, etc.) are owned by the operator manifest.
+# Only ecosystems and runtime.qa.checks are permitted here; all other settings
+# (network, sigstore, plugins, etc.) are owned by the operator manifest.
 #
 # `contained init` resolves the ecosystem declaration against the operator
-# manifest's ecosystem_definitions, installs the Go toolchain at the pinned
-# version, and adds the required network domains (proxy.golang.org, sum.golang.org)
+# manifest's ecosystems map, installs the Go toolchain at the pinned version,
+# and adds the required network domains (proxy.golang.org, sum.golang.org)
 # to the allowlist automatically.
 
-# To pre-install plugins in your operator manifest, use one of two mechanisms:
-#
-#   # Ecosystem-scoped: installed only when this ecosystem is active in a repo.
-#   ecosystem_definitions:
-#     go:
-#       plugins:
-#         - marketplace: claude-plugins-official
-#           plugin: go-lsp
-#
-#   # Global: always installed regardless of ecosystem (e.g. a GitHub integration).
-#   policy:
-#     plugins:
-#       preinstall:
-#         - marketplace: claude-plugins-official
-#           plugin: github
-#
-# See docs/policy-reference.md for full plugin policy options.
-
 ecosystems:
-  go: "1.24.0"   # pin your project's Go version here
+  go:
+    version: "1.24.0"   # pin your project's Go version here
 
-policy:
+runtime:
   qa:
     checks:
       - name: test

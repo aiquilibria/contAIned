@@ -151,10 +151,11 @@ def load_rules_from_path(manifest_path: str) -> list[Rule]:
 
     Unlike load_rules(), this function is not cached and reads from the
     given path directly. Used by the validator CLI at build time.
+    Handles both old (policy.*) and new (runtime.*/init.*) manifest schemas.
     """
     with Path(manifest_path).open() as fh:
         manifest = yaml.safe_load(fh) or {}
-    policy = _deep_merge(_DEFAULTS, manifest.get("policy", {}))
+    policy = _extract_policy_from_manifest(manifest)
     if "rules" in policy:
         return _parse_direct_rules(policy["rules"])
     return _compat_adapter(policy)
@@ -165,22 +166,55 @@ def load_rules_from_path(manifest_path: str) -> list[Rule]:
 # ---------------------------------------------------------------------------
 
 
+def _extract_policy_from_manifest(manifest: dict) -> dict:
+    """Extract a unified policy dict from either the old or new manifest schema.
+
+    Old schema (pre-v2): top-level ``policy`` key with rules/network/secrets/bash.
+    New schema (v2+):    ``runtime.rules``, ``runtime.network``, ``runtime.qa``;
+                         ``init.mcp``, ``init.skills``.
+
+    Always returns a dict merged with _DEFAULTS so callers can rely on the
+    same structure regardless of which schema the manifest uses.
+    """
+    # New schema: runtime.rules is the canonical location.
+    runtime = manifest.get("runtime", {})
+    init_cfg = manifest.get("init", {})
+    if "rules" in runtime:
+        overlay: dict[str, Any] = {
+            "rules":   runtime.get("rules", []),
+            "network": runtime.get("network", {}),
+            "qa":      runtime.get("qa", {}),
+            "mcp":     init_cfg.get("mcp", {}),
+            "skills":  init_cfg.get("skills", {}),
+        }
+        return _deep_merge(_DEFAULTS, overlay)
+    # Old schema: policy.* (pre-v2 manifests and workspace manifest).
+    return _deep_merge(_DEFAULTS, manifest.get("policy", {}))
+
+
 @lru_cache(maxsize=1)
 def _load_policy() -> dict[str, Any]:
     """Load, merge with defaults, and cache the policy section of the manifest.
 
     Tries the baked-in image path first, then the workspace path.
-    Always succeeds: on any read/parse error the structural defaults are
-    returned so that hooks receive empty rule lists (no checks applied).
+    Handles both old (policy.*) and new (runtime.*/init.*) manifest schemas.
+    Prefers a manifest that contains Cedar rules over one that does not, so a
+    stale baked image never silently disables enforcement.  Falls back to
+    structural defaults so hooks receive empty rule lists rather than raising.
     """
+    best: dict[str, Any] | None = None
     for path in (_MANIFEST_PATH, _WORKSPACE_MANIFEST_PATH):
         try:
             with path.open() as fh:
                 manifest = yaml.safe_load(fh) or {}
-            return _deep_merge(_DEFAULTS, manifest.get("policy", {}))
+            policy = _extract_policy_from_manifest(manifest)
+            if "rules" in policy:
+                return policy   # found Cedar rules — use immediately
+            if best is None:
+                best = policy   # remember first readable manifest as fallback
         except Exception:
             continue
-    return dict(_DEFAULTS)
+    return best if best is not None else dict(_DEFAULTS)
 
 
 def _deep_merge(base: dict, override: dict) -> dict:

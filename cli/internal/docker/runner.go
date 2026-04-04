@@ -42,16 +42,16 @@ func findDocker() (string, error) {
 
 // Runner orchestrates `docker run` for a contAIned session.
 type Runner struct {
-	cfg          manifest.DockerConfig
+	cfg          manifest.ContainerConfig
 	workspace    string
-	policy       manifest.PolicyConfig
+	policy       manifest.RuntimePolicy
 	mainlinedURL string // non-empty when mAInlined is configured; drives secrets mount
 }
 
 // New creates a Runner for the given manifest and workspace root.
-// mainlinedURL is the value of manifest.Mainlined.URL; pass an empty string
+// mainlinedURL is the value of manifest.Init.Mainlined.URL; pass an empty string
 // when mAInlined is not configured.
-func New(cfg manifest.DockerConfig, workspace string, policy manifest.PolicyConfig, mainlinedURL string) *Runner {
+func New(cfg manifest.ContainerConfig, workspace string, policy manifest.RuntimePolicy, mainlinedURL string) *Runner {
 	return &Runner{cfg: cfg, workspace: workspace, policy: policy, mainlinedURL: mainlinedURL}
 }
 

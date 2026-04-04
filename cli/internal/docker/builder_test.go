@@ -14,8 +14,8 @@ import (
 
 func baseManifest() *manifest.Manifest {
 	return &manifest.Manifest{
-		Runtime: manifest.RuntimeConfig{
-			Docker: manifest.DockerConfig{Image: "x", Network: "n"},
+		Init: manifest.InitConfig{
+			Container: manifest.ContainerConfig{Image: "x", Network: "n"},
 		},
 	}
 }
@@ -81,7 +81,7 @@ func TestBuildManagedSettings_DefaultDomains(t *testing.T) {
 
 func TestBuildManagedSettings_CustomDomains_OverrideDefaults(t *testing.T) {
 	m := baseManifest()
-	m.Policy.Network.AllowedDomains = []string{"example.com"}
+	m.Runtime.Network.AllowedDomains = []string{"example.com"}
 	settings := parsedSettings(t, m)
 
 	perms := settings["permissions"].(map[string]any)
@@ -108,7 +108,7 @@ func TestBuildManagedSettings_CustomDomains_OverrideDefaults(t *testing.T) {
 
 func TestBuildManagedSettings_MCPServers_AddedToAllow(t *testing.T) {
 	m := baseManifest()
-	m.Policy.MCP.ApprovedServers = []string{"myserver"}
+	m.Init.MCP.ApprovedServers = []string{"myserver"}
 	settings := parsedSettings(t, m)
 
 	perms := settings["permissions"].(map[string]any)
@@ -128,7 +128,7 @@ func TestBuildManagedSettings_MCPServers_AddedToAllow(t *testing.T) {
 
 func TestBuildManagedSettings_Skills_AddedToAllow(t *testing.T) {
 	m := baseManifest()
-	m.Policy.Skills.ApprovedSkills = []string{"my-skill"}
+	m.Init.Skills.ApprovedSkills = []string{"my-skill"}
 	settings := parsedSettings(t, m)
 
 	perms := settings["permissions"].(map[string]any)
@@ -343,8 +343,8 @@ func TestExtractPolicyMainlinedURL_Empty(t *testing.T) {
 
 func TestExtractPolicyMainlinedURL_Present(t *testing.T) {
 	policyYAML := `
-policy:
-  mAInlined:
+init:
+  mainlined:
     url: "http://mainlined:8080"
     policy_name: "default"
 `
@@ -355,7 +355,7 @@ policy:
 }
 
 func TestExtractPolicyMainlinedURL_MissingSection(t *testing.T) {
-	policyYAML := "policy:\n  network:\n    enabled: true\n"
+	policyYAML := "runtime:\n  network:\n    enabled: true\n"
 	if got := extractPolicyMainlinedURL(policyYAML); got != "" {
 		t.Errorf("expected empty when section absent, got %q", got)
 	}
@@ -363,8 +363,8 @@ func TestExtractPolicyMainlinedURL_MissingSection(t *testing.T) {
 
 func TestBuildManagedSettings_mAInlinedDomainFromPolicyYAML(t *testing.T) {
 	m := baseManifest()
-	m.Mainlined.URL = "http://localhost:8080/aiquilibria/default" // should be skipped
-	m.Mainlined.PolicyYAML = "policy:\n  mAInlined:\n    url: \"http://mainlined:8080\"\n"
+	m.Init.Mainlined.URL = "http://localhost:8080/aiquilibria/default" // should be skipped
+	m.Init.Mainlined.PolicyYAML = "init:\n  mainlined:\n    url: \"http://mainlined:8080\"\n"
 
 	settings := parsedSettings(t, m)
 
@@ -400,7 +400,7 @@ func TestBuildManagedSettings_mAInlinedDomainFromPolicyYAML(t *testing.T) {
 
 func TestBuildManagedSettings_mAInlinedLocalhostNotAdded(t *testing.T) {
 	m := baseManifest()
-	m.Mainlined.URL = "http://localhost:8080/path"
+	m.Init.Mainlined.URL = "http://localhost:8080/path"
 	// No policy_yaml — falls back to URL which is localhost, should be skipped.
 
 	settings := parsedSettings(t, m)
@@ -418,20 +418,20 @@ func TestBuildManagedSettings_mAInlinedLocalhostNotAdded(t *testing.T) {
 
 func TestInjectMaInlinedDomain_EmptyList_NoOp(t *testing.T) {
 	m := baseManifest()
-	m.Mainlined.PolicyYAML = "policy:\n  mAInlined:\n    url: \"http://mainlined:8080\"\n"
+	m.Init.Mainlined.PolicyYAML = "init:\n  mainlined:\n    url: \"http://mainlined:8080\"\n"
 	InjectMaInlinedDomain(m)
-	if len(m.Policy.Network.AllowedDomains) != 0 {
+	if len(m.Runtime.Network.AllowedDomains) != 0 {
 		t.Error("should not modify empty domain list (defaults path)")
 	}
 }
 
 func TestInjectMaInlinedDomain_AddsHostname(t *testing.T) {
 	m := baseManifest()
-	m.Policy.Network.AllowedDomains = []string{"api.anthropic.com"}
-	m.Mainlined.URL = "http://localhost:8080/path"
-	m.Mainlined.PolicyYAML = "policy:\n  mAInlined:\n    url: \"http://mainlined:8080\"\n"
+	m.Runtime.Network.AllowedDomains = []string{"api.anthropic.com"}
+	m.Init.Mainlined.URL = "http://localhost:8080/path"
+	m.Init.Mainlined.PolicyYAML = "init:\n  mainlined:\n    url: \"http://mainlined:8080\"\n"
 	InjectMaInlinedDomain(m)
-	last := m.Policy.Network.AllowedDomains[len(m.Policy.Network.AllowedDomains)-1]
+	last := m.Runtime.Network.AllowedDomains[len(m.Runtime.Network.AllowedDomains)-1]
 	if last != "mainlined" {
 		t.Errorf("expected 'mainlined' appended, got %q", last)
 	}
@@ -439,22 +439,22 @@ func TestInjectMaInlinedDomain_AddsHostname(t *testing.T) {
 
 func TestInjectMaInlinedDomain_Idempotent(t *testing.T) {
 	m := baseManifest()
-	m.Policy.Network.AllowedDomains = []string{"api.anthropic.com", "mainlined"}
-	m.Mainlined.PolicyYAML = "policy:\n  mAInlined:\n    url: \"http://mainlined:8080\"\n"
-	before := len(m.Policy.Network.AllowedDomains)
+	m.Runtime.Network.AllowedDomains = []string{"api.anthropic.com", "mainlined"}
+	m.Init.Mainlined.PolicyYAML = "init:\n  mainlined:\n    url: \"http://mainlined:8080\"\n"
+	before := len(m.Runtime.Network.AllowedDomains)
 	InjectMaInlinedDomain(m)
-	if len(m.Policy.Network.AllowedDomains) != before {
+	if len(m.Runtime.Network.AllowedDomains) != before {
 		t.Error("should not add duplicate domain")
 	}
 }
 
 func TestInjectMaInlinedDomain_LocalhostSkipped(t *testing.T) {
 	m := baseManifest()
-	m.Policy.Network.AllowedDomains = []string{"api.anthropic.com"}
-	m.Mainlined.URL = "http://localhost:8080/path"
-	before := len(m.Policy.Network.AllowedDomains)
+	m.Runtime.Network.AllowedDomains = []string{"api.anthropic.com"}
+	m.Init.Mainlined.URL = "http://localhost:8080/path"
+	before := len(m.Runtime.Network.AllowedDomains)
 	InjectMaInlinedDomain(m)
-	if len(m.Policy.Network.AllowedDomains) != before {
+	if len(m.Runtime.Network.AllowedDomains) != before {
 		t.Error("localhost URL should not add any domain")
 	}
 }
@@ -462,7 +462,7 @@ func TestInjectMaInlinedDomain_LocalhostSkipped(t *testing.T) {
 // ── PolicyPull ────────────────────────────────────────────────────────────────
 
 func TestPolicyPull_NomAInlinedURL_ReturnsOriginal(t *testing.T) {
-	original := "runtime:\n  docker:\n    image: x\n    network: n\n"
+	original := "init:\n  container:\n    image: x\n    network: n\n"
 	got := PolicyPull(original)
 	if got != original {
 		t.Errorf("expected original content unchanged, got: %q", got)
@@ -476,7 +476,7 @@ func TestPolicyPull_ServerReturnsRefs_MergedIntoYAML(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	original := "policy:\n  mAInlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
+	original := "init:\n  mainlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
 	got := PolicyPull(original)
 
 	if !strings.Contains(got, "abc123") {
@@ -493,7 +493,7 @@ func TestPolicyPull_ServerError_ReturnsOriginal(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	original := "policy:\n  mAInlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
+	original := "init:\n  mainlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
 	got := PolicyPull(original)
 	if got != original {
 		t.Errorf("expected original on server error, got: %q", got)
@@ -506,7 +506,7 @@ func TestPolicyPull_InvalidJSON_ReturnsOriginal(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	original := "policy:\n  mAInlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
+	original := "init:\n  mainlined:\n    url: " + srv.URL + "\n    policy_name: mypolicy\n"
 	got := PolicyPull(original)
 	if got != original {
 		t.Errorf("expected original on invalid JSON, got: %q", got)
@@ -549,8 +549,8 @@ func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinTrue_IncludesOfficial(t 
 	// and extraKnownMarketplaces registers the name→source mapping so
 	// "plugin@claude-plugins-official" resolves during docker build.
 	m := baseManifest()
-	m.Policy.Plugins.StrictMarketplaces = true
-	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
+	m.Init.Plugins.StrictMarketplaces = true
+	m.Init.Plugins.BuiltinMarketplace = boolPtr(true)
 
 	settings := parsedSettings(t, m)
 
@@ -587,7 +587,7 @@ func TestBuildManagedSettings_Plugins_BuiltinTrue_NoStrict_ExtraKeyPresent(t *te
 	// builtin_marketplace: true without strict mode → extraKnownMarketplaces
 	// still registers the name so preinstall resolution works.
 	m := baseManifest()
-	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
+	m.Init.Plugins.BuiltinMarketplace = boolPtr(true)
 
 	settings := parsedSettings(t, m)
 
@@ -607,8 +607,8 @@ func TestBuildManagedSettings_Plugins_BuiltinTrue_NoStrict_ExtraKeyPresent(t *te
 func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinFalse_EmptyList(t *testing.T) {
 	// builtin_marketplace: false with no extra_marketplaces → same result: empty list.
 	m := baseManifest()
-	m.Policy.Plugins.StrictMarketplaces = true
-	m.Policy.Plugins.BuiltinMarketplace = boolPtr(false)
+	m.Init.Plugins.StrictMarketplaces = true
+	m.Init.Plugins.BuiltinMarketplace = boolPtr(false)
 
 	settings := parsedSettings(t, m)
 	raw, ok := settings["strictKnownMarketplaces"]
@@ -624,7 +624,7 @@ func TestBuildManagedSettings_Plugins_StrictTrue_BuiltinFalse_EmptyList(t *testi
 func TestBuildManagedSettings_Plugins_ExtraMarketplaces_ExtraKeyPresent(t *testing.T) {
 	// extra_marketplaces populated → extraKnownMarketplaces present with correct structure.
 	m := baseManifest()
-	m.Policy.Plugins.ExtraMarketplaces = []manifest.PluginMarketplace{
+	m.Init.Plugins.ExtraMarketplaces = []manifest.PluginMarketplace{
 		{Source: "github", Repo: "acme-corp/plugins", Ref: "main"},
 	}
 
@@ -659,9 +659,9 @@ func TestBuildManagedSettings_Plugins_StrictAndExtra_BothKeysPresent(t *testing.
 	// official marketplace slug and the extra source; extraKnownMarketplaces
 	// is also present.
 	m := baseManifest()
-	m.Policy.Plugins.StrictMarketplaces = true
-	m.Policy.Plugins.BuiltinMarketplace = boolPtr(true)
-	m.Policy.Plugins.ExtraMarketplaces = []manifest.PluginMarketplace{
+	m.Init.Plugins.StrictMarketplaces = true
+	m.Init.Plugins.BuiltinMarketplace = boolPtr(true)
+	m.Init.Plugins.ExtraMarketplaces = []manifest.PluginMarketplace{
 		{Source: "github", Repo: "acme-corp/plugins"},
 	}
 

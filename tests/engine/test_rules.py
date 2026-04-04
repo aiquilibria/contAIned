@@ -36,12 +36,12 @@ _MANIFEST = Path(__file__).parent.parent.parent / "docs" / "examples" / "mainlin
 with _MANIFEST.open() as _fh:
     _DATA = yaml.safe_load(_fh)
 
-_RAW_RULES = _DATA.get("policy", {}).get("rules", [])
+_RAW_RULES = _DATA.get("runtime", {}).get("rules", [])
 
 RULES = load_rules_from_path(str(_MANIFEST))
 SECRETS_PATTERNS = _extract_define_patterns(_RAW_RULES)
 ALLOWED_DOMAINS: list[str] = (
-    _DATA.get("policy", {}).get("network", {}).get("allowed_domains", [])
+    _DATA.get("runtime", {}).get("network", {}).get("allowed_domains", [])
 )
 SESSION = AgentSession(session_id="test-mainlined-v2")
 

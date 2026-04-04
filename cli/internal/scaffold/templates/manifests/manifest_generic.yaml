@@ -1,52 +1,27 @@
-# contAIned policy manifest
+# contAIned policy manifest — v3 schema
 #
-# Three sections:
-#   1. runtime — Docker container resource settings.
-#   2. agent   — model selection passed to the claude CLI.
-#   3. policy  — all governance settings read by the hook scripts,
-#                including build-time provenance (sigstore).
+# Three top-level sections by lifecycle phase:
+#   ecosystems — operator-defined runtime definitions; repos opt in by name + version.
+#   init       — build-time config baked into the Docker image at `contained init`.
+#   runtime    — per-tool-call enforcement rules evaluated by hooks.
 #
-# ── Policy rule formats ────────────────────────────────────────────────────────
-# Phase 2+  (recommended): unified policy.rules list with Cedar-inspired YAML.
-#   Run `contained migrate` to convert an existing manifest automatically.
-#   Example:
-#     policy:
-#       rules:
-#         - id: "v1:secrets:dotenv"
-#           effect: forbid
-#           action: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"]
-#           resource_type: FilePath
-#           when: ["resource.is_secret == true"]
-#           unless: ["resource.is_safe_variant == true"]
-#           reason: "Secret files may not be accessed."
-#
-# Phase 1   (deprecated): fragmented policy.secrets / policy.bash / policy.network
-#   sections — still supported but emit a deprecation warning at runtime.
-#   Action values:
-#     block    — deny the operation outright; agent receives a clear reason
-#     allow    — permit unconditionally
-#     escalate — pass through to the SDK's canUseTool callback for operator approval
-#
-# Note: writes to .contAIned/ are always denied regardless of policy settings —
-# control-plane protection is hardcoded and not configurable.
+# Run `contained init --manifest <this-file>` to build the image.
 
-# ── Ecosystem definitions ─────────────────────────────────────────────────────
+# ── Ecosystem definitions ──────────────────────────────────────────────────────
 # Maps ecosystem names (declared by repos in .contAIned_manifest.yaml) to the
-# toolchain they install and the network domains they require.
-# Customise these entries to point at internal registries or proxies.
-ecosystem_definitions:
+# toolchain they install, network domains they require, and optional plugins.
+# Repos opt in with: ecosystems:\n  go:\n    version: "1.25.7"
+ecosystems:
   go:
+    version: ">=1.23"      # floor constraint; repo must satisfy
     toolchain: go
+    deps: []               # e.g. [golangci-lint]
     network_domains:
       - proxy.golang.org
       - sum.golang.org
     env:
       # Redirect the Go build cache to a sandbox-writable path.
-      # The default (~/.cache/go-build) is outside the sandbox write-allowlist,
-      # so `go build` fails without this override. /tmp/claude is created in the
-      # Dockerfile and is the same directory the sandbox sets TMPDIR to.
       GOCACHE: /tmp/claude/go-build
-    # plugins: LSP servers pre-installed when this ecosystem is active.
     # plugins:
     #   - marketplace: claude-plugins-official
     #     plugin: go-lsp
@@ -62,201 +37,118 @@ ecosystem_definitions:
     toolchain: node
     network_domains:
       - registry.npmjs.org
-    # plugins:
-    #   - marketplace: claude-plugins-official
-    #     plugin: node-lsp
   typescript:
     toolchain: node   # TypeScript runs on Node.js
     network_domains:
       - registry.npmjs.org
-    # plugins:
-    #   - marketplace: claude-plugins-official
-    #     plugin: typescript-lsp
   ruby:
     toolchain: ruby
     network_domains:
       - rubygems.org
       - api.rubygems.org
-    # plugins:
-    #   - marketplace: claude-plugins-official
-    #     plugin: ruby-lsp
   java:
     toolchain: java
     network_domains:
       - repo1.maven.org
       - search.maven.org
-    # plugins:
-    #   - marketplace: claude-plugins-official
-    #     plugin: java-lsp
 
-# ── Runtime ───────────────────────────────────────────────────────────────────
-runtime:
-  docker:
+# ── Init (build-time) ──────────────────────────────────────────────────────────
+init:
+  container:
     image: contained:latest
     memory: 2g
     cpus: 2
     network: contAIned-net
     agent_config_volume: contAIned-agent-config
-  mAInlined:
-    url: ""   # e.g. https://mAInlined.example.com
+    # extra_mounts: []       # e.g. ["~/.ssh:/home/agent/.ssh:ro"]
+    # extra_secrets: []      # bind-mounted secrets; see docs/policy-reference.md
 
-# ── Agent ─────────────────────────────────────────────────────────────────────
-agent:
-  model: claude-sonnet-4-6
-  budget_tokens: 1024
+  agent:
+    model: claude-sonnet-4-6
+    budget_tokens: 1024
 
-policy:
-
-  # ── Sigstore provenance ──────────────────────────────────────────────────────
   sigstore:
-    enabled: true
+    enabled: false
     rekor_url: https://rekor.sigstore.dev
     fulcio_url: https://fulcio.sigstore.dev
 
-  # ── Secret-file protection ──────────────────────────────────────────────────
-  secrets:
-    rules:
-      - name: safe-variants
-        patterns: ['\\.(example|sample|template)']
-        action: allow
-      - name: dotenv
-        patterns: ['(^|[/\\\\])\\.env(\\.[^/\\\\]+)?$']
-        reason: "Secret files (credentials, keys, .env) may not be accessed."
-        action: block
-      - name: keys
-        patterns: ['\\.(pem|key|p12|pfx|jks|keystore)$']
-        reason: "Secret files (credentials, keys, .env) may not be accessed."
-        action: block
-      - name: ssh-keys
-        patterns: ['(^|[/\\\\])id_(rsa|dsa|ecdsa|ed25519)$']
-        reason: "Secret files (credentials, keys, .env) may not be accessed."
-        action: block
-      - name: credential-files
-        patterns: ['(^|[/\\\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$']
-        reason: "Secret files (credentials, keys, .env) may not be accessed."
-        action: block
-      - name: secret-extension
-        patterns: ['\\.(secret|secrets)$']
-        reason: "Secret files (credentials, keys, .env) may not be accessed."
-        action: block
+  plugins:
+    # strict_marketplaces: true
+    builtin_marketplace: true
+    # extra_marketplaces:
+    #   - source: github
+    #     repo: your-org/plugins
+    #     ref: main
+    # preinstall:
+    #   - marketplace: claude-plugins-official
+    #     plugin: github
 
-  # ── Bash command restrictions ────────────────────────────────────────────────
-  bash:
-    rules:
-      - name: safe-git-reads
-        patterns:
-          - '^git\s+status\b'
-          - '^git\s+log\b'
-          - '^git\s+diff\b'
-          - '^git\s+show\b'
-          - '^git\s+branch\b'
-          - '^git\s+stash\s+list\b'
-          - '^git\s+remote\b'
-        action: allow
-      - name: safe-read-only
-        patterns: ['^ls\b', '^pwd\b', '^echo\s', '^which\s', '^grep\b', '^rg\b', '^find\b', '^cat\b', '^wc\b']
-        action: allow
-      - name: destructive
-        patterns: ['^rm\s', '.*\brm\s+-rf\b.*']
-        reason: "Destructive file deletion is not permitted."
-        action: block
-      - name: privilege_escalation
-        patterns: ['^sudo\s']
-        reason: "Privilege escalation is not permitted."
-        action: block
-      - name: network_exfiltration
-        patterns: ['^(curl|wget|nc|ncat)\s']
-        reason: "Outbound network calls from Bash are not permitted."
-        action: block
-      - name: package_publish
-        patterns: ['^(npm\s+publish|pip\s+upload|twine\s+upload)\b']
-        reason: "Package publishing requires explicit operator approval."
-        action: block
-      - name: block-shell-delegation
-        patterns: ['^(bash|sh|eval|xargs|env|exec|nohup|dash|zsh)\s']
-        reason: "Shell delegation verbs are not permitted (prevents bypass of compound-command detection)."
-        action: block
+  mcp:
+    approved_servers: []
 
-  # ── Network policy ────────────────────────────────────────────────────────────
+  skills:
+    approved_skills: []
+
+  mainlined:
+    url: ""          # e.g. https://mainlined.example.com
+    policy_name: ""
+    policy_ref: ""
+    policy_version: ""
+
+  sandbox:
+    enabled: true
+    filesystem:
+      denyWrite:
+        - .contAIned
+
+# ── Runtime (hook enforcement) ─────────────────────────────────────────────────
+runtime:
   network:
     enabled: true
     allowed_domains:
       - api.anthropic.com
       - code.claude.com
       - docs.anthropic.com
+      - github.com
+      - ssh.github.com
 
-  # ── Audit logging ─────────────────────────────────────────────────────────────
-  audit:
-    enabled: true
+  # Cedar-inspired unified rules. See docs/policy-reference.md for full syntax.
+  rules:
+    - id: v1:define:secret-file-patterns
+      effect: define
+      resource_type: FilePath
+      define:
+        is_secret:
+          patterns:
+            - '(^|[/\\])\\.env(\.[^/\\]+)?$'
+            - '\\.(pem|key|p12|pfx|jks|keystore)$'
+            - '(^|[/\\])id_(rsa|dsa|ecdsa|ed25519)$'
+            - '(^|[/\\])(credentials|secrets|service_account)\\.(json|yaml|yml)$'
+        is_safe_variant:
+          patterns:
+            - '\\.(example|sample|template)$'
+      tags: [secrets]
 
-  # ── QA gate ───────────────────────────────────────────────────────────────────
+    - id: v1:secrets:allow-safe-variants
+      effect: permit
+      action: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"]
+      resource_type: FilePath
+      when: ["resource.is_safe_variant == true"]
+      tags: [secrets]
+
+    - id: v1:secrets:block
+      effect: forbid
+      action: ["Read", "Write", "Edit", "MultiEdit", "Glob", "Grep"]
+      resource_type: FilePath
+      when: ["resource.is_secret == true"]
+      unless: ["resource.is_safe_variant == true"]
+      reason: "Secret files (credentials, keys, .env) may not be accessed."
+      tags: [secrets]
+
   qa:
-    checks:
-      - name: lint
-        command: ["ruff", "check", "."]
-        when_changed: ["*.py"]
-      - name: format
-        command: ["ruff", "format", "--check", "."]
-        when_changed: ["*.py"]
-      - name: types
-        command: ["pyright"]
-        when_changed: ["*.py"]
-      - name: tests
-        command: ["python", "-m", "pytest", "tests/", "-x", "--tb=short", "-q"]
-        when_changed: ["*.py"]
-      - name: coverage
-        command: ["python", "-m", "pytest", "tests/", "--cov", "--cov-report=term-missing", "--cov-fail-under=80", "-q"]
-        when_changed: ["*.py"]
-
-  # ── Plugin marketplace enforcement ───────────────────────────────────────────
-  # Controls which Claude Code plugin marketplaces the agent may use.
-  #
-  # strict_marketplaces: when true, only the sources listed below may be added.
-  #   All other marketplace sources are blocked before any network/filesystem op.
-  #   Default: false (no marketplace restrictions).
-  #
-  # builtin_marketplace: include the Anthropic official marketplace in the
-  #   allowed sources. Set to false to restrict to operator-controlled sources
-  #   only. Default: true.
-  #
-  # extra_marketplaces: additional approved sources, pre-registered so they are
-  #   available without a manual /plugin marketplace add step.
-  #
-  # preinstall: plugins baked into the image at contained init time, available
-  #   from the first session.
-  #
-  # For per-plugin allowlisting, create a private marketplace containing only
-  # the approved plugin index and bind to it via strict_marketplaces + extra_marketplaces.
-  #
-  # plugins:
-  #   strict_marketplaces: true
-  #   builtin_marketplace: true
-  #   extra_marketplaces:
-  #     - source: github
-  #       repo: your-org/plugins
-  #       ref: main
-  #   preinstall:
-  #     - marketplace: claude-plugins-official
-  #       plugin: some-plugin
-
-  # ── MCP server approvals ──────────────────────────────────────────────────────
-  mcp:
-    approved_servers: []
-
-  # ── Skill approvals ───────────────────────────────────────────────────────────
-  skills:
-    approved_skills: []
-
-  # ── mAInlined policy coordination ─────────────────────────────────────────────
-  mAInlined:
-    url: ""
-    policy_name: ""
-    policy_ref: ""
-    policy_version: ""
-
-# ── Sandbox ───────────────────────────────────────────────────────────────────
-sandbox:
-  enabled: true
-  filesystem:
-    denyWrite:
-      - .contAIned
+    checks: []
+    # Example:
+    # checks:
+    #   - name: lint
+    #     command: [ruff, check, .]
+    #     when_changed: ["*.py"]

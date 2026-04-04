@@ -9,8 +9,8 @@ import (
 
 func TestFetchFromURL_ValidManifest(t *testing.T) {
 	yaml := `
-runtime:
-  docker:
+init:
+  container:
     image: fetched:v1
     network: testnet
 `
@@ -24,12 +24,12 @@ runtime:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Runtime.Docker.Image != "fetched:v1" {
-		t.Errorf("image: got %q", m.Runtime.Docker.Image)
+	if m.Init.Container.Image != "fetched:v1" {
+		t.Errorf("image: got %q", m.Init.Container.Image)
 	}
 	// Defaults should still be applied.
-	if m.Runtime.Docker.Memory != "2g" {
-		t.Errorf("memory default: got %q", m.Runtime.Docker.Memory)
+	if m.Init.Container.Memory != "2g" {
+		t.Errorf("memory default: got %q", m.Init.Container.Memory)
 	}
 }
 
@@ -37,7 +37,7 @@ func TestFetchFromURL_BearerTokenSent(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		w.Write([]byte("runtime:\n  docker:\n    image: x\n    network: n\n"))
+		w.Write([]byte("init:\n  container:\n    image: x\n    network: n\n"))
 	}))
 	defer srv.Close()
 
@@ -53,7 +53,7 @@ func TestFetchFromURL_NoToken_NoAuthHeader(t *testing.T) {
 	var gotAuth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		w.Write([]byte("runtime:\n  docker:\n    image: x\n    network: n\n"))
+		w.Write([]byte("init:\n  container:\n    image: x\n    network: n\n"))
 	}))
 	defer srv.Close()
 
@@ -90,18 +90,14 @@ func TestFetchFromURL_InvalidYAML_ReturnsError(t *testing.T) {
 }
 
 func TestFetchFromURL_InvalidManifest_ReturnsError(t *testing.T) {
-	// Invalid rule action → applyDefaults cannot fix this, Validate must reject it.
+	// Unsupported toolchain → Validate must reject it.
 	yaml := `
-runtime:
-  docker:
+init:
+  container:
     image: x
     network: n
-policy:
-  bash:
-    rules:
-      - name: block-rm
-        patterns: ["rm -rf"]
-        action: deny
+    toolchains:
+      rust: "1.80"
 `
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(yaml))
@@ -109,7 +105,7 @@ policy:
 	defer srv.Close()
 
 	_, err := FetchFromURL(srv.URL, "")
-	if err == nil || !strings.Contains(err.Error(), "is invalid") {
+	if err == nil || !strings.Contains(err.Error(), "unsupported toolchain") {
 		t.Fatalf("expected validation error, got: %v", err)
 	}
 }

@@ -4,8 +4,8 @@ PostToolUse hook — records a structured audit entry for every tool execution.
 
 Primary store: tracer.db via contAInedTracer.log_event() (SQLite, concurrent-safe).
 
-Logging is controlled by policy.audit.enabled in manifest.yaml.
-This hook must never block execution (always exits 0).
+Audit logging is unconditional — this hook always runs and cannot be disabled
+via manifest policy. This hook must never block execution (always exits 0).
 """
 import json
 import sys
@@ -14,7 +14,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from _policy import load_policy  # noqa: E402
 
-
 try:
     event = json.load(sys.stdin)
 except (json.JSONDecodeError, EOFError):
@@ -22,9 +21,6 @@ except (json.JSONDecodeError, EOFError):
 
 cwd    = event.get("cwd", ".")
 policy = load_policy(cwd)
-
-if not policy["audit"]["enabled"]:
-    sys.exit(0)
 
 session_id    = event.get("session_id")
 agent_id      = event.get("agent_id")
