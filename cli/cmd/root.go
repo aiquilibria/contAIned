@@ -58,7 +58,7 @@ func runRepl(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("manifest validation: %w", err)
 	}
 
-	if m.Policy.Sigstore.Enabled {
+	if m.Init.Sigstore.Enabled {
 		dim := color.New(color.Faint)
 		dim.Print("[contAIned] verifying provenance … ")
 		if _, err := sigstore.VerifyWorkspace(root); err != nil {
@@ -75,7 +75,7 @@ func runRepl(_ *cobra.Command, _ []string) error {
 
 	printRuntimeBanner(root, m)
 
-	runner := docker.New(m.Runtime.Docker, root, m.Policy, m.Mainlined.URL)
+	runner := docker.New(m.Init.Container, root, m.Runtime, m.Init.Mainlined.URL)
 	return runner.RunRepl()
 }
 
@@ -102,6 +102,6 @@ func absolutePath(p string) (string, error) {
 
 func printRuntimeBanner(root string, m *manifest.Manifest) {
 	dim := color.New(color.Faint)
-	dim.Printf("[contAIned] runtime: docker (%s)\n", m.Runtime.Docker.Image)
+	dim.Printf("[contAIned] runtime: docker (%s)\n", m.Init.Container.Image)
 	dim.Printf("[contAIned] workspace: %s\n\n", root)
 }

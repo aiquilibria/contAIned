@@ -356,7 +356,7 @@ Controls outbound network access for both Claude Code tools and Bash subprocesse
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | bool | `false` | Enable network filtering |
-| `allowed_domains` | list[string] | `[api.anthropic.com, code.claude.com, docs.anthropic.com]` | Domains silently permitted for WebFetch/WebSearch; all others require operator approval |
+| `allowed_domains` | list[string] | `[api.anthropic.com, code.claude.com, docs.anthropic.com]` | Domains silently permitted for WebFetch/WebSearch; all others are hard-denied by the `restrict_network` hook |
 
 `api.anthropic.com` must remain in `allowed_domains` — the agent cannot function without it.
 

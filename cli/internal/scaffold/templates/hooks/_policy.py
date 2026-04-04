@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """Shared policy loader for contAIned hooks.
 
-Reads the policy: section from /etc/contained/manifest.yaml (baked into the
-container image by contAIned init) and merges it with structural defaults so
-that every key is always present.  The manifest is the sole source of rule
-data — if it cannot be read, hooks receive empty pattern lists and apply no
-secret-file checks.
+Reads the runtime: and init: sections from /etc/contained/manifest.yaml
+(baked into the container image by contAIned init) and merges them with
+structural defaults so that every key is always present. The manifest is
+the sole source of rule data — if it cannot be read, hooks receive empty
+pattern lists and apply no secret-file checks.
 
 Manifest location:
   /etc/contained/manifest.yaml  — baked into the image by contAIned init
 
-Action values: "block" | "allow"
-  block    — deny the operation; hook exits 2 with a reason on stderr
-  allow    — permit unconditionally
+Schema (v3):
+  runtime.network  — network policy (enabled flag, allowed_domains)
+  runtime.qa       — QA checks and setup commands
+  init.mcp         — approved MCP server names
+  init.skills      — approved skill names
 """
 from pathlib import Path
 
@@ -22,9 +24,6 @@ _DEFAULTS = {
     },
     "bash": {
         "rules": [],
-    },
-    "audit": {
-        "enabled": True,
     },
     "qa": {
         "setup": [],
@@ -89,18 +88,29 @@ def _compile_patterns(policy):
     )
 
 
-def load_policy(cwd="."):
+def load_policy(_cwd="."):
     """Return the fully-merged policy dict with all patterns pre-compiled.
 
     Always succeeds: if the manifest is unreadable the structural defaults
     are returned (empty pattern lists — no checks applied).
+
+    Reads from the v3 manifest schema: runtime.* and init.* sections.
+    The _cwd parameter is accepted for backward compatibility but unused.
     """
     try:
         import yaml
         manifest_path = Path("/etc/contained/manifest.yaml")
         with manifest_path.open() as fh:
             manifest = yaml.safe_load(fh) or {}
-        policy = _deep_merge(_DEFAULTS, manifest.get("policy", {}))
+        runtime  = manifest.get("runtime", {})
+        init_cfg = manifest.get("init", {})
+        overlay = {
+            "qa":      runtime.get("qa", {}),
+            "network": runtime.get("network", {}),
+            "mcp":     init_cfg.get("mcp", {}),
+            "skills":  init_cfg.get("skills", {}),
+        }
+        policy = _deep_merge(_DEFAULTS, overlay)
     except Exception:
         policy = dict(_DEFAULTS)
     _compile_patterns(policy)

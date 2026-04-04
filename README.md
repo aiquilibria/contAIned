@@ -18,6 +18,7 @@ The agent operates within a defined workspace inside an isolated Docker containe
 - [How it works](#how-it-works)
   - [Isolation](#isolation)
   - [Governance](#governance)
+  - [Cedar-inspired policy rules](#cedar-inspired-policy-rules)
   - [Defense-in-depth with Claude Code's sandbox](#defense-in-depth-with-claude-codes-sandbox)
   - [Egress filtering](#egress-filtering)
   - [Tracer](#tracer)
@@ -83,7 +84,7 @@ contAIned fills that gap:
 | Operator review before changes are accepted | ✗ | ✗ | ✗ | ✓ |
 | QA gate blocks agent from finishing prematurely | ✗ | ✗ | ✗ | ✓ |
 | Policy baked into image; tamper-proof at runtime | ✗ | ✗ | ✗ | ✓ |
-| Egress filtering — outbound network allowlist | ✗ | ✗ | ◑ (firewall only; no WebFetch control) | ◑ (sandbox network + operator approval flow; prevents accidental exfiltration) |
+| Egress filtering — outbound network allowlist | ✗ | ✗ | ◑ (firewall only; no WebFetch control) | ✓ (sandbox network blocks subprocesses; `restrict_network` hook hard-denies WebFetch/WebSearch to non-allowlisted domains) |
 | Works on Linux in CI/CD | ✓ | ✗ (MicroVM) | ◑ (VS Code–focused) | ✓ |
 
 contAIned and `/sandbox` are complementary, not competing. Enabling both means subprocess writes are blocked at the OS level *and* SDK tool calls are blocked at the hook level — two independent enforcement layers from two different trust boundaries.
@@ -104,7 +105,7 @@ The deeper problems are structural:
 
 - **No programmable logic.** Native rules are pattern lists. They cannot parse a bash command to extract its file argument, call an external tool, query a database, or apply context-sensitive judgement. The `restrict_bash.py` hook uses `shlex.split` to extract file paths from commands and checks those paths against the secret pattern list; no combination of native rules can replicate this.
 
-- **No audit trail.** Native denials are silent — nothing is written. Hooks write a structured entry to `.contAIned/audit/pipeline.jsonl` and `tracer.db` on every denial and every allowed call, with timestamp, session ID, tool, target, and reason. That record exists whether or not the operator is watching, and is queryable via `#db`.
+- **No audit trail.** Native denials are silent — nothing is written. Hooks write a structured entry to `tracer.db` on every denial and every allowed call, with timestamp, session ID, tool, target, and reason. That record exists whether or not the operator is watching, and is queryable via the **`/contained:tracer`** skill.
 
 - **No lifecycle or quality gate.** There is no native equivalent of the `Stop` hook event. The permission system decides whether individual tool calls are allowed; it has no concept of intercepting the agent's "I am done" signal to run tests, check coverage, or build a diff summary before the result is accepted.
 
@@ -269,6 +270,7 @@ Creates (in the workspace):
     restrict_reads.py    ← PreToolUse: read path enforcement
     restrict_writes.py   ← PreToolUse: write path enforcement
     restrict_bash.py     ← PreToolUse: bash command restrictions
+    restrict_network.py  ← PreToolUse: WebFetch/WebSearch allowlist enforcement
     audit.py             ← PostToolUse: append-only audit log
     qa.py                ← Stop: quality gate
   manifest.yaml          ← source of truth; baked into the image at build time
@@ -322,7 +324,7 @@ Agent signals Stop
   Task marked closed
 ```
 
-Use `#review` at any time to browse completed tasks and read their narratives.
+Use the **`/contained:tracer`** skill at any time to browse completed tasks and read their narratives.
 
 ### Task states
 
@@ -348,9 +350,10 @@ Every tool call passes through three layers, all registered in the image-layer m
 ```
 Tool call
     │
-    ├── PreToolUse hook (restrict_writes.py / restrict_reads.py / restrict_bash.py)
-    │     Path-based enforcement — deny access outside the workspace;
-    │     block writes to control-plane files (.contAIned/, managed-settings.json)
+    ├── PreToolUse hook (restrict_writes.py / restrict_reads.py / restrict_bash.py / restrict_network.py)
+    │     Path-based and domain-based enforcement — deny access outside the workspace;
+    │     block writes to control-plane files (.contAIned/, managed-settings.json);
+    │     hard-deny WebFetch/WebSearch to non-allowlisted domains
     │
     ├── Deny rules (managed-settings.json)
     │     Pattern-based — rm -rf, sudo, curl, git push, etc.
@@ -365,6 +368,69 @@ Tool call
 After every successful tool call, `audit.py` appends a structured log entry.
 When the agent stops, `qa.py` runs syntax and quality checks — if they fail,
 the agent receives feedback and keeps working.
+
+### Cedar-inspired policy rules
+
+contAIned's enforcement layer is built around a policy engine modelled on [Cedar](https://www.cedarpolicy.com/en) — Amazon's open-source authorization language. The design is not a Cedar dependency; it borrows Cedar's intellectual architecture — the PARC tuple, the `forbid`/`permit`/`unless` evaluation algorithm, and the default-deny-on-no-match semantics — and applies them to exactly the entities contAIned cares about: file paths, Bash commands, and network resources.
+
+**Why Cedar's design?**
+
+Cedar's core evaluation algorithm has well-understood correctness properties. Its most important guarantee — **`forbid` always overrides `permit`, regardless of rule order** — eliminates an entire class of misconfiguration that plagues regex-list systems. This directly solves contAIned's original ordering problem: Claude Code's native settings evaluate `deny` before `allow` unconditionally, making safe-variant exceptions (allow `.env.example`, deny all other `.env` files) impossible to express declaratively. The Cedar-inspired engine makes these exceptions first-class `unless` clauses in the rule itself:
+
+```yaml
+- id: v1:secrets:block-secret-access
+  effect: forbid
+  action: [Read, Write, Edit, Glob, Grep]
+  resource_type: FilePath
+  when:
+    - resource.is_secret == true
+  unless:
+    - resource.is_safe_variant == true   # .env.example always passes
+  reason: "Secret files (credentials, keys, .env) may not be accessed."
+```
+
+No bespoke Python. No ordering sensitivity. The same mechanism works identically for any rule any operator might write.
+
+**How evaluation works**
+
+Each tool call is mapped to a typed entity — `FilePath`, `BashCommand`, or `NetworkResource` — with computed attributes (e.g. `in_workspace`, `is_secret`, `verb`, `subcommand`, `in_allowlist`). The engine evaluates all matching rules and returns one of four outcomes:
+
+| Outcome | Meaning |
+|---------|---------|
+| `ALLOW` | A `permit` rule matched and no `forbid` overrides it. |
+| `DENY` | A `forbid` rule matched — always wins over any `permit`. |
+| `ESCALATE` | An `escalate` rule matched; surfaces an operator prompt. |
+| `DEFER` | No rule matched. The call passes through to Claude Code's native permission system. |
+
+`DEFER` is the no-match outcome — it is not "allow everything." Anything not explicitly addressed by the manifest falls through to `managed-settings.json` and, finally, to the operator prompt.
+
+**`define` rules — reusable classifiers**
+
+Rules with `effect: define` declare computed attributes on entities. Enforcement rules then reference these attributes via `resource.<attr> == true`. The classifier and the enforcement rule are independently readable:
+
+```yaml
+- id: v1:define:secret-file-patterns
+  effect: define
+  resource_type: FilePath
+  define:
+    is_secret:
+      patterns:
+        - '(^|[/\\])\.env(\.[^/\\]+)?$'
+        - '\.(pem|key|p12|pfx|jks|keystore)$'
+        - '(^|[/\\])(credentials|secrets|service_account)\.(json|yaml|yml)$'
+```
+
+**Single readable source of truth**
+
+All policy lives in `runtime.rules` in the manifest. Hook scripts are thin adapters: build entity → call engine → act on decision. A security reviewer auditing a contAIned deployment reads one document and understands the complete permission model. No Python required.
+
+Every rule carries a stable `id`, human-readable `reason`, and `tags`. The rule ID is recorded in `tracer.db` on every decision — audit queries can answer "which policy caused this denial?" not just "which hook ran?"
+
+**Correctness and performance**
+
+`evaluate()` is a pure function with no side effects — testable in isolation, auditable, and stable regardless of how many new tool types Claude Code adds. The test suite in `tests/engine/` covers entity building, condition evaluation, and end-to-end scenarios for all entity types and effects.
+
+The benchmark suite (`tests/engine/test_benchmark.py`) enforces a **5 ms wall-clock budget** for the full pipeline — entity construction plus rule evaluation against the complete production rule set — on every CI run. In practice, `evaluate()` runs in well under 1 ms per tool call. Hooks fire synchronously before every tool call, so latency here is latency the agent feels on every action.
 
 ### Defense-in-depth with Claude Code's sandbox
 
@@ -391,7 +457,7 @@ An agent session has multiple channels for sending data out of the workspace: Cl
 
 contAIned addresses this with two complementary mechanisms, both driven by `policy.network.allowed_domains` in `manifest.yaml`:
 
-- **`WebFetch` / `WebSearch`** — requests to allowed domains are auto-approved. Requests to any other domain surface an operator confirmation prompt (via the `PermissionRequest` hook) and are logged. No request proceeds without either an explicit allow rule or operator approval.
+- **`WebFetch` / `WebSearch`** — requests to allowed domains are auto-approved via `managed-settings.json` allow rules. Requests to any other domain are hard-denied by the `restrict_network` hook before Claude Code can proceed; no operator prompt is shown and no request is made.
 - **Bash subprocesses and agent-written scripts** — Claude Code's built-in sandbox enforces the `allowedDomains` list at the OS level (bubblewrap on Linux). HTTP traffic to non-allowed domains is blocked with a `403 Forbidden` regardless of the tool used.
 
 Configure the allowlist in `.contAIned/manifest.yaml`, then rebuild the image:
@@ -664,7 +730,7 @@ VACUUM;
 
 ### Narrative injection budget
 
-The `#review <N>` command retrieves the stored narrative from `tracer.db` and injects it into Claude's context via the `additionalContext` mechanism. Claude Code imposes a size cap on injected context (approximately 10,000 characters). For long sessions — roughly 30 or more turns — the narrative's per-turn closing statements accumulate beyond this budget. The harness silently truncates the injected text, dropping the tail of the narrative. The final conclusion of the session (often the most important part) is typically in the tail.
+The **`/contained:tracer`** skill retrieves the stored narrative from `tracer.db` and injects it into Claude's context via the `additionalContext` mechanism. Claude Code imposes a size cap on injected context (approximately 10,000 characters). For long sessions — roughly 30 or more turns — the narrative's per-turn closing statements accumulate beyond this budget. The harness silently truncates the injected text, dropping the tail of the narrative. The final conclusion of the session (often the most important part) is typically in the tail.
 
 The stored data in `tracer.db` is complete and unaffected; this is purely a display problem.
 

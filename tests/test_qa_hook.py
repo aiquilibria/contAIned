@@ -35,7 +35,9 @@ def _expand(entry) -> dict:
     }
 
 
-def _files_match(touched: list[str], patterns: list[str]) -> bool:
+def _files_match(touched: list[str] | None, patterns: list[str]) -> bool:
+    if touched is None:
+        return True
     return any(fnmatch.fnmatch(Path(f).name, pat) for f in touched for pat in patterns)
 
 
@@ -88,6 +90,13 @@ class TestFilesMatch:
 
     def test_empty_patterns_never_matches(self):
         assert _files_match(["/workspace/foo.py"], []) is False
+
+    def test_none_touched_always_matches(self):
+        """None means tracer unavailable — bypass when_changed so checks run."""
+        assert _files_match(None, ["*.py"]) is True
+
+    def test_none_touched_matches_any_pattern(self):
+        assert _files_match(None, ["*.go"]) is True
 
 
 # ── Integration: run full QA_HOOK via subprocess ──────────────────────────────
@@ -168,7 +177,7 @@ def _run_hook_with_manifest(tmp_path: Path, manifest: dict, event: dict) -> dict
 class TestQAHookIntegration:
     def test_3_9_empty_checks_passes_trivially(self, tmp_path):
         """3.9: no checks → no block decision."""
-        manifest = {"policy": {"qa": {"checks": []}}}
+        manifest = {"runtime": {"qa": {"checks": []}}}
         event = {"cwd": str(tmp_path), "session_id": "test-session"}
         out = _run_hook_with_manifest(tmp_path, manifest, event)
         assert out.get("decision") != "block"
@@ -177,7 +186,7 @@ class TestQAHookIntegration:
     def test_3_8_when_changed_skips_check_when_no_matching_files(self, tmp_path):
         """3.8: check with when_changed: ["*.ts"] skipped when no .ts files touched."""
         manifest = {
-            "policy": {
+            "runtime": {
                 "qa": {
                     "checks": [
                         {"name": "ts-build", "command": ["false"], "when_changed": ["*.ts"]},
@@ -185,8 +194,8 @@ class TestQAHookIntegration:
                 }
             }
         }
-        # No touched files — tracer unavailable; when_changed guard fires anyway
-        # because _touched is empty, so _files_match returns False.
+        # session_id: None → _touched defaults to [] (no session = nothing touched)
+        # → _files_match([], ["*.ts"]) = False → check is skipped.
         event = {"cwd": str(tmp_path), "session_id": None}
         out = _run_hook_with_manifest(tmp_path, manifest, event)
         assert out.get("decision") != "block"
@@ -196,7 +205,7 @@ class TestQAHookIntegration:
     def test_3_7_non_python_check_runs(self, tmp_path):
         """3.7: a non-Python check (true) runs and passes."""
         manifest = {
-            "policy": {
+            "runtime": {
                 "qa": {
                     "checks": [
                         ["true"],
@@ -213,7 +222,7 @@ class TestQAHookIntegration:
     def test_failing_check_blocks(self, tmp_path):
         """A check whose command exits nonzero produces a block decision."""
         manifest = {
-            "policy": {
+            "runtime": {
                 "qa": {
                     "checks": [
                         {"name": "always-fail", "command": ["false"]},
@@ -230,7 +239,7 @@ class TestQAHookIntegration:
     def test_missing_command_binary_skips(self, tmp_path):
         """A check whose binary doesn't exist is skipped, not failed."""
         manifest = {
-            "policy": {
+            "runtime": {
                 "qa": {
                     "checks": [
                         ["__no_such_binary_xyzzy__"],

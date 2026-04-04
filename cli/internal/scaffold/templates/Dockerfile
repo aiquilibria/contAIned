@@ -89,9 +89,13 @@ RUN test -n "$CLAUDE_MD_CONTENT" \
 
 # Bake the operator manifest into the image so hooks read policy from
 # /etc/contained/manifest.yaml rather than the workspace.
+# Validate the manifest policy rules in blocking mode (phase 2): validation
+# errors abort the build so operators catch policy mistakes before deployment.
 ARG MANIFEST_CONTENT=""
 RUN if [ -n "$MANIFEST_CONTENT" ]; then \
-        echo "$MANIFEST_CONTENT" | base64 -d > /etc/contained/manifest.yaml; \
+        echo "$MANIFEST_CONTENT" | base64 -d > /etc/contained/manifest.yaml \
+        && /opt/contained-venv/bin/python3 -m contained.engine.validate_manifest \
+               /etc/contained/manifest.yaml; \
     fi
 
 # Write the in-container entrypoint script.

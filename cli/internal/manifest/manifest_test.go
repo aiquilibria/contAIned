@@ -11,8 +11,8 @@ import (
 
 func TestParse_MinimalYAML_AppliesDefaults(t *testing.T) {
 	yaml := `
-runtime:
-  docker:
+init:
+  container:
     image: myimage:latest
     network: mynet
 `
@@ -20,36 +20,35 @@ runtime:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Runtime.Docker.Image != "myimage:latest" {
-		t.Errorf("image: got %q, want %q", m.Runtime.Docker.Image, "myimage:latest")
+	if m.Init.Container.Image != "myimage:latest" {
+		t.Errorf("image: got %q, want %q", m.Init.Container.Image, "myimage:latest")
 	}
-	if m.Runtime.Docker.Memory != "2g" {
-		t.Errorf("memory default: got %q, want %q", m.Runtime.Docker.Memory, "2g")
+	if m.Init.Container.Memory != "2g" {
+		t.Errorf("memory default: got %q, want %q", m.Init.Container.Memory, "2g")
 	}
-	if m.Runtime.Docker.CPUs != 2 {
-		t.Errorf("cpus default: got %d, want 2", m.Runtime.Docker.CPUs)
+	if m.Init.Container.CPUs != 2 {
+		t.Errorf("cpus default: got %d, want 2", m.Init.Container.CPUs)
 	}
-	if m.Runtime.Docker.AgentConfigVolume != "contAIned-agent-config" {
-		t.Errorf("agent_config_volume default: got %q", m.Runtime.Docker.AgentConfigVolume)
+	if m.Init.Container.AgentConfigVolume != "contAIned-agent-config" {
+		t.Errorf("agent_config_volume default: got %q", m.Init.Container.AgentConfigVolume)
 	}
-	if m.Policy.Sigstore.RekorURL != "https://rekor.sigstore.dev" {
-		t.Errorf("rekor_url default: got %q", m.Policy.Sigstore.RekorURL)
+	if m.Init.Sigstore.RekorURL != "https://rekor.sigstore.dev" {
+		t.Errorf("rekor_url default: got %q", m.Init.Sigstore.RekorURL)
 	}
-	if m.Policy.Sigstore.FulcioURL != "https://fulcio.sigstore.dev" {
-		t.Errorf("fulcio_url default: got %q", m.Policy.Sigstore.FulcioURL)
+	if m.Init.Sigstore.FulcioURL != "https://fulcio.sigstore.dev" {
+		t.Errorf("fulcio_url default: got %q", m.Init.Sigstore.FulcioURL)
 	}
 }
 
 func TestParse_ExplicitValues_NotOverriddenByDefaults(t *testing.T) {
 	yaml := `
-runtime:
-  docker:
+init:
+  container:
     image: custom:v2
     memory: 4g
     cpus: 4
     network: mynet
     agent_config_volume: my-vol
-policy:
   sigstore:
     rekor_url: https://custom.rekor.example
     fulcio_url: https://custom.fulcio.example
@@ -58,17 +57,17 @@ policy:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Runtime.Docker.Memory != "4g" {
-		t.Errorf("memory: got %q, want 4g", m.Runtime.Docker.Memory)
+	if m.Init.Container.Memory != "4g" {
+		t.Errorf("memory: got %q, want 4g", m.Init.Container.Memory)
 	}
-	if m.Runtime.Docker.CPUs != 4 {
-		t.Errorf("cpus: got %d, want 4", m.Runtime.Docker.CPUs)
+	if m.Init.Container.CPUs != 4 {
+		t.Errorf("cpus: got %d, want 4", m.Init.Container.CPUs)
 	}
-	if m.Runtime.Docker.AgentConfigVolume != "my-vol" {
-		t.Errorf("agent_config_volume: got %q", m.Runtime.Docker.AgentConfigVolume)
+	if m.Init.Container.AgentConfigVolume != "my-vol" {
+		t.Errorf("agent_config_volume: got %q", m.Init.Container.AgentConfigVolume)
 	}
-	if m.Policy.Sigstore.RekorURL != "https://custom.rekor.example" {
-		t.Errorf("rekor_url: got %q", m.Policy.Sigstore.RekorURL)
+	if m.Init.Sigstore.RekorURL != "https://custom.rekor.example" {
+		t.Errorf("rekor_url: got %q", m.Init.Sigstore.RekorURL)
 	}
 }
 
@@ -77,11 +76,11 @@ func TestParse_EmptyYAML_AllDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Runtime.Docker.Image != "contained:latest" {
-		t.Errorf("image default: got %q", m.Runtime.Docker.Image)
+	if m.Init.Container.Image != "contained:latest" {
+		t.Errorf("image default: got %q", m.Init.Container.Image)
 	}
-	if m.Runtime.Docker.Network != "contAIned-net" {
-		t.Errorf("network default: got %q", m.Runtime.Docker.Network)
+	if m.Init.Container.Network != "contAIned-net" {
+		t.Errorf("network default: got %q", m.Init.Container.Network)
 	}
 }
 
@@ -94,11 +93,11 @@ func TestParse_InvalidYAML_ReturnsError(t *testing.T) {
 
 func TestParse_QAChecks(t *testing.T) {
 	yaml := `
-runtime:
-  docker:
+init:
+  container:
     image: x
     network: n
-policy:
+runtime:
   qa:
     checks:
       - name: lint
@@ -109,10 +108,10 @@ policy:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(m.Policy.QA.Checks) != 1 {
-		t.Fatalf("checks: got %d, want 1", len(m.Policy.QA.Checks))
+	if len(m.Runtime.QA.Checks) != 1 {
+		t.Fatalf("checks: got %d, want 1", len(m.Runtime.QA.Checks))
 	}
-	c := m.Policy.QA.Checks[0]
+	c := m.Runtime.QA.Checks[0]
 	if c.Name != "lint" {
 		t.Errorf("check name: got %q", c.Name)
 	}
@@ -128,8 +127,8 @@ policy:
 
 func validManifest() *Manifest {
 	return &Manifest{
-		Runtime: RuntimeConfig{
-			Docker: DockerConfig{
+		Init: InitConfig{
+			Container: ContainerConfig{
 				Image:   "myimage:latest",
 				Network: "mynet",
 			},
@@ -145,64 +144,27 @@ func TestValidate_ValidManifest(t *testing.T) {
 
 func TestValidate_MissingImage(t *testing.T) {
 	m := validManifest()
-	m.Runtime.Docker.Image = ""
+	m.Init.Container.Image = ""
 	err := Validate(m)
-	if err == nil || !strings.Contains(err.Error(), "runtime.docker.image") {
+	if err == nil || !strings.Contains(err.Error(), "init.container.image") {
 		t.Fatalf("expected image error, got: %v", err)
 	}
 }
 
 func TestValidate_MissingNetwork(t *testing.T) {
 	m := validManifest()
-	m.Runtime.Docker.Network = ""
+	m.Init.Container.Network = ""
 	err := Validate(m)
-	if err == nil || !strings.Contains(err.Error(), "runtime.docker.network") {
+	if err == nil || !strings.Contains(err.Error(), "init.container.network") {
 		t.Fatalf("expected network error, got: %v", err)
-	}
-}
-
-func TestValidate_Rule_MissingName(t *testing.T) {
-	m := validManifest()
-	m.Policy.Bash.Rules = []Rule{{Patterns: []string{"rm -rf"}, Action: "block"}}
-	err := Validate(m)
-	if err == nil || !strings.Contains(err.Error(), ".name is required") {
-		t.Fatalf("expected name error, got: %v", err)
-	}
-}
-
-func TestValidate_Rule_EmptyPatterns(t *testing.T) {
-	m := validManifest()
-	m.Policy.Bash.Rules = []Rule{{Name: "no-patterns", Patterns: []string{}, Action: "block"}}
-	err := Validate(m)
-	if err == nil || !strings.Contains(err.Error(), ".patterns must not be empty") {
-		t.Fatalf("expected patterns error, got: %v", err)
-	}
-}
-
-func TestValidate_Rule_InvalidAction(t *testing.T) {
-	m := validManifest()
-	m.Policy.Secrets.Rules = []Rule{{Name: "x", Patterns: []string{"secret"}, Action: "deny"}}
-	err := Validate(m)
-	if err == nil || !strings.Contains(err.Error(), `"deny" is invalid`) {
-		t.Fatalf("expected invalid action error, got: %v", err)
-	}
-}
-
-func TestValidate_Rule_ValidActions(t *testing.T) {
-	for _, action := range []string{"allow", "block", "escalate"} {
-		m := validManifest()
-		m.Policy.Bash.Rules = []Rule{{Name: "r", Patterns: []string{"x"}, Action: action}}
-		if err := Validate(m); err != nil {
-			t.Errorf("action %q: unexpected error: %v", action, err)
-		}
 	}
 }
 
 func TestValidate_Sigstore_EnabledWithoutURLs(t *testing.T) {
 	m := validManifest()
-	m.Policy.Sigstore.Enabled = true
-	m.Policy.Sigstore.RekorURL = ""
-	m.Policy.Sigstore.FulcioURL = ""
+	m.Init.Sigstore.Enabled = true
+	m.Init.Sigstore.RekorURL = ""
+	m.Init.Sigstore.FulcioURL = ""
 	err := Validate(m)
 	if err == nil || !strings.Contains(err.Error(), "rekor_url") {
 		t.Fatalf("expected rekor_url error, got: %v", err)
@@ -211,9 +173,9 @@ func TestValidate_Sigstore_EnabledWithoutURLs(t *testing.T) {
 
 func TestValidate_Sigstore_EnabledFulcioMissing(t *testing.T) {
 	m := validManifest()
-	m.Policy.Sigstore.Enabled = true
-	m.Policy.Sigstore.RekorURL = "https://rekor.sigstore.dev"
-	m.Policy.Sigstore.FulcioURL = ""
+	m.Init.Sigstore.Enabled = true
+	m.Init.Sigstore.RekorURL = "https://rekor.sigstore.dev"
+	m.Init.Sigstore.FulcioURL = ""
 	err := Validate(m)
 	if err == nil || !strings.Contains(err.Error(), "fulcio_url") {
 		t.Fatalf("expected fulcio_url error, got: %v", err)
@@ -222,9 +184,9 @@ func TestValidate_Sigstore_EnabledFulcioMissing(t *testing.T) {
 
 func TestValidate_Sigstore_DisabledURLsNotRequired(t *testing.T) {
 	m := validManifest()
-	m.Policy.Sigstore.Enabled = false
-	m.Policy.Sigstore.RekorURL = ""
-	m.Policy.Sigstore.FulcioURL = ""
+	m.Init.Sigstore.Enabled = false
+	m.Init.Sigstore.RekorURL = ""
+	m.Init.Sigstore.FulcioURL = ""
 	if err := Validate(m); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -232,7 +194,7 @@ func TestValidate_Sigstore_DisabledURLsNotRequired(t *testing.T) {
 
 func TestValidate_QACheck_MissingName(t *testing.T) {
 	m := validManifest()
-	m.Policy.QA.Checks = []QACheck{{Command: []string{"pytest"}}}
+	m.Runtime.QA.Checks = []QACheck{{Command: []string{"pytest"}}}
 	err := Validate(m)
 	if err == nil || !strings.Contains(err.Error(), "checks[0].name") {
 		t.Fatalf("expected QA name error, got: %v", err)
@@ -241,7 +203,7 @@ func TestValidate_QACheck_MissingName(t *testing.T) {
 
 func TestValidate_QACheck_MissingCommand(t *testing.T) {
 	m := validManifest()
-	m.Policy.QA.Checks = []QACheck{{Name: "tests"}}
+	m.Runtime.QA.Checks = []QACheck{{Name: "tests"}}
 	err := Validate(m)
 	if err == nil || !strings.Contains(err.Error(), "checks[0].command") {
 		t.Fatalf("expected QA command error, got: %v", err)
@@ -256,7 +218,7 @@ func TestLoad_NewPath(t *testing.T) {
 	if err := os.MkdirAll(contained, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	content := "runtime:\n  docker:\n    image: test:v1\n    network: testnet\n"
+	content := "init:\n  container:\n    image: test:v1\n    network: testnet\n"
 	if err := os.WriteFile(filepath.Join(contained, "manifest.yaml"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -265,8 +227,8 @@ func TestLoad_NewPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Runtime.Docker.Image != "test:v1" {
-		t.Errorf("image: got %q", m.Runtime.Docker.Image)
+	if m.Init.Container.Image != "test:v1" {
+		t.Errorf("image: got %q", m.Init.Container.Image)
 	}
 }
 
@@ -276,7 +238,7 @@ func TestLoad_LegacyPath(t *testing.T) {
 	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	content := "runtime:\n  docker:\n    image: legacy:v1\n    network: testnet\n"
+	content := "init:\n  container:\n    image: legacy:v1\n    network: testnet\n"
 	if err := os.WriteFile(filepath.Join(legacyDir, "manifest.yaml"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -285,8 +247,8 @@ func TestLoad_LegacyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Runtime.Docker.Image != "legacy:v1" {
-		t.Errorf("image: got %q", m.Runtime.Docker.Image)
+	if m.Init.Container.Image != "legacy:v1" {
+		t.Errorf("image: got %q", m.Init.Container.Image)
 	}
 }
 
@@ -303,7 +265,7 @@ func TestLoad_MissingFile_ReturnsError(t *testing.T) {
 func TestValidate_SupportedToolchains_Valid(t *testing.T) {
 	for _, name := range []string{"go", "node", "ruby", "java"} {
 		m := validManifest()
-		m.Runtime.Docker.Toolchains = map[string]string{name: "1.0"}
+		m.Init.Container.Toolchains = map[string]string{name: "1.0"}
 		if err := Validate(m); err != nil {
 			t.Errorf("toolchain %q: unexpected error: %v", name, err)
 		}
@@ -312,7 +274,7 @@ func TestValidate_SupportedToolchains_Valid(t *testing.T) {
 
 func TestValidate_UnsupportedToolchain_ReturnsError(t *testing.T) {
 	m := validManifest()
-	m.Runtime.Docker.Toolchains = map[string]string{"rust": "1.80"}
+	m.Init.Container.Toolchains = map[string]string{"rust": "1.80"}
 	err := Validate(m)
 	if err == nil || !strings.Contains(err.Error(), "unsupported toolchain") {
 		t.Fatalf("expected unsupported toolchain error, got: %v", err)
@@ -321,7 +283,7 @@ func TestValidate_UnsupportedToolchain_ReturnsError(t *testing.T) {
 
 func TestValidate_ToolchainEmptyVersion_ReturnsError(t *testing.T) {
 	m := validManifest()
-	m.Runtime.Docker.Toolchains = map[string]string{"go": ""}
+	m.Init.Container.Toolchains = map[string]string{"go": ""}
 	err := Validate(m)
 	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
 		t.Fatalf("expected empty version error, got: %v", err)
@@ -333,8 +295,8 @@ func TestValidate_ToolchainEmptyVersion_ReturnsError(t *testing.T) {
 func TestParse_Plugins_BuiltinMarketplaceDefaultsTrue(t *testing.T) {
 	// When builtin_marketplace is omitted, applyDefaults sets it to true.
 	yaml := `
-runtime:
-  docker:
+init:
+  container:
     image: x
     network: n
 `
@@ -342,21 +304,20 @@ runtime:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Policy.Plugins.BuiltinMarketplace == nil {
+	if m.Init.Plugins.BuiltinMarketplace == nil {
 		t.Fatal("BuiltinMarketplace should not be nil after applyDefaults")
 	}
-	if !*m.Policy.Plugins.BuiltinMarketplace {
+	if !*m.Init.Plugins.BuiltinMarketplace {
 		t.Error("BuiltinMarketplace default: want true, got false")
 	}
 }
 
 func TestParse_Plugins_BuiltinMarketplaceExplicitFalse(t *testing.T) {
 	yaml := `
-runtime:
-  docker:
+init:
+  container:
     image: x
     network: n
-policy:
   plugins:
     builtin_marketplace: false
 `
@@ -364,10 +325,10 @@ policy:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Policy.Plugins.BuiltinMarketplace == nil {
+	if m.Init.Plugins.BuiltinMarketplace == nil {
 		t.Fatal("BuiltinMarketplace should not be nil")
 	}
-	if *m.Policy.Plugins.BuiltinMarketplace {
+	if *m.Init.Plugins.BuiltinMarketplace {
 		t.Error("BuiltinMarketplace explicit false: want false, got true")
 	}
 }
@@ -375,8 +336,8 @@ policy:
 func TestParse_Plugins_StrictMarketplacesFalseIsZeroValue(t *testing.T) {
 	// Omitting strict_marketplaces should leave it as false (zero value).
 	yaml := `
-runtime:
-  docker:
+init:
+  container:
     image: x
     network: n
 `
@@ -384,7 +345,7 @@ runtime:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Policy.Plugins.StrictMarketplaces {
+	if m.Init.Plugins.StrictMarketplaces {
 		t.Error("StrictMarketplaces should be false when omitted")
 	}
 }
@@ -392,7 +353,7 @@ runtime:
 func TestParse_Plugins_RoundTrip(t *testing.T) {
 	bFalse := false
 	original := validManifest()
-	original.Policy.Plugins = PluginsConfig{
+	original.Init.Plugins = PluginsConfig{
 		StrictMarketplaces: true,
 		BuiltinMarketplace: &bFalse,
 		ExtraMarketplaces: []PluginMarketplace{
@@ -414,7 +375,7 @@ func TestParse_Plugins_RoundTrip(t *testing.T) {
 		t.Fatalf("reparse error: %v", err)
 	}
 
-	p := reparsed.Policy.Plugins
+	p := reparsed.Init.Plugins
 	if !p.StrictMarketplaces {
 		t.Error("StrictMarketplaces round-trip: want true")
 	}
@@ -437,35 +398,34 @@ func TestParse_Plugins_RoundTrip(t *testing.T) {
 
 func TestParse_Plugins_EmptySectionParsesWithoutError(t *testing.T) {
 	yaml := `
-runtime:
-  docker:
+init:
+  container:
     image: x
     network: n
-policy:
   plugins: {}
 `
 	m, err := Parse([]byte(yaml))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if m.Policy.Plugins.StrictMarketplaces {
+	if m.Init.Plugins.StrictMarketplaces {
 		t.Error("StrictMarketplaces should be false for empty section")
 	}
-	if len(m.Policy.Plugins.ExtraMarketplaces) != 0 {
+	if len(m.Init.Plugins.ExtraMarketplaces) != 0 {
 		t.Error("ExtraMarketplaces should be empty")
 	}
-	if len(m.Policy.Plugins.Preinstall) != 0 {
+	if len(m.Init.Plugins.Preinstall) != 0 {
 		t.Error("Preinstall should be empty")
 	}
 }
 
 func TestParse_EcosystemDef_Plugins_RoundTrip(t *testing.T) {
 	yaml := `
-runtime:
-  docker:
+init:
+  container:
     image: x
     network: n
-ecosystem_definitions:
+ecosystems:
   python:
     plugins:
       - marketplace: claude-plugins-official
@@ -475,7 +435,7 @@ ecosystem_definitions:
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	def, ok := m.EcosystemDefinitions["python"]
+	def, ok := m.Ecosystems["python"]
 	if !ok {
 		t.Fatal("python ecosystem definition not found")
 	}
@@ -494,8 +454,8 @@ ecosystem_definitions:
 
 func TestSerialise_RoundTrip(t *testing.T) {
 	original := validManifest()
-	original.Agent.Model = "claude-sonnet-4-6"
-	original.Policy.Audit.Enabled = true
+	original.Init.Agent.Model = "claude-sonnet-4-6"
+	original.Runtime.QA.Checks = []QACheck{{Name: "lint", Command: []string{"ruff", "check", "."}}}
 
 	out, err := Serialise(original)
 	if err != nil {
@@ -506,10 +466,10 @@ func TestSerialise_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reparse error: %v", err)
 	}
-	if reparsed.Agent.Model != "claude-sonnet-4-6" {
-		t.Errorf("model round-trip: got %q", reparsed.Agent.Model)
+	if reparsed.Init.Agent.Model != "claude-sonnet-4-6" {
+		t.Errorf("model round-trip: got %q", reparsed.Init.Agent.Model)
 	}
-	if !reparsed.Policy.Audit.Enabled {
-		t.Error("audit.enabled round-trip: got false")
+	if len(reparsed.Runtime.QA.Checks) != 1 || reparsed.Runtime.QA.Checks[0].Name != "lint" {
+		t.Errorf("qa.checks round-trip: got %v", reparsed.Runtime.QA.Checks)
 	}
 }

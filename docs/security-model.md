@@ -122,6 +122,8 @@ Agent tool call
                        /etc/claude-code/, and other control-plane paths
   restrict_bash.py     Block dangerous Bash patterns (rm -rf, sudo,
                        curl/wget, raw socket tools); escalate git mutations
+  restrict_network.py  Hard-deny WebFetch/WebSearch to domains outside
+                       policy.network.allowed_domains
       │
       │  (denied calls stop here; allowed calls proceed)
       │
@@ -130,7 +132,7 @@ Agent tool call
       │
       ▼
   PostToolUse hook  ─────────────────────────────────────────────
-  audit.py             Append structured log entry to audit/pipeline.jsonl;
+  audit.py             Append structured log entry to tracer.db;
                        record file diffs in tracer.db blob store
       │
       ▼  (on agent Stop)
@@ -173,7 +175,7 @@ An agent session has four distinct outbound channels:
 
 When `policy.network.enabled: true`, `policy.network.allowed_domains` drives two enforcement mechanisms baked into the image:
 
-**`WebFetch` / `WebSearch`** — each domain in the allowlist generates a `WebFetch(domain:<domain>)` allow rule in `managed-settings.json`. Requests to allowed domains are auto-approved. Requests to any other domain trigger the `PermissionRequest` hook, which surfaces an operator approval prompt and logs the request. No outbound fetch proceeds without an explicit allow rule or deliberate operator approval.
+**`WebFetch` / `WebSearch`** — each domain in the allowlist generates a `WebFetch(domain:<domain>)` allow rule in `managed-settings.json`. Requests to allowed domains are auto-approved. Requests to any other domain are hard-denied by the `restrict_network` PreToolUse hook before Claude Code proceeds — no operator prompt is shown and no request is made.
 
 **Bash subprocesses and agent-written scripts** — `managed-settings.json` sets `sandbox.network.allowedDomains` with `allowManagedDomainsOnly: true`. Claude Code's sandbox (bubblewrap on Linux) routes subprocess HTTP/HTTPS traffic through an OS-level filter that blocks requests to non-listed domains with `403 Forbidden`. Because this is enforced at the kernel/namespace level, it cannot be bypassed by modifying environment variables.
 
@@ -185,7 +187,7 @@ The default allowlist contains `api.anthropic.com`, `code.claude.com`, and `docs
 
 Every tool call is recorded by `audit.py` (PostToolUse) in the tracer database.
 
-**Tracer database** (`tracer.db`) — the primary store. A SQLite database in WAL mode that records every tool call event, task, sub-agent invocation, file diff (content-addressed blob store), and QA result. The `#review <N>` command retrieves the narrative and per-file diff summary for any completed task. The `#db <SQL>` command gives the operator direct SQL access for ad-hoc queries. Writes to `.contAIned/` are blocked by the hook layer, so the database cannot be cleared or tampered with by the agent.
+**Tracer database** (`tracer.db`) — the primary store. A SQLite database in WAL mode that records every tool call event, task, sub-agent invocation, file diff (content-addressed blob store), and QA result. The **`/contained:tracer`** skill retrieves the narrative and per-file diff summary for any completed task and gives the operator direct SQL access for ad-hoc queries. Writes to `.contAIned/` are blocked by the hook layer, so the database cannot be cleared or tampered with by the agent.
 
 **Provenance stamping** — when Sigstore is enabled, every task closure writes a `provenance_log` entry into `tasks.summary`. Each entry records the image digest, Rekor log index, operator identity, and a `closed_at` timestamp, taken from a read-only snapshot of `provenance.yaml` bind-mounted at container startup. This binds each task record to the signed image that enforced its policy. For tasks resumed after a container rebuild, entries accumulate rather than overwrite — the complete signing history across all image versions is preserved in the database. The chain is: task → image digest → Rekor entry → operator OIDC identity → policy manifest. Any closed task is therefore independently auditable end-to-end without requiring the live image or workspace.
 
@@ -217,7 +219,7 @@ Together these provide the forensic record that makes injected or unexpected age
 
 **What it cannot do.** It cannot modify the hook scripts, managed-settings, or the manifest — those paths are blocked by both the hook layer and the OS-level sandbox independently. It cannot deregister or replace hooks, because hook registration is in the image layer and Claude Code blocks user-defined hooks entirely when managed settings are active. It cannot reach the host filesystem. It cannot contact non-allowed domains via HTTP/HTTPS from Bash subprocesses — the sandbox enforces this at the OS level. It cannot make `WebFetch` calls to non-allowed domains without triggering an operator approval prompt. It cannot approve its own escalated actions — escalation surfaces to the operator's terminal, not back to the agent.
 
-**Residual risk.** A jailbroken agent that stays within policy bounds is indistinguishable from a legitimate agent at the enforcement layer. The tracer audit log and `#review` are the operator's tools for detecting unexpected behaviour after the fact. For high-value workspaces, operators should review `#review` output before approving any escalated git mutation — this is the intended workflow, not an afterthought.
+**Residual risk.** A jailbroken agent that stays within policy bounds is indistinguishable from a legitimate agent at the enforcement layer. The tracer audit log and the **`/contained:tracer`** skill are the operator's tools for detecting unexpected behaviour after the fact. For high-value workspaces, operators should review session history via the **`/contained:tracer`** skill before approving any escalated git mutation — this is the intended workflow, not an afterthought.
 
 Agent-written code that passes QA checks and executes as part of the task could still contain logic errors or intentionally dangerous behaviour that static analysis does not catch. This risk is bounded by the container and egress boundaries — it cannot escape to the host — but it is not eliminated within the workspace.
 
@@ -232,9 +234,9 @@ Agent-written code that passes QA checks and executes as part of the task could 
 | `restrict_reads.py` | Blocks `Read`/`Glob`/`Grep` on secret file patterns (`.env`, `*.pem`, `id_rsa`, …) | Hook-enforced; cannot be disabled at runtime |
 | `restrict_bash.py` | Blocks `cat`, `head`, `tail` on the same patterns; blocks `curl`, `wget`, `nc` | Hook-enforced |
 | `sandbox.network.allowedDomains` | Blocks Bash subprocess HTTP/HTTPS to non-allowed domains at the OS level (bubblewrap) | Kernel-enforced; cannot be bypassed via env vars |
-| `WebFetch` allow rules + `PermissionRequest` hook | Non-allowed `WebFetch`/`WebSearch` surface operator approval prompt; logged | Requires deliberate operator approval; no silent pass |
+| `WebFetch` allow rules + `restrict_network` hook | Allowed `WebFetch`/`WebSearch` are auto-approved; non-allowed are hard-denied before execution | Hook-enforced; cannot be disabled at runtime |
 
-**Residual scenario — indirect reads via agent-written scripts.** The read hooks block direct file access, but an agent could write a Python script that loads `.env` at runtime via `python-dotenv` or `os.environ`, then writes derived values to another workspace file. The hook layer sees `python3 script.py`, not the secret value. The result is captured in `tracer.db` and visible on `#review`. It does not leave the container unless the operator approves a git commit that includes the file.
+**Residual scenario — indirect reads via agent-written scripts.** The read hooks block direct file access, but an agent could write a Python script that loads `.env` at runtime via `python-dotenv` or `os.environ`, then writes derived values to another workspace file. The hook layer sees `python3 script.py`, not the secret value. The result is captured in `tracer.db` and visible via the **`/contained:tracer`** skill. It does not leave the container unless the operator approves a git commit that includes the file.
 
 **Residual scenario — raw socket exfiltration.** An actively adversarial agent could exfiltrate data by opening raw TCP sockets on non-HTTP ports, bypassing both the sandbox domain filter and the `WebFetch` approval flow. Closing this requires iptables DNAT rules on the Docker bridge; see [Known gaps](../README.md#egress-filtering-against-a-malicious-agent). The current controls are designed to prevent accidental exfiltration and require explicit operator approval for all `WebFetch` requests to non-allowed domains — not to stop a determined adversary exploiting arbitrary protocols.
 
@@ -266,13 +268,13 @@ This is not a technical attack; it is a workflow failure. contAIned addresses it
 
 **Controls.**
 - The QA gate (`qa.py`) ensures that syntax, lint, type, and test checks passed before the task was marked closed. The operator is not reviewing raw unvalidated output.
-- `#review <N>` shows the agent's full narrative and a per-file diff summary for any completed task before the operator decides whether to approve a commit.
+- The **`/contained:tracer`** skill shows the agent's full narrative and a per-file diff summary for any completed task before the operator decides whether to approve a commit.
 - The tracer blob store retains every version of every file the agent touched, so diffs are always available even after the session ends.
 - Escalated git mutations are surfaced to the operator's terminal with an explicit approve/deny prompt — approval requires a deliberate keypress, not just inaction.
 
-**Residual risk.** An operator who approves escalated actions without reading `#review` output accepts the full risk of whatever the agent did. contAIned provides the information needed for an informed decision; it cannot compel the operator to read it.
+**Residual risk.** An operator who approves escalated actions without reviewing session history via the **`/contained:tracer`** skill accepts the full risk of whatever the agent did. contAIned provides the information needed for an informed decision; it cannot compel the operator to read it.
 
-**Extensibility.** Stricter enforcement — for example, requiring a `#review` step before any escalated action can be approved, or flagging sessions where the operator approved without opening the review — is achievable by building on contAIned's tracer data, which records the full tool call and approval history for every session.
+**Extensibility.** Stricter enforcement — for example, requiring a tracer review step before any escalated action can be approved, or flagging sessions where the operator approved without reviewing session history — is achievable by building on contAIned's tracer data, which records the full tool call and approval history for every session.
 
 ---
 
@@ -317,9 +319,9 @@ After a successful image build, `contAIned init`:
 
 **It does not enforce kernel-level egress for all protocols.** The sandbox network constraints cover HTTP/HTTPS for Bash subprocesses. `WebFetch` to non-allowed domains requires operator approval. An actively adversarial agent can still exfiltrate data via raw socket connections on non-HTTP ports. Full enforcement requires iptables DNAT rules applied with host root access.
 
-**It does not add content-safety filters.** The agent can generate harmful, offensive, or incorrect text. That text ends up as a workspace file, visible on `#review`, and gated behind operator approval before it enters version control — but it is not prevented.
+**It does not add content-safety filters.** The agent can generate harmful, offensive, or incorrect text. That text ends up as a workspace file, visible via the **`/contained:tracer`** skill, and gated behind operator approval before it enters version control — but it is not prevented.
 
-**It does not protect against a compromised operator.** If the operator approves a malicious escalated action, contAIned has no further recourse. The review tooling (`#review`, diff store) is designed to make informed approval easy; it cannot enforce that the operator reads it.
+**It does not protect against a compromised operator.** If the operator approves a malicious escalated action, contAIned has no further recourse. The review tooling (tracer skill, diff store) is designed to make informed approval easy; it cannot enforce that the operator reads it.
 
 **It does not protect the Claude API or Anthropic infrastructure.** The security of the model itself, the API endpoint, and the TLS connection to `api.anthropic.com` are outside the scope of this model.
 
@@ -338,7 +340,7 @@ The table below maps the threat scenarios and controls described in this documen
 | Excessive agency — layered hook controls, mutation escalation, publish blocking | [LLM06](https://genai.owasp.org/llmrisk/llm06-excessive-agency/) | [AML.T0061](https://atlas.mitre.org/techniques/AML.T0061) |
 | Sensitive information disclosure — read hooks, bash restrictions, egress proxy | [LLM02](https://genai.owasp.org/llmrisk/llm02-sensitive-information-disclosure/), [LLM07](https://genai.owasp.org/llmrisk/llm07-system-prompt-leakage/) | [AML.T0051](https://atlas.mitre.org/techniques/AML.T0051), [AML.T0024](https://atlas.mitre.org/techniques/AML.T0024) |
 | Supply chain — image-layer policy, egress allowlist, publish blocking | [LLM03](https://genai.owasp.org/llmrisk/llm03-supply-chain/) | [AML.T0010](https://atlas.mitre.org/techniques/AML.T0010) |
-| Overreliance — QA gate, `#review`, diff store, escalation workflow | [LLM09](https://genai.owasp.org/llmrisk/llm09-misinformation/) | — |
+| Overreliance — QA gate, tracer skill, diff store, escalation workflow | [LLM09](https://genai.owasp.org/llmrisk/llm09-misinformation/) | — |
 | Training data integrity — diff store, full write traceability | [LLM04](https://genai.owasp.org/llmrisk/llm04-data-and-model-poisoning/) | [AML.T0020](https://atlas.mitre.org/techniques/AML.T0020) |
 | Insecure plugin design — all tools intercepted by image-layer hooks; `strictKnownMarketplaces` gates plugin sources; ecosystem `plugins` and `preinstall` bake approved plugins into the image at build time | [LLM03](https://genai.owasp.org/llmrisk/llm03-supply-chain/) | — |
 | Model theft — read hooks, egress proxy (no weights on-premises) | — | [AML.T0024](https://atlas.mitre.org/techniques/AML.T0024) |

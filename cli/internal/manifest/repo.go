@@ -14,23 +14,22 @@ import (
 
 // RepoManifest is the restricted manifest a repository may commit to
 // .contAIned_manifest.yaml at the repo root. Only two top-level keys are
-// permitted: ecosystems and policy.qa.checks. All other policy settings
-// (network, secrets, bash rules, sigstore, etc.) are owned by the operator
-// manifest and cannot be overridden here.
+// permitted: ecosystems (version field only) and runtime.qa.checks. All other
+// settings are owned by the operator manifest and cannot be overridden here.
 //
 // Ecosystems declares the language runtimes this repository needs. Each key is
-// an ecosystem name defined in the operator manifest's ecosystem_definitions;
-// the value is the version to install (empty string for pre-installed runtimes
-// such as Python). At `contained init` time each declaration is resolved to a
-// toolchain install target and the required network domains are added to the
-// allowlist automatically.
+// an ecosystem name defined in the operator manifest's ecosystems map. Only the
+// Version field may be set; all other EcosystemDef fields are operator-only and
+// are rejected by ValidateRepoManifest. At `contained init` time each declaration
+// is resolved to a toolchain install target and the required network domains are
+// added to the allowlist automatically.
 type RepoManifest struct {
-	Ecosystems map[string]string `yaml:"ecosystems,omitempty"`
-	Policy     RepoPolicy        `yaml:"policy"`
+	Ecosystems map[string]EcosystemDef `yaml:"ecosystems,omitempty"`
+	Runtime    RepoRuntime             `yaml:"runtime"`
 }
 
-// RepoPolicy is the policy section of a repo manifest — QA checks only.
-type RepoPolicy struct {
+// RepoRuntime is the runtime section of a repo manifest — QA checks only.
+type RepoRuntime struct {
 	QA QAConfig `yaml:"qa"`
 }
 
@@ -52,7 +51,7 @@ func LoadRepoManifest(root string) (*RepoManifest, error) {
 	dec.KnownFields(true)
 	if err := dec.Decode(&r); err != nil && err != io.EOF {
 		return nil, fmt.Errorf("repo manifest contains disallowed fields "+
-			"(only ecosystems and policy.qa.checks are permitted): %w", err)
+			"(only ecosystems.version and runtime.qa.checks are permitted): %w", err)
 	}
 
 	return &r, nil
@@ -62,21 +61,51 @@ func LoadRepoManifest(root string) (*RepoManifest, error) {
 // Ecosystem name resolution against operator definitions happens in
 // MergeRepoManifest, which has access to both manifests.
 func ValidateRepoManifest(r *RepoManifest) error {
-	for name := range r.Ecosystems {
+	for name, def := range r.Ecosystems {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("ecosystems: ecosystem name must not be empty")
 		}
+		if err := validateRepoEcosystemDef(name, def); err != nil {
+			return err
+		}
 	}
 
-	for i, check := range r.Policy.QA.Checks {
+	for i, check := range r.Runtime.QA.Checks {
 		if check.Name == "" {
-			return fmt.Errorf("policy.qa.checks[%d].name is required", i)
+			return fmt.Errorf("runtime.qa.checks[%d].name is required", i)
 		}
 		if len(check.Command) == 0 {
-			return fmt.Errorf("policy.qa.checks[%d].command is required", i)
+			return fmt.Errorf("runtime.qa.checks[%d].command is required", i)
 		}
 	}
 
+	return nil
+}
+
+// validateRepoEcosystemDef rejects any EcosystemDef entry in a repo manifest
+// that sets operator-only fields. Repos may only set Version; all other fields
+// (Toolchain, Deps, NetworkDomains, Env, Install, Plugins) are operator-owned.
+// Note: KnownFields(true) on the YAML decoder accepts these fields because they
+// are valid EcosystemDef struct fields, so this explicit check is required.
+func validateRepoEcosystemDef(name string, def EcosystemDef) error {
+	if def.Toolchain != "" {
+		return fmt.Errorf("ecosystems.%s: toolchain is operator-only and may not be set in a repo manifest", name)
+	}
+	if len(def.Deps) > 0 {
+		return fmt.Errorf("ecosystems.%s: deps is operator-only and may not be set in a repo manifest", name)
+	}
+	if len(def.NetworkDomains) > 0 {
+		return fmt.Errorf("ecosystems.%s: network_domains is operator-only and may not be set in a repo manifest", name)
+	}
+	if len(def.Env) > 0 {
+		return fmt.Errorf("ecosystems.%s: env is operator-only and may not be set in a repo manifest", name)
+	}
+	if len(def.Install) > 0 {
+		return fmt.Errorf("ecosystems.%s: install is operator-only and may not be set in a repo manifest", name)
+	}
+	if len(def.Plugins) > 0 {
+		return fmt.Errorf("ecosystems.%s: plugins is operator-only and may not be set in a repo manifest", name)
+	}
 	return nil
 }
 
@@ -84,9 +113,10 @@ func ValidateRepoManifest(r *RepoManifest) error {
 // and returns the merged result. The original manifests are not modified.
 //
 // Ecosystems: each entry in repo.Ecosystems is resolved against the operator
-// manifest's ecosystem_definitions. The resolved toolchain version is installed
-// and the required network domains are added to the allowlist. The repo version
-// must satisfy any floor constraint the operator has set on the underlying toolchain.
+// manifest's ecosystems map. The repo's Version pin must satisfy any constraint
+// the operator set on that ecosystem, and must satisfy any floor constraint on
+// the underlying toolchain. Required network domains are always added to the
+// allowlist regardless of network.enabled.
 //
 // QA checks: concatenated (operator first, repo second). Either or both may be empty.
 //
@@ -96,81 +126,95 @@ func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error
 	merged := *operator
 
 	// Deep-copy mutable fields so we don't mutate the originals.
-	// operator.Runtime.Docker.Toolchains holds floor *constraints* (e.g. ">=1.22"),
+	// operator.Init.Container.Toolchains holds floor *constraints* (e.g. ">=1.22"),
 	// not install versions. Convert each to its minimum concrete version so that
 	// toolchains are always installed with a valid version string even when no
 	// repo manifest overrides the default.
-	merged.Runtime.Docker.Toolchains = make(map[string]string)
-	for k, v := range operator.Runtime.Docker.Toolchains {
-		merged.Runtime.Docker.Toolchains[k] = minVersionFromConstraint(v)
+	merged.Init.Container.Toolchains = make(map[string]string)
+	for k, v := range operator.Init.Container.Toolchains {
+		merged.Init.Container.Toolchains[k] = minVersionFromConstraint(v)
 	}
-	merged.Policy.Network.AllowedDomains = append([]string{}, operator.Policy.Network.AllowedDomains...)
-	merged.Runtime.Docker.Deps = append([]string{}, operator.Runtime.Docker.Deps...)
-	merged.Policy.QA.Setup = append([][]string{}, operator.Policy.QA.Setup...)
+	merged.Runtime.Network.AllowedDomains = append([]string{}, operator.Runtime.Network.AllowedDomains...)
+	merged.Init.Container.Deps = append([]string{}, operator.Init.Container.Deps...)
+	merged.Runtime.QA.Setup = append([][]string{}, operator.Runtime.QA.Setup...)
 
 	if repo == nil {
 		return &merged, nil
 	}
 
 	// Resolve ecosystem declarations to toolchain installs + network domains + env vars.
-	existing := domainSet(merged.Policy.Network.AllowedDomains)
-	for ecoName, version := range repo.Ecosystems {
-		def, ok := operator.EcosystemDefinitions[ecoName]
+	existing := domainSet(merged.Runtime.Network.AllowedDomains)
+	for ecoName, repoDef := range repo.Ecosystems {
+		def, ok := operator.Ecosystems[ecoName]
 		if !ok {
 			return nil, fmt.Errorf(
 				"ecosystem %q is not defined in the operator manifest "+
-					"(add an ecosystem_definitions.%s entry to your manifest.yaml)",
+					"(add an ecosystems.%s entry to your manifest.yaml)",
 				ecoName, ecoName,
 			)
 		}
 
-		// Install toolchain if this ecosystem has one and a version was specified.
-		if def.Toolchain != "" {
-			ver := strings.TrimSpace(version)
-			if ver != "" {
-				// Enforce any floor constraint the operator set on this toolchain.
-				if constraint, exists := operator.Runtime.Docker.Toolchains[def.Toolchain]; exists {
-					sat, err := satisfiesConstraint(constraint, ver)
-					if err != nil {
-						return nil, fmt.Errorf("ecosystem %q toolchain %q: %w", ecoName, def.Toolchain, err)
-					}
-					if !sat {
-						return nil, fmt.Errorf(
-							"ecosystem %q: version %q does not satisfy operator constraint %q for toolchain %q",
-							ecoName, ver, constraint, def.Toolchain,
-						)
-					}
-				}
-				merged.Runtime.Docker.Toolchains[def.Toolchain] = ver
+		ver := strings.TrimSpace(repoDef.Version)
+
+		// Enforce any ecosystem-level version constraint the operator set.
+		if def.Version != "" && ver != "" {
+			sat, err := satisfiesConstraint(def.Version, ver)
+			if err != nil {
+				return nil, fmt.Errorf("ecosystem %q: %w", ecoName, err)
+			}
+			if !sat {
+				return nil, fmt.Errorf(
+					"ecosystem %q: version %q does not satisfy operator constraint %q",
+					ecoName, ver, def.Version,
+				)
 			}
 		}
 
-		// Add network domains when network policy is enabled.
-		if merged.Policy.Network.Enabled {
-			for _, domain := range def.NetworkDomains {
-				if !existing[domain] {
-					merged.Policy.Network.AllowedDomains = append(merged.Policy.Network.AllowedDomains, domain)
-					existing[domain] = true
+		// Install toolchain if this ecosystem has one and a version was specified.
+		if def.Toolchain != "" && ver != "" {
+			// Also enforce any floor constraint on the underlying toolchain.
+			if constraint, exists := operator.Init.Container.Toolchains[def.Toolchain]; exists {
+				sat, err := satisfiesConstraint(constraint, ver)
+				if err != nil {
+					return nil, fmt.Errorf("ecosystem %q toolchain %q: %w", ecoName, def.Toolchain, err)
 				}
+				if !sat {
+					return nil, fmt.Errorf(
+						"ecosystem %q: version %q does not satisfy operator toolchain constraint %q for %q",
+						ecoName, ver, constraint, def.Toolchain,
+					)
+				}
+			}
+			merged.Init.Container.Toolchains[def.Toolchain] = ver
+		}
+
+		// Always add ecosystem network domains regardless of network.enabled.
+		// The enabled flag gates hook enforcement; the domain list is also consumed
+		// by the sandbox allowedDomains filter (OS-level), which must include
+		// package-registry domains so that toolchain installs (pip, go get, …) work.
+		for _, domain := range def.NetworkDomains {
+			if !existing[domain] {
+				merged.Runtime.Network.AllowedDomains = append(merged.Runtime.Network.AllowedDomains, domain)
+				existing[domain] = true
 			}
 		}
 
 		// Merge ecosystem env vars (last writer wins for duplicate keys).
 		if len(def.Env) > 0 {
-			if merged.Runtime.Docker.Env == nil {
-				merged.Runtime.Docker.Env = make(map[string]string)
+			if merged.Init.Container.Env == nil {
+				merged.Init.Container.Env = make(map[string]string)
 			}
 			for k, v := range def.Env {
-				merged.Runtime.Docker.Env[k] = v
+				merged.Init.Container.Env[k] = v
 			}
 		}
 
 		// Collect ecosystem deps (deduplicated).
 		if len(def.Deps) > 0 {
-			seen := sliceSet(merged.Runtime.Docker.Deps)
+			seen := sliceSet(merged.Init.Container.Deps)
 			for _, dep := range def.Deps {
 				if !seen[dep] {
-					merged.Runtime.Docker.Deps = append(merged.Runtime.Docker.Deps, dep)
+					merged.Init.Container.Deps = append(merged.Init.Container.Deps, dep)
 					seen[dep] = true
 				}
 			}
@@ -180,22 +224,22 @@ func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error
 		if len(def.Install) > 0 {
 			key := strings.Join(def.Install, " ")
 			already := false
-			for _, existing := range merged.Policy.QA.Setup {
-				if strings.Join(existing, " ") == key {
+			for _, cmd := range merged.Runtime.QA.Setup {
+				if strings.Join(cmd, " ") == key {
 					already = true
 					break
 				}
 			}
 			if !already {
-				merged.Policy.QA.Setup = append(merged.Policy.QA.Setup, def.Install)
+				merged.Runtime.QA.Setup = append(merged.Runtime.QA.Setup, def.Install)
 			}
 		}
 	}
 
 	// Concatenate QA checks: operator first, then repo.
-	merged.Policy.QA.Checks = append(
-		append([]QACheck{}, operator.Policy.QA.Checks...),
-		repo.Policy.QA.Checks...,
+	merged.Runtime.QA.Checks = append(
+		append([]QACheck{}, operator.Runtime.QA.Checks...),
+		repo.Runtime.QA.Checks...,
 	)
 
 	return &merged, nil
@@ -220,13 +264,13 @@ func CollectPlugins(operator *Manifest, repo *RepoManifest) []PluginRef {
 		}
 	}
 
-	for _, p := range operator.Policy.Plugins.Preinstall {
+	for _, p := range operator.Init.Plugins.Preinstall {
 		add(p)
 	}
 
 	if repo != nil {
 		for ecoName := range repo.Ecosystems {
-			if def, ok := operator.EcosystemDefinitions[ecoName]; ok {
+			if def, ok := operator.Ecosystems[ecoName]; ok {
 				for _, p := range def.Plugins {
 					add(p)
 				}
@@ -270,7 +314,7 @@ func CollectMarketplaceClones(operator *Manifest, plugins []PluginRef) []Marketp
 		}
 	}
 
-	p := operator.Policy.Plugins
+	p := operator.Init.Plugins
 	if p.BuiltinMarketplace != nil && *p.BuiltinMarketplace && used["claude-plugins-official"] {
 		add(MarketplaceClone{
 			Name: "claude-plugins-official",

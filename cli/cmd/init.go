@@ -173,15 +173,15 @@ func runInit(_ *cobra.Command, args []string) error {
 			if err := manifest.Validate(m); err != nil {
 				return fmt.Errorf("mAInlined policy_yaml validation: %w", err)
 			}
-			// The registration endpoint may omit policy_version even though the
-			// policy_yaml it returns contains it at policy.mAInlined.policy_version.
-			// PolicyConfig.mAInlined is unexported so yaml.v3 can't unmarshal into
-			// it; extract the version from the raw YAML string instead.
+			// The registration endpoint may omit policy_version; extract it from
+			// the returned policy_yaml if so.
 			policyVersion := reg.PolicyVersion
 			if policyVersion == "" {
-				policyVersion = manifest.ExtractPolicyVersion(reg.PolicyYAML)
+				if parsed, parseErr := manifest.Parse([]byte(reg.PolicyYAML)); parseErr == nil {
+					policyVersion = manifest.ExtractPolicyVersion(parsed)
+				}
 			}
-			m.Mainlined = manifest.MainlinedSection{
+			m.Init.Mainlined = manifest.MainlinedConfig{
 				URL:           initmAInlinedURL,
 				PolicyRef:     reg.PolicyRef,
 				PolicyVersion: policyVersion,
@@ -234,21 +234,21 @@ func runInit(_ *cobra.Command, args []string) error {
 	if repoManifest != nil {
 		dim.Printf("  Repo manifest merged: %d ecosystem(s), %d QA check(s).\n",
 			len(repoManifest.Ecosystems),
-			len(repoManifest.Policy.QA.Checks),
+			len(repoManifest.Runtime.QA.Checks),
 		)
 	}
 
 	// Derive image tag from workspace name when the manifest uses the generic default.
 	// This ensures each project gets its own image tag automatically, so multiple
 	// projects can coexist without rebuilding overwriting a shared contained:latest.
-	if m.Runtime.Docker.Image == "contained:latest" {
-		m.Runtime.Docker.Image = "contained:" + sanitizeImageTag(filepath.Base(target))
+	if m.Init.Container.Image == "contained:latest" {
+		m.Init.Container.Image = "contained:" + sanitizeImageTag(filepath.Base(target))
 		// Re-serialise so the baked manifest reflects the real tag.
 		manifestContent, err = manifest.Serialise(m)
 		if err != nil {
 			return err
 		}
-		dim.Printf("  Image tag: %s (derived from workspace name)\n", m.Runtime.Docker.Image)
+		dim.Printf("  Image tag: %s (derived from workspace name)\n", m.Init.Container.Image)
 	}
 
 	// ── Flow B: deferred mAInlined registration ─────────────────────────────
@@ -271,15 +271,30 @@ func runInit(_ *cobra.Command, args []string) error {
 		mAInlinedAPIKey = reg.APIKey
 		mAInlinedUsed = mAInlinedParsed
 
-		// The registration endpoint may omit policy_version; extract it from
-		// the returned policy_yaml (at policy.mAInlined.policy_version) if so.
+		// The registration endpoint may omit policy_ref / policy_version.
+		// Fall back to values already present in the input manifest so that
+		// a re-init (--rebuild) with a pre-populated manifest never sends
+		// empty required fields to the provenance intimation endpoint.
+		policyRefB := reg.PolicyRef
+		if policyRefB == "" {
+			policyRefB = m.Init.Mainlined.PolicyRef
+		}
+		if policyRefB == "" {
+			policyRefB = m.Init.Mainlined.PolicyName // last resort
+		}
 		policyVersionB := reg.PolicyVersion
 		if policyVersionB == "" {
-			policyVersionB = manifest.ExtractPolicyVersion(reg.PolicyYAML)
+			if parsed, parseErr := manifest.Parse([]byte(reg.PolicyYAML)); parseErr == nil {
+				policyVersionB = manifest.ExtractPolicyVersion(parsed)
+			}
 		}
-		m.Mainlined = manifest.MainlinedSection{
+		if policyVersionB == "" {
+			policyVersionB = m.Init.Mainlined.PolicyVersion
+		}
+		m.Init.Mainlined = manifest.MainlinedConfig{
 			URL:           initmAInlinedURL,
-			PolicyRef:     reg.PolicyRef,
+			PolicyName:    m.Init.Mainlined.PolicyName,
+			PolicyRef:     policyRefB,
 			PolicyVersion: policyVersionB,
 			PolicyYAML:    reg.PolicyYAML,
 		}
@@ -320,12 +335,12 @@ func runInit(_ *cobra.Command, args []string) error {
 	plugins := manifest.CollectPlugins(m, repoManifest)
 	pluginsArg := manifest.EncodePluginsArg(plugins)
 	clonesArg := manifest.EncodeMarketplaceClonesArg(manifest.CollectMarketplaceClones(m, plugins))
-	netrcArg := manifest.EncodeNetrcFromSecretsArg(m.Runtime.Docker.ExtraSecrets)
+	netrcArg := manifest.EncodeNetrcFromSecretsArg(m.Init.Container.ExtraSecrets)
 
 	// Docker: build image + ensure volume + network.
 	printf := func(f string, a ...any) { fmt.Printf(f, a...) }
 	imageRebuilt, err := docker.DockerSetup(
-		m.Runtime.Docker,
+		m.Init.Container,
 		target,
 		initRebuild,
 		manifestContent,
@@ -355,17 +370,17 @@ func runInit(_ *cobra.Command, args []string) error {
 	}
 
 	// Sigstore image signing — when enabled and image was (re)built.
-	if m.Policy.Sigstore.Enabled && imageRebuilt {
+	if m.Init.Sigstore.Enabled && imageRebuilt {
 		bundleDest := filepath.Join(target, ".contAIned", "provenance.bundle")
 		fmt.Print("  Signing image with Sigstore …")
 		prov, err := sigstore.SignImage(
-			m.Runtime.Docker.Image,
-			m.Policy.Sigstore.RekorURL,
-			m.Policy.Sigstore.FulcioURL,
+			m.Init.Container.Image,
+			m.Init.Sigstore.RekorURL,
+			m.Init.Sigstore.FulcioURL,
 			bundleDest,
-			idToken,                   // reuse mAInlined OIDC token (aud=sigstore); "" = cosign drives its own flow
-			m.Mainlined.PolicyRef,     // included in the signed payload → bound in Rekor entry
-			m.Mainlined.PolicyVersion, // included in the signed payload → bound in Rekor entry
+			idToken,                        // reuse mAInlined OIDC token (aud=sigstore); "" = cosign drives its own flow
+			m.Init.Mainlined.PolicyRef,     // included in the signed payload → bound in Rekor entry
+			m.Init.Mainlined.PolicyVersion, // included in the signed payload → bound in Rekor entry
 		)
 		if err != nil {
 			fmt.Printf(" warning\n  Warning: image signing failed — workspace will function but lacks Sigstore provenance.\n  %v\n", err)
@@ -385,20 +400,26 @@ func runInit(_ *cobra.Command, args []string) error {
 			// Only when mAInlined was used for this init; skip when sigstore.enabled: false
 			// (already inside that guard) or when mAInlined was not configured.
 			if mAInlinedUsed != nil {
-				dim.Printf("  Intimating provenance to mAInlined …\n")
-				mainlined.IntimateProvenance(
-					*mAInlinedUsed,
-					mAInlinedAPIKey,
-					prov.OperatorIdentity,
-					target,
-					initmAInlinedURL,
-					m.Mainlined.PolicyRef,
-					m.Mainlined.PolicyVersion,
-					m.Runtime.Docker.Image,
-					prov.ImageDigest,
-					prov.RekorLogIndex,
-					m.Policy.Sigstore.RekorURL,
-				)
+				if m.Init.Mainlined.PolicyRef == "" || m.Init.Mainlined.PolicyVersion == "" {
+					fmt.Printf("  Skipping provenance intimation — policy_ref or policy_version not set "+
+						"(ref=%q version=%q).\n",
+						m.Init.Mainlined.PolicyRef, m.Init.Mainlined.PolicyVersion)
+				} else {
+					dim.Printf("  Intimating provenance to mAInlined …\n")
+					mainlined.IntimateProvenance(
+						*mAInlinedUsed,
+						mAInlinedAPIKey,
+						prov.OperatorIdentity,
+						target,
+						initmAInlinedURL,
+						m.Init.Mainlined.PolicyRef,
+						m.Init.Mainlined.PolicyVersion,
+						m.Init.Container.Image,
+						prov.ImageDigest,
+						prov.RekorLogIndex,
+						m.Init.Sigstore.RekorURL,
+					)
+				}
 			}
 		}
 	}
@@ -431,10 +452,10 @@ func runInit(_ *cobra.Command, args []string) error {
 
 	// Report merged ecosystems and QA checks in the results table.
 	if repoManifest != nil {
-		for name, version := range repoManifest.Ecosystems {
-			results = append(results, result{"ecosystem: " + name, version})
+		for name, def := range repoManifest.Ecosystems {
+			results = append(results, result{"ecosystem: " + name, def.Version})
 		}
-		for _, check := range repoManifest.Policy.QA.Checks {
+		for _, check := range repoManifest.Runtime.QA.Checks {
 			results = append(results, result{"qa check: " + check.Name, "merged"})
 		}
 	}
@@ -558,7 +579,7 @@ func printEcosystemStarterAndExit(ecosystems []string) error {
 	} else {
 		// Multiple ecosystems: merge ecosystem declarations (union) and QA checks (concatenated).
 		merged := &manifest.RepoManifest{}
-		merged.Ecosystems = make(map[string]string)
+		merged.Ecosystems = make(map[string]manifest.EcosystemDef)
 		for _, name := range ecosystems {
 			raw, err := scaffold.TemplateContent(ecosystemTemplates[name])
 			if err != nil {
@@ -571,7 +592,7 @@ func printEcosystemStarterAndExit(ecosystems []string) error {
 			for k, v := range r.Ecosystems {
 				merged.Ecosystems[k] = v
 			}
-			merged.Policy.QA.Checks = append(merged.Policy.QA.Checks, r.Policy.QA.Checks...)
+			merged.Runtime.QA.Checks = append(merged.Runtime.QA.Checks, r.Runtime.QA.Checks...)
 		}
 		out, err := yaml.Marshal(merged)
 		if err != nil {

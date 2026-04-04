@@ -120,6 +120,7 @@ func ManagedFiles() []ManagedFile {
 		hook("restrict_reads.py"),
 		hook("restrict_writes.py"),
 		hook("restrict_bash.py"),
+		hook("restrict_network.py"),
 		hook("audit.py"),
 		hook("permission_request.py"),
 		hook("tracer_pre.py"),
