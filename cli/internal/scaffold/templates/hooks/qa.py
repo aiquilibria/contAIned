@@ -33,7 +33,9 @@ policy   = load_policy(cwd)
 checks   = policy["qa"].get("checks", [])
 
 # ── Fetch touched files for when_changed evaluation ───────────────────────────
-_touched: list[str] = []
+# None  → tracer lookup failed; when_changed guards are bypassed (all checks run).
+# []    → no session or session has no recorded changes; when_changed checks skip.
+_touched: list[str] | None = []
 _session_id = event.get("session_id")
 if _session_id:
     try:
@@ -41,7 +43,7 @@ if _session_id:
         _tracer  = contAInedTracer(str(Path(cwd) / ".contAIned" / "tracer.db"))
         _touched = _tracer.list_touched_files(_session_id)
     except Exception:
-        pass  # tracer unavailable — when_changed guards will not filter
+        _touched = None  # tracer unavailable → bypass when_changed, run all checks
 
 
 def run(cmd: list) -> tuple[int, str]:
@@ -60,8 +62,14 @@ def _expand(entry) -> dict:
     }
 
 
-def _files_match(touched: list[str], patterns: list[str]) -> bool:
-    """Return True if any touched filename matches any fnmatch glob pattern."""
+def _files_match(touched: list[str] | None, patterns: list[str]) -> bool:
+    """Return True if any touched filename matches any fnmatch glob pattern.
+
+    Returns True when *touched* is None (tracer unavailable) so that
+    when_changed guards are bypassed and all checks run unconditionally.
+    """
+    if touched is None:
+        return True
     return any(
         fnmatch.fnmatch(Path(f).name, pat)
         for f in touched

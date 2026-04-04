@@ -35,7 +35,9 @@ def _expand(entry) -> dict:
     }
 
 
-def _files_match(touched: list[str], patterns: list[str]) -> bool:
+def _files_match(touched: list[str] | None, patterns: list[str]) -> bool:
+    if touched is None:
+        return True
     return any(fnmatch.fnmatch(Path(f).name, pat) for f in touched for pat in patterns)
 
 
@@ -88,6 +90,14 @@ class TestFilesMatch:
 
     def test_empty_patterns_never_matches(self):
         assert _files_match(["/workspace/foo.py"], []) is False
+
+    def test_none_touched_always_matches(self):
+        """None means tracer unavailable — bypass when_changed so checks run."""
+        assert _files_match(None, ["*.py"]) is True
+
+    def test_none_touched_matches_any_pattern(self):
+        assert _files_match(None, ["*.go"]) is True
+
 
 
 # ── Integration: run full QA_HOOK via subprocess ──────────────────────────────
@@ -185,8 +195,8 @@ class TestQAHookIntegration:
                 }
             }
         }
-        # No touched files — tracer unavailable; when_changed guard fires anyway
-        # because _touched is empty, so _files_match returns False.
+        # session_id: None → _touched defaults to [] (no session = nothing touched)
+        # → _files_match([], ["*.ts"]) = False → check is skipped.
         event = {"cwd": str(tmp_path), "session_id": None}
         out = _run_hook_with_manifest(tmp_path, manifest, event)
         assert out.get("decision") != "block"
