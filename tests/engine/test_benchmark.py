@@ -83,13 +83,13 @@ _ALLOWED_DOMAINS = ["api.anthropic.com", "code.claude.com", "docs.anthropic.com"
 
 # Pre-built entities for evaluate()-only benchmarks (isolate build cost).
 _fp_workspace = build_file_path_entity("/workspace/src/main.py", _SECRETS)
-_fp_secret    = build_file_path_entity("/workspace/.env",        _SECRETS)
-_fp_outside   = build_file_path_entity("/etc/passwd",            _SECRETS)
-_bash_git     = build_bash_command_entity("git status",          _SECRETS)
-_bash_rm      = build_bash_command_entity("rm -rf /tmp/x",       _SECRETS)
-_bash_cd      = build_bash_command_entity("cd /workspace/cli",   _SECRETS)
-_net_ok       = build_network_resource_entity("https://api.anthropic.com/v1/messages", _ALLOWED_DOMAINS)
-_net_bad      = build_network_resource_entity("https://evil.com/exfil",                _ALLOWED_DOMAINS)
+_fp_secret = build_file_path_entity("/workspace/.env", _SECRETS)
+_fp_outside = build_file_path_entity("/etc/passwd", _SECRETS)
+_bash_git = build_bash_command_entity("git status", _SECRETS)
+_bash_rm = build_bash_command_entity("rm -rf /tmp/x", _SECRETS)
+_bash_cd = build_bash_command_entity("cd /workspace/cli", _SECRETS)
+_net_ok = build_network_resource_entity("https://api.anthropic.com/v1/messages", _ALLOWED_DOMAINS)
+_net_bad = build_network_resource_entity("https://evil.com/exfil", _ALLOWED_DOMAINS)
 
 # ---------------------------------------------------------------------------
 # Entity-build benchmarks
@@ -123,7 +123,8 @@ def test_build_bash_cd(benchmark):
 
 def test_build_network_allowed(benchmark):
     benchmark.name = "build NetworkResource (allowed domain)"
-    benchmark(build_network_resource_entity, "https://api.anthropic.com/v1/messages", _ALLOWED_DOMAINS)
+    url = "https://api.anthropic.com/v1/messages"
+    benchmark(build_network_resource_entity, url, _ALLOWED_DOMAINS)
 
 
 def test_build_network_blocked(benchmark):

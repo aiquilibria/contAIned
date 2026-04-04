@@ -99,7 +99,6 @@ class TestFilesMatch:
         assert _files_match(None, ["*.go"]) is True
 
 
-
 # ── Integration: run full QA_HOOK via subprocess ──────────────────────────────
 
 

@@ -181,11 +181,11 @@ def _extract_policy_from_manifest(manifest: dict) -> dict:
     init_cfg = manifest.get("init", {})
     if "rules" in runtime:
         overlay: dict[str, Any] = {
-            "rules":   runtime.get("rules", []),
+            "rules": runtime.get("rules", []),
             "network": runtime.get("network", {}),
-            "qa":      runtime.get("qa", {}),
-            "mcp":     init_cfg.get("mcp", {}),
-            "skills":  init_cfg.get("skills", {}),
+            "qa": runtime.get("qa", {}),
+            "mcp": init_cfg.get("mcp", {}),
+            "skills": init_cfg.get("skills", {}),
         }
         return _deep_merge(_DEFAULTS, overlay)
     # Old schema: policy.* (pre-v2 manifests and workspace manifest).
@@ -209,9 +209,9 @@ def _load_policy() -> dict[str, Any]:
                 manifest = yaml.safe_load(fh) or {}
             policy = _extract_policy_from_manifest(manifest)
             if "rules" in policy:
-                return policy   # found Cedar rules — use immediately
+                return policy  # found Cedar rules — use immediately
             if best is None:
-                best = policy   # remember first readable manifest as fallback
+                best = policy  # remember first readable manifest as fallback
         except Exception:
             continue
     return best if best is not None else dict(_DEFAULTS)
