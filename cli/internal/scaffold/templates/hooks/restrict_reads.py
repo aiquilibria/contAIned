@@ -76,6 +76,9 @@ def _log(event: dict, target: str, policy_data: dict) -> None:
         pass
 
 
+_IMAGES_MOUNT   = "/workspace/.images/"
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".pdf"}
+
 try:
     event = json.load(sys.stdin)
 except json.JSONDecodeError:
@@ -83,6 +86,23 @@ except json.JSONDecodeError:
 
 tool       = event.get("tool_name", "")
 tool_input = event.get("tool_input", {})
+
+# ── /workspace/.images/ gate ──────────────────────────────────────────────────
+# Allow image files; block everything else. This is enforced before the policy
+# engine so it applies regardless of engine availability.
+if tool in ("Read", "Glob", "Grep"):
+    _target = (
+        tool_input.get("file_path")
+        or tool_input.get("path")
+        or tool_input.get("pattern")
+        or ""
+    )
+    if _target.startswith(_IMAGES_MOUNT):
+        if Path(_target).suffix.lower() in _IMAGE_SUFFIXES:
+            _allow()
+        else:
+            _deny(f"Only image files are accessible under {_IMAGES_MOUNT}")
+        sys.exit(0)
 
 if tool not in ("Read", "Glob", "Grep"):
     sys.exit(0)

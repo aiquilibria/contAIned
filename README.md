@@ -23,6 +23,7 @@ The agent operates within a defined workspace inside an isolated Docker containe
   - [Egress filtering](#egress-filtering)
   - [Tracer](#tracer)
 - [Customizing policy](#customizing-policy)
+- [Image support](#image-support)
 - [Known gaps](#known-gaps)
   - [QA hook coverage](#qa-hook-coverage)
   - [Garbage collection](#garbage-collection-tracerdb)
@@ -157,7 +158,16 @@ Installs to `/usr/local/bin` (prompts for `sudo` if needed) or `~/.local/bin` as
 
 The `contained` binary is a single self-contained executable with no runtime dependencies beyond Docker.
 
-**Prerequisites:** Docker must be installed and running. `cosign` is optional — required only if you enable build provenance (Sigstore) during `contAIned init`. Install cosign: https://docs.sigstore.dev/cosign/system_config/installation/
+**Prerequisites:** Docker must be installed and running. `contained init` checks all host dependencies and auto-installs optional ones where possible:
+
+| Dependency | Required? | `contained init` behaviour |
+|------------|-----------|---------------------------|
+| Docker | Yes | Detected; install hint shown if missing |
+| `cosign` | Optional (Sigstore provenance) | Auto-installed via Homebrew on macOS; apt hint on Linux |
+| `pngpaste` | Optional (clipboard image paste) | Auto-installed via Homebrew on macOS |
+| `xclip` / `wl-paste` | Optional (clipboard image paste) | apt hint on Linux |
+
+If Docker is missing, install [Docker Desktop](https://www.docker.com/products/docker-desktop/) (macOS/Windows) or follow the [Linux engine install guide](https://docs.docker.com/engine/install/).
 
 ## Quickstart
 
@@ -706,6 +716,36 @@ This limits the agent to exactly the plugins your organization has reviewed, wit
 
 ---
 
+## Image support
+
+The contAIned agent runs inside a Docker container and has no access to the host filesystem or clipboard. Two gestures are supported for sharing images with the agent, matching the experience of native Claude Code on the host:
+
+**Drag and drop** — drag any image file from the host OS onto the terminal window. The contAIned CLI intercepts the drop via bracketed paste mode, copies the file into `<workspace>/.images/`, and injects the container-side path into the compose buffer. A `[contAIned] image copied →` confirmation line is printed to the terminal.
+
+**Ctrl+V (clipboard paste)** — after copying an image to the host clipboard, press Ctrl+V. A background watcher saves the clipboard image to `<workspace>/.images/clipboard.png`, and the CLI intercepts the keystroke to inject that path. A `[contAIned] clipboard image ready` line confirms the action.
+
+Both paths are handled entirely by the CLI before input reaches Claude Code. The agent sees only the container-side path and reads the file via its normal `Read` tool.
+
+### Platform prerequisites
+
+| Platform | Required tool | Install |
+|---|---|---|
+| macOS | `pngpaste` | `brew install pngpaste` |
+| Linux (Wayland) | `wl-paste` | usually included in `wl-clipboard` |
+| Linux (X11) | `xclip` | `apt install xclip` / `dnf install xclip` |
+
+If the clipboard tool is not found, drag and drop still works. The watcher starts without clipboard support and logs a one-time warning.
+
+### Unsupported approaches
+
+| Approach | Why not supported |
+|---|---|
+| Typing a host path manually | The PTY only intercepts paste events, not individual keystrokes |
+| Referencing an image by URL | Use `WebFetch` if the model needs a remote image |
+| Broad directory mounts | Unnecessary — they expose more of the host filesystem than needed; explicit sharing is sufficient |
+
+---
+
 ## Known gaps
 
 ### QA hook coverage
@@ -754,5 +794,7 @@ iptables -t nat -A PREROUTING -i "$BRIDGE" -p tcp --dport 443 -j REDIRECT --to-p
 ---
 
 ## Security model
+
+**Image sharing is consistent with contAIned's isolation model.** The design deliberately avoids broad host directory mounts: only files the operator explicitly shares (by dragging or pasting) ever enter the container. The PTY wrapper intercepts at the input boundary so the agent never sees raw host paths — it receives only container-side paths under `/workspace/.images/`. Files are copied (not symlinked), so the agent's view is fully self-contained within `/workspace/` and cannot traverse to unintended host locations. The `restrict_reads` hook enforces image-only access under `/workspace/.images/` at the policy layer, blocking non-image files even if they were somehow placed there. The single `clipboard.png` entry mirrors the native clipboard mental model — there is no accumulating history of unintended images in the workspace.
 
 contAIned's trust boundaries, enforcement architecture, and threat analysis are documented in [docs/security-model.md](./docs/security-model.md). The document covers the principal trust hierarchy, a walkthrough of each containment layer, concrete threat scenarios (prompt injection, adversarial agent, data exfiltration, supply chain attack, operator overreliance), and explicit statements of what contAIned does not guarantee. A cross-reference table maps the analysis to [OWASP Top 10 for LLM Applications](https://owasp.org/www-project-top-10-for-large-language-model-applications/) and [MITRE ATLAS](https://atlas.mitre.org/) for readers working within those frameworks.

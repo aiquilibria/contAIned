@@ -2,13 +2,16 @@ package docker
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 
+	"contained.dev/cli/internal/fileutil"
 	"contained.dev/cli/internal/manifest"
+	"contained.dev/cli/internal/pty"
+	"contained.dev/cli/internal/watch"
 	"gopkg.in/yaml.v3"
 )
 
@@ -186,12 +189,32 @@ func (r *Runner) RunRepl() error {
 	args = append(args, keyArgs...)
 	args = append(args, image)
 
-	cmd := exec.Command(args[0], args[1:]...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Prepare the .images/ directory inside the workspace. This directory is
+	// accessible inside the container at /workspace/.images/ via the existing
+	// workspace bind-mount and serves as the bridge for shared images.
+	imagesDir := filepath.Join(r.workspace, ".images")
+	if err := os.MkdirAll(imagesDir, 0o755); err != nil {
+		return fmt.Errorf("creating .images dir: %w", err)
+	}
+	if err := ensureGitignore(r.workspace, ".images/"); err != nil {
+		return fmt.Errorf("updating .gitignore: %w", err)
+	}
 
-	if err := cmd.Run(); err != nil {
+	if watcher, err := watch.Start(r.workspace); err != nil {
+		fmt.Fprintf(os.Stderr, "[contAIned] clipboard watch unavailable: %v\n", err)
+	} else {
+		fmt.Fprintf(os.Stderr, "[contAIned] clipboard watcher active\n")
+		defer watcher.Stop()
+	}
+
+	cmd := exec.Command(args[0], args[1:]...)
+
+	w, err := pty.Start(cmd, r.workspace)
+	if err != nil {
+		return fmt.Errorf("starting PTY: %w", err)
+	}
+
+	if err := w.Wait(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			os.Exit(exitErr.ExitCode())
 		}
@@ -285,7 +308,7 @@ func provenance(workspace, image, mainlinedURL string) (tmpDir string, args []st
 
 	provBundle := filepath.Join(workspace, ".contAIned", "provenance.bundle")
 	if _, err := os.Stat(provBundle); err == nil {
-		if err := copyFile(provBundle, filepath.Join(tmp, "provenance.bundle")); err != nil {
+		if err := fileutil.CopyFile(provBundle, filepath.Join(tmp, "provenance.bundle")); err != nil {
 			os.RemoveAll(tmp)
 			return "", nil, err
 		}
@@ -297,21 +320,24 @@ func provenance(workspace, image, mainlinedURL string) (tmpDir string, args []st
 	return tmp, args, nil
 }
 
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
+// ensureGitignore appends entry to <workspace>/.gitignore if not already
+// present, creating the file if needed.
+func ensureGitignore(workspace, entry string) error {
+	gitignorePath := filepath.Join(workspace, ".gitignore")
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == entry {
+			return nil
+		}
+	}
+	f, err := os.OpenFile(gitignorePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return err
 	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-
-	if _, err = io.Copy(out, in); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
+	defer f.Close()
+	_, err = fmt.Fprintf(f, "\n# contAIned — shared images (operator drop zone)\n%s\n", entry)
+	return err
 }

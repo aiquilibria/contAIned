@@ -19,6 +19,7 @@ import (
 	"contained.dev/cli/internal/oidc"
 	"contained.dev/cli/internal/scaffold"
 	"contained.dev/cli/internal/sigstore"
+	"contained.dev/cli/internal/watch"
 )
 
 var initCmd = &cobra.Command{
@@ -461,6 +462,11 @@ func runInit(_ *cobra.Command, args []string) error {
 	}
 
 	results = append(results, result{".contAIned/manifest.yaml", manifestStatus})
+
+	// Host dependencies — detect and auto-install where possible.
+	results = append(results, result{"host: docker", docker.EnsureDocker()})
+	results = append(results, result{"host: cosign", sigstore.EnsureCosign()})
+	results = append(results, result{"host: clipboard", watch.EnsureDeps()})
 
 	// Directory markers.
 	markerStatus, err := scaffold.Touch(filepath.Join(target, ".contAIned", "audit", ".gitkeep"))
