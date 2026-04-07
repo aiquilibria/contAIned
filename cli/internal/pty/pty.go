@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package pty wraps an exec.Cmd in a host PTY, enabling raw-mode terminal
 // passthrough with proper resize handling. It is used by the contAIned runner
 // to sit between the operator's terminal and the docker process, allowing
