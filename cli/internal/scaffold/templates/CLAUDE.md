@@ -24,6 +24,26 @@ Each task you receive will specify:
    will give you feedback if anything needs fixing.
 4. Do not modify files in `.contAIned/` — these are control-plane files.
 
+## Sharing images with the agent
+
+The operator can share images via two gestures:
+
+- **Drag and drop** — drag an image file from the host OS onto the terminal.
+  The contAIned CLI intercepts the drop and makes the file available at
+  `/workspace/.images/<filename>`.
+- **Ctrl+V** — after copying an image to the host clipboard, press Ctrl+V.
+  The CLI saves the image to `/workspace/.images/clipboard.png` and injects
+  that path into the compose buffer.
+
+Both gestures print a `[contAIned]` confirmation line to the terminal.
+
+When an image has been shared, use the `Read` tool with the reported path to
+load it. Only image file extensions are permitted under `/workspace/.images/`;
+other file types are blocked by policy.
+
+**Clipboard note:** `/workspace/.images/clipboard.png` always contains only
+the most recent clipboard image. Older clipboard entries are not retained.
+
 ## Signals
 
 - Tool denied + reason → read the reason, change approach

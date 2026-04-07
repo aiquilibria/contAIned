@@ -52,3 +52,5 @@ pytest-of-agent*
 .ripgreprc
 .zprofile
 .zshrc
+# contAIned — shared images (operator drop zone)
+.images/
