@@ -195,8 +195,8 @@ func TestGenerateToolchainsScript_Go_ContainsTarballURL(t *testing.T) {
 	if !strings.Contains(script, "go1.22.5") {
 		t.Error("Go script should reference version 1.22.5")
 	}
-	if !strings.Contains(script, "go.dev/dl/") {
-		t.Error("Go script should download from go.dev")
+	if !strings.Contains(script, "dl.google.com/go/") {
+		t.Error("Go script should download from dl.google.com/go/")
 	}
 	if !strings.Contains(script, "/usr/local") {
 		t.Error("Go script should extract to /usr/local")
@@ -261,7 +261,7 @@ func TestGenerateToolchainsScript_MultipleToolchains(t *testing.T) {
 		"go":   "1.22.5",
 		"node": "20",
 	})
-	if !strings.Contains(script, "go.dev") {
+	if !strings.Contains(script, "dl.google.com/go/") {
 		t.Error("script should contain Go installation")
 	}
 	if !strings.Contains(script, "nodesource") {
