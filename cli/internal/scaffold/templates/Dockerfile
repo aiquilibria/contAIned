@@ -24,10 +24,13 @@ RUN set -eux; \
     GCS="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"; \
     PLATFORM="linux-${ARCH}"; \
     CHECKSUM=$(curl -fsSL --retry 3 --retry-delay 5 "${GCS}/${CLAUDE_CODE_VERSION}/manifest.json" \
-        | python3 -c "import sys,json; print(json.load(sys.stdin)['platforms']['${PLATFORM}']['checksum'])"); \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['platforms']['${PLATFORM}']['checksum'])") \
+        || { echo "ERROR: Failed to fetch Claude Code ${CLAUDE_CODE_VERSION} manifest after 3 retries — check network connectivity to storage.googleapis.com"; exit 1; }; \
     mkdir -p /opt/claude-code; \
-    curl -fsSL --retry 3 --retry-delay 5 -o /opt/claude-code/claude "${GCS}/${CLAUDE_CODE_VERSION}/${PLATFORM}/claude"; \
-    echo "${CHECKSUM}  /opt/claude-code/claude" | sha256sum -c -; \
+    curl -fsSL --retry 3 --retry-delay 5 -o /opt/claude-code/claude "${GCS}/${CLAUDE_CODE_VERSION}/${PLATFORM}/claude" \
+        || { echo "ERROR: Failed to download Claude Code ${CLAUDE_CODE_VERSION} for ${PLATFORM} after 3 retries — check network connectivity to storage.googleapis.com"; exit 1; }; \
+    echo "${CHECKSUM}  /opt/claude-code/claude" | sha256sum -c - \
+        || { echo "ERROR: Claude Code ${CLAUDE_CODE_VERSION} checksum mismatch — binary may be corrupt, retry the build"; exit 1; }; \
     chmod 755 /opt/claude-code/claude
 
 # Install declared toolchains (go, node, ruby, java).

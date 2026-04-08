@@ -525,7 +525,7 @@ func GenerateDepsScript(deps []string) string {
 		switch dep {
 		case "golangci-lint":
 			b.WriteString("# golangci-lint\n")
-			b.WriteString("GOBIN=/usr/local/bin go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest\n\n")
+			b.WriteString("n=0; until [ $n -ge 3 ]; do GOBIN=/usr/local/bin go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest && break; n=$((n+1)); echo \"go install failed, retry $n/3…\" >&2; sleep 5; done\n\n")
 		default:
 			fmt.Fprintf(&b, "echo \"WARNING: unknown dep %q — skipping\" >&2\n\n", dep)
 		}
