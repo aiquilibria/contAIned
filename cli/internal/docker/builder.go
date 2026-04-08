@@ -468,14 +468,14 @@ func GenerateToolchainsScript(toolchains map[string]string) string {
 			ver += ".0"
 		}
 		fmt.Fprintf(&b, "# Go %s\n", ver)
-		fmt.Fprintf(&b, "curl -fsSL \"https://go.dev/dl/go%s.linux-${ARCH}.tar.gz\" | tar -C /usr/local -xzf -\n\n", ver)
+		fmt.Fprintf(&b, "curl -fsSL --retry 3 --retry-delay 5 \"https://dl.google.com/go/go%s.linux-${ARCH}.tar.gz\" | tar -C /usr/local -xzf -\n\n", ver)
 	}
 
 	if ver, ok := toolchains["node"]; ok {
 		// NodeSource uses the major version number only.
 		major := strings.SplitN(ver, ".", 2)[0]
 		fmt.Fprintf(&b, "# Node.js %s\n", ver)
-		fmt.Fprintf(&b, "curl -fsSL \"https://deb.nodesource.com/setup_%s.x\" | bash -\n", major)
+		fmt.Fprintf(&b, "curl -fsSL --retry 3 --retry-delay 5 \"https://deb.nodesource.com/setup_%s.x\" | bash -\n", major)
 		b.WriteString("apt-get install -y --no-install-recommends nodejs\n")
 		b.WriteString("rm -rf /var/lib/apt/lists/*\n\n")
 	}
