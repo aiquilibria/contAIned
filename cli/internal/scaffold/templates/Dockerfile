@@ -16,17 +16,17 @@ RUN npm install -g @anthropic-ai/sandbox-runtime@0.0.42
 # argument, so we bypass it and fetch from the versioned GCS path directly.
 # Update CLAUDE_CODE_VERSION here to upgrade; override at build time with
 #   --build-arg CLAUDE_CODE_VERSION=x.y.z
-ARG CLAUDE_CODE_VERSION=2.1.74
+ARG CLAUDE_CODE_VERSION=2.1.89
 RUN set -eux; \
     ARCH=$(uname -m); \
     [ "$ARCH" = "x86_64" ] && ARCH=x64; \
     [ "$ARCH" = "aarch64" ] && ARCH=arm64; \
     GCS="https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases"; \
     PLATFORM="linux-${ARCH}"; \
-    CHECKSUM=$(curl -fsSL "${GCS}/${CLAUDE_CODE_VERSION}/manifest.json" \
+    CHECKSUM=$(curl -fsSL --retry 3 --retry-delay 5 "${GCS}/${CLAUDE_CODE_VERSION}/manifest.json" \
         | python3 -c "import sys,json; print(json.load(sys.stdin)['platforms']['${PLATFORM}']['checksum'])"); \
     mkdir -p /opt/claude-code; \
-    curl -fsSL -o /opt/claude-code/claude "${GCS}/${CLAUDE_CODE_VERSION}/${PLATFORM}/claude"; \
+    curl -fsSL --retry 3 --retry-delay 5 -o /opt/claude-code/claude "${GCS}/${CLAUDE_CODE_VERSION}/${PLATFORM}/claude"; \
     echo "${CHECKSUM}  /opt/claude-code/claude" | sha256sum -c -; \
     chmod 755 /opt/claude-code/claude
 
