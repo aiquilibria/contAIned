@@ -9,7 +9,9 @@ import (
 	"strings"
 
 	"contained.dev/cli/internal/fileutil"
+	"contained.dev/cli/internal/mainlined"
 	"contained.dev/cli/internal/manifest"
+	"contained.dev/cli/internal/oidc"
 	"contained.dev/cli/internal/pty"
 	"contained.dev/cli/internal/watch"
 	"gopkg.in/yaml.v3"
@@ -223,23 +225,34 @@ func (r *Runner) RunRepl() error {
 	return nil
 }
 
-// stageSessionKey copies the workspace mAInlined API key to a session-specific
-// directory inside .contAIned/sessions/<pid>/ and returns the directory path
-// and the docker volume mount args needed to expose it at the well-known
-// container path /run/contained/secrets/mainlined_api_key.
+// stageSessionKey ensures a fresh, non-expired mAInlined API key is available,
+// copies it to a session-specific directory inside .contAIned/sessions/<pid>/,
+// and returns the directory path and docker volume mount args needed to expose
+// it at the well-known container path /run/contained/secrets/mainlined_api_key.
 //
-// If no key has been written yet (e.g. mAInlined was not configured), both
-// return values are empty and the container starts without the key — hooks
+// If the persisted key is missing or expired, it re-registers via OIDC and
+// stores the fresh key back to .contAIned/mainlined_api_key before staging.
+//
+// On any error (including re-registration failure) a warning is printed to
+// stderr and both return values are empty — the session still starts; hooks
 // will surface a clear "mainlined_api_key not found" error at proof submission.
 func (r *Runner) stageSessionKey() (sessionDir string, volumeArgs []string) {
 	if r.mainlinedURL == "" {
 		return "", nil
 	}
+
 	srcPath := filepath.Join(r.workspace, ".contAIned", "mainlined_api_key")
-	keyData, err := os.ReadFile(srcPath)
-	if err != nil {
-		return "", nil
+	keyData, readErr := os.ReadFile(srcPath)
+
+	if readErr != nil || mainlined.JWTExpired(string(keyData)) {
+		freshKey, err := r.reRegister()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[contAIned] warning: mAInlined re-registration failed: %v\n", err)
+			return "", nil
+		}
+		keyData = []byte(freshKey)
 	}
+
 	sessionDir = filepath.Join(r.workspace, ".contAIned", "sessions", fmt.Sprintf("%d", os.Getpid()))
 	if err := os.MkdirAll(sessionDir, 0o700); err != nil {
 		return "", nil
@@ -250,6 +263,40 @@ func (r *Runner) stageSessionKey() (sessionDir string, volumeArgs []string) {
 		return "", nil
 	}
 	return sessionDir, []string{"--volume", keyFile + ":/run/contained/secrets/mainlined_api_key:ro"}
+}
+
+// reRegister obtains a fresh mAInlined API key by loading the on-disk manifest,
+// hashing it, running the OIDC flow, calling Register, and persisting the new
+// key to .contAIned/mainlined_api_key for subsequent sessions.
+func (r *Runner) reRegister() (string, error) {
+	p, err := mainlined.ParseURL(r.mainlinedURL)
+	if err != nil {
+		return "", fmt.Errorf("parsing mainlined URL: %w", err)
+	}
+
+	manifestBytes, err := os.ReadFile(filepath.Join(r.workspace, ".contAIned", "manifest.yaml"))
+	if err != nil {
+		return "", fmt.Errorf("reading manifest for re-registration: %w", err)
+	}
+	manifestHash := mainlined.HashManifest(string(manifestBytes))
+
+	fmt.Fprintf(os.Stderr, "[contAIned] mAInlined API key expired — re-registering…\n")
+
+	idToken, err := oidc.GetIDToken(oidc.SigstoreIssuer, oidc.SigstoreClientID, []string{"openid", "email"})
+	if err != nil {
+		return "", fmt.Errorf("OIDC authentication: %w", err)
+	}
+
+	reg, err := mainlined.Register(p, idToken, mainlined.SystemURI(p.Org, p.Scope), manifestHash)
+	if err != nil {
+		return "", fmt.Errorf("mAInlined registration: %w", err)
+	}
+
+	if _, err := mainlined.StoreWorkspaceAPIKey(r.workspace, reg.APIKey); err != nil {
+		fmt.Fprintf(os.Stderr, "[contAIned] warning: could not persist fresh API key: %v\n", err)
+	}
+
+	return reg.APIKey, nil
 }
 
 // provenanceDoc is the ordered schema for /run/contained/provenance.yaml.

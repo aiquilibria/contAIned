@@ -6,6 +6,7 @@ package mainlined
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -172,6 +173,37 @@ func SystemURI(org, scope string) string {
 func HashManifest(content string) string {
 	h := sha256.Sum256([]byte(content))
 	return fmt.Sprintf("%x", h)
+}
+
+// JWTExpired reports whether the given JWT has expired (or will expire within
+// the next 5 minutes). It decodes the payload segment without verifying the
+// signature — the server will reject a tampered or revoked token; this check
+// is purely to decide whether to attempt re-registration proactively.
+//
+// Returns false (treat as not expired) when key is not a structurally valid
+// three-segment JWT, or when the payload contains no "exp" claim — callers
+// should attempt to use the key as-is in those cases.
+func JWTExpired(key string) bool {
+	key = strings.TrimSpace(key)
+	parts := strings.Split(key, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return false
+	}
+	if claims.Exp == 0 {
+		return false
+	}
+	// Treat as expired 5 minutes before the actual expiry to avoid races.
+	return time.Now().Add(5*time.Minute).Unix() >= claims.Exp
 }
 
 // IntimateProvenance sends image-signing provenance to the mAInlined server
