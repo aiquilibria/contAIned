@@ -5,6 +5,7 @@
 package watch
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -17,6 +18,7 @@ import (
 )
 
 const pollInterval = 500 * time.Millisecond
+const toolTimeout = 400 * time.Millisecond
 
 // Watcher polls the host clipboard for image changes.
 type Watcher struct {
@@ -57,11 +59,13 @@ func (w *Watcher) Stop() {
 func (w *Watcher) run() {
 	defer close(w.done)
 	var lastHash [32]byte
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-w.stop:
 			return
-		case <-time.After(pollInterval):
+		case <-ticker.C:
 			data, err := w.tool()
 			if err != nil || len(data) == 0 {
 				continue
@@ -143,9 +147,11 @@ func darwinTool(pngpaste string) clipboardTool {
 		tmp.Close()
 		defer os.Remove(tmp.Name())
 
-		cmd := exec.Command(pngpaste, tmp.Name())
+		ctx, cancel := context.WithTimeout(context.Background(), toolTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, pngpaste, tmp.Name())
 		if err := cmd.Run(); err != nil {
-			// pngpaste exits non-zero when clipboard has no image.
+			// pngpaste exits non-zero (or times out) when clipboard has no image.
 			return nil, nil
 		}
 		return os.ReadFile(tmp.Name())
@@ -167,9 +173,11 @@ func detectLinux() (clipboardTool, error) {
 
 func linuxTool(bin string, args ...string) clipboardTool {
 	return func() ([]byte, error) {
-		out, err := exec.Command(bin, args...).Output()
+		ctx, cancel := context.WithTimeout(context.Background(), toolTimeout)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, bin, args...).Output()
 		if err != nil {
-			// Tool exits non-zero when clipboard has no image.
+			// Tool exits non-zero (or times out) when clipboard has no image.
 			return nil, nil
 		}
 		return out, nil
