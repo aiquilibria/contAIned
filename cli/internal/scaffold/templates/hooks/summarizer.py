@@ -117,7 +117,12 @@ except Exception:
     pass
 
 # ── File sentinel ──────────────────────────────────────────────────────────────
-if _sentinel_file.exists() and not _has_push_to_process:
+# Remember whether this is a re-run before we mutate the sentinel below.
+# Used at the end to decide whether to block: re-runs that only have a proof
+# submission failure should exit 0 — the failure was already shown to the
+# operator in the prior stop message, and blocking again causes an infinite loop.
+_rerun = _sentinel_file.exists()
+if _rerun and not _has_push_to_process:
     sys.exit(0)
 
 # ── DB sentinel: second Stop after Claude has already presented the summary ───
@@ -546,5 +551,10 @@ try:
     _sentinel_file.touch()
 except Exception:
     pass
+# On a re-run, only block if QA itself failed — don't block for a proof
+# submission failure alone, as that would cause an infinite stop-hook loop.
+_qa_failed = any(c.get("status") == "fail" for c in _qa_checks)
+if _rerun and not _qa_failed:
+    sys.exit(0)
 print(json.dumps({"decision": "block", "reason": _summary_msg}))
 sys.exit(0)
