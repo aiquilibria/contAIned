@@ -117,7 +117,12 @@ except Exception:
     pass
 
 # ── File sentinel ──────────────────────────────────────────────────────────────
-if _sentinel_file.exists() and not _has_push_to_process:
+# Remember whether this is a re-run before we mutate the sentinel below.
+# Used at the end to decide whether to block: re-runs that only have a proof
+# submission failure should exit 0 — the failure was already shown to the
+# operator in the prior stop message, and blocking again causes an infinite loop.
+_rerun = _sentinel_file.exists()
+if _rerun and not _has_push_to_process:
     sys.exit(0)
 
 # ── DB sentinel: second Stop after Claude has already presented the summary ───
@@ -440,10 +445,18 @@ try:
                         if _policy_base_url and _bootstrap_url:
                             _pb = urlparse(_policy_base_url)
                             _pf = urlparse(_bootstrap_url)
-                            _mAInlined_url = urlunparse((
-                                _pb.scheme, _pb.netloc,
-                                _pf.path, _pf.params, _pf.query, _pf.fragment,
-                            ))
+                            # Only graft when policy_yaml supplies a Docker-internal
+                            # alias (no dots in hostname, e.g. "http://mainlined:8080").
+                            # Public HTTPS URLs in policy_yaml point to a different host
+                            # than the API endpoint; grafting would produce a 404.
+                            _pb_host = _pb.hostname or ""
+                            if "." not in _pb_host or _pb_host == "localhost":
+                                _mAInlined_url = urlunparse((
+                                    _pb.scheme, _pb.netloc,
+                                    _pf.path, _pf.params, _pf.query, _pf.fragment,
+                                ))
+                            else:
+                                _mAInlined_url = _bootstrap_url
                         else:
                             _mAInlined_url = _policy_base_url or _bootstrap_url
                     if _mAInlined_url:
@@ -546,5 +559,10 @@ try:
     _sentinel_file.touch()
 except Exception:
     pass
+# On a re-run, only block if QA itself failed — don't block for a proof
+# submission failure alone, as that would cause an infinite stop-hook loop.
+_qa_failed = any(c.get("status") == "fail" for c in _qa_checks)
+if _rerun and not _qa_failed:
+    sys.exit(0)
 print(json.dumps({"decision": "block", "reason": _summary_msg}))
 sys.exit(0)
