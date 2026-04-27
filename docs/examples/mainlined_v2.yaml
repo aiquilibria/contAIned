@@ -40,6 +40,29 @@ ecosystems:
     plugins:
       - marketplace: claude-plugins-official
         plugin: gopls-lsp
+    rules:
+      - id: v1:bash:go:permit-toolchain
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "go"
+          - resource.subcommand in ["build", "test", "vet", "fmt", "mod", "generate", "run", "install", "clean", "env", "work"]
+        tags: [bash, go]
+      - id: v1:bash:go:permit-gofmt
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "gofmt"
+        tags: [bash, go]
+      - id: v1:bash:go:permit-golangci-lint
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "golangci-lint"
+        tags: [bash, go]
   python:
     # Python is pre-installed in the base image; no toolchain key needed.
     network_domains:
@@ -48,6 +71,28 @@ ecosystems:
     plugins:
       - marketplace: claude-plugins-official
         plugin: pyright-lsp
+    rules:
+      - id: v1:bash:python:permit-interpreter
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb in ["python", "python3"]
+        tags: [bash, python]
+      - id: v1:bash:python:permit-pytest
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "pytest"
+        tags: [bash, python]
+      - id: v1:bash:python:permit-tooling
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb in ["ruff", "pyright", "mypy", "pip", "pip3"]
+        tags: [bash, python]
   node:
     toolchain: node
     network_domains:
@@ -56,6 +101,29 @@ ecosystems:
     plugins:
       - marketplace: claude-plugins-official
         plugin: typescript-lsp
+    rules:
+      - id: v1:bash:node:permit-runtime
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "node"
+        tags: [bash, node]
+      - id: v1:bash:node:permit-npm
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "npm"
+          - resource.subcommand in ["install", "run", "test", "build", "ci", "audit", "list", "outdated"]
+        tags: [bash, node]
+      - id: v1:bash:node:permit-npx
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "npx"
+        tags: [bash, node]
   typescript:
     toolchain: node   # TypeScript runs on Node.js
     network_domains:
@@ -64,6 +132,29 @@ ecosystems:
     plugins:
       - marketplace: claude-plugins-official
         plugin: typescript-lsp
+    rules:
+      - id: v1:bash:typescript:permit-tsc
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "tsc"
+        tags: [bash, typescript]
+      - id: v1:bash:typescript:permit-npm
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "npm"
+          - resource.subcommand in ["install", "run", "test", "build", "ci", "audit", "list", "outdated"]
+        tags: [bash, typescript]
+      - id: v1:bash:typescript:permit-npx
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "npx"
+        tags: [bash, typescript]
   ruby:
     toolchain: ruby
     network_domains:
@@ -72,6 +163,21 @@ ecosystems:
     plugins:
       - marketplace: claude-plugins-official
         plugin: ruby-lsp
+    rules:
+      - id: v1:bash:ruby:permit-interpreter
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "ruby"
+        tags: [bash, ruby]
+      - id: v1:bash:ruby:permit-toolchain
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb in ["bundle", "rake", "rspec", "rubocop", "gem"]
+        tags: [bash, ruby]
   java:
     toolchain: java
     network_domains:
@@ -80,6 +186,28 @@ ecosystems:
     plugins:
       - marketplace: claude-plugins-official
         plugin: jdtls-lsp
+    rules:
+      - id: v1:bash:java:permit-runtime
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb in ["java", "javac", "jar"]
+        tags: [bash, java]
+      - id: v1:bash:java:permit-maven
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb == "mvn"
+        tags: [bash, java]
+      - id: v1:bash:java:permit-gradle
+        effect: permit
+        action: [Bash]
+        resource_type: BashCommand
+        when:
+          - resource.verb in ["gradle", "./gradlew"]
+        tags: [bash, java]
 
 # ── Init (build-time) ──────────────────────────────────────────────────────────
 init:

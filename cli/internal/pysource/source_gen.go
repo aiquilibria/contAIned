@@ -43,7 +43,7 @@ extraPaths = ["/usr/local/lib/python3.13/site-packages"]
 [project.optional-dependencies]
 dev = [
     "pyright==1.1.408",
-    "pytest==9.0.2",
+    "pytest==9.0.3",
     "pytest-cov==7.0.0",
     "pytest-benchmark==5.1.0",
     "ruff==0.15.7",
@@ -53,7 +53,7 @@ dev = [
 [dependency-groups]
 dev = [
     "pyright==1.1.408",
-    "pytest==9.0.2",
+    "pytest==9.0.3",
     "pytest-cov==7.0.0",
     "pytest-benchmark==5.1.0",
     "ruff==0.15.7",

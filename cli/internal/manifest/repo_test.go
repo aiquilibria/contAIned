@@ -568,6 +568,114 @@ func TestMergeRepoManifest_NoDuplicateDomains(t *testing.T) {
 	}
 }
 
+func TestMergeRepoManifest_EcosystemRules_MergedIntoRules(t *testing.T) {
+	m := operatorWithEcosystems()
+	m.Ecosystems["go"] = EcosystemDef{
+		Toolchain:      "go",
+		NetworkDomains: []string{"proxy.golang.org", "sum.golang.org"},
+		Rules: []PolicyRule{
+			{ID: "v1:bash:go:permit-toolchain", Effect: "permit", ResourceType: "BashCommand"},
+		},
+	}
+	m.Runtime.Rules = []PolicyRule{
+		{ID: "v1:operator-rule", Effect: "forbid", ResourceType: "BashCommand"},
+	}
+	repo := &RepoManifest{
+		Ecosystems: map[string]EcosystemDef{"go": {Version: "1.22.5"}},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	ruleIDs := make(map[string]bool)
+	for _, r := range merged.Runtime.Rules {
+		ruleIDs[r.ID] = true
+	}
+	if !ruleIDs["v1:operator-rule"] {
+		t.Error("expected operator rule to be present")
+	}
+	if !ruleIDs["v1:bash:go:permit-toolchain"] {
+		t.Error("expected go ecosystem rule to be present")
+	}
+}
+
+func TestMergeRepoManifest_InactiveEcosystemRules_NotMerged(t *testing.T) {
+	m := operatorWithEcosystems()
+	m.Ecosystems["go"] = EcosystemDef{
+		Toolchain:      "go",
+		NetworkDomains: []string{"proxy.golang.org", "sum.golang.org"},
+		Rules: []PolicyRule{
+			{ID: "v1:bash:go:permit-toolchain", Effect: "permit", ResourceType: "BashCommand"},
+		},
+	}
+	// Only python is activated; go rules should NOT appear.
+	repo := &RepoManifest{
+		Ecosystems: map[string]EcosystemDef{"python": {Version: ""}},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, r := range merged.Runtime.Rules {
+		if r.ID == "v1:bash:go:permit-toolchain" {
+			t.Error("go ecosystem rule must not be merged when go ecosystem is not active")
+		}
+	}
+}
+
+func TestMergeRepoManifest_EcosystemRules_DuplicateIDsDeduplicated(t *testing.T) {
+	m := operatorWithEcosystems()
+	// Operator already has the same rule ID — ecosystem copy must be dropped.
+	m.Runtime.Rules = []PolicyRule{
+		{ID: "v1:bash:go:permit-toolchain", Effect: "forbid", ResourceType: "BashCommand", Reason: "operator version"},
+	}
+	m.Ecosystems["go"] = EcosystemDef{
+		Toolchain:      "go",
+		NetworkDomains: []string{"proxy.golang.org", "sum.golang.org"},
+		Rules: []PolicyRule{
+			{ID: "v1:bash:go:permit-toolchain", Effect: "permit", ResourceType: "BashCommand", Reason: "ecosystem version"},
+		},
+	}
+	repo := &RepoManifest{
+		Ecosystems: map[string]EcosystemDef{"go": {Version: "1.22.5"}},
+	}
+
+	merged, err := MergeRepoManifest(m, repo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	count := 0
+	for _, r := range merged.Runtime.Rules {
+		if r.ID == "v1:bash:go:permit-toolchain" {
+			count++
+			if r.Reason != "operator version" {
+				t.Errorf("operator rule should take precedence, got reason %q", r.Reason)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("rule ID should appear exactly once, got %d", count)
+	}
+}
+
+func TestValidateRepoManifest_RulesRejected(t *testing.T) {
+	r := &RepoManifest{
+		Ecosystems: map[string]EcosystemDef{
+			"go": {
+				Rules: []PolicyRule{
+					{ID: "v1:bash:go:permit-toolchain", Effect: "permit"},
+				},
+			},
+		},
+	}
+	err := ValidateRepoManifest(r)
+	if err == nil || !strings.Contains(err.Error(), "rules is operator-only") {
+		t.Fatalf("expected operator-only error for rules, got: %v", err)
+	}
+}
+
 // ── CollectPlugins ────────────────────────────────────────────────────────────
 
 func operatorWithPlugins() *Manifest {

@@ -51,6 +51,12 @@ type EcosystemDef struct {
 	// Combined with policy.plugins.preinstall at contained init time and
 	// deduplicated before baking into the image.
 	Plugins []PluginRef `yaml:"plugins,omitempty"`
+	// Rules lists Cedar-inspired policy rules that are automatically merged
+	// into runtime.rules when this ecosystem is active. Use this to permit
+	// the ecosystem's standard toolchain commands (e.g. go build, pytest)
+	// without requiring operators to duplicate them in every manifest.
+	// These are operator-only — repos may not set them.
+	Rules []PolicyRule `yaml:"rules,omitempty"`
 }
 
 // MainlinedConfig is the init.mainlined section. It holds both the operator's

@@ -79,9 +79,11 @@ The enforcement layer is ordered by tamper-resistance:
 │  Policy parameters read by hooks at runtime.                │
 │  Unreachable by the agent — outside the workspace mount.    │
 ├─────────────────────────────────────────────────────────────┤
-│  .contAIned/hooks/*.py  (workspace, write-protected)        │
-│  Hook logic. Writes blocked by restrict_writes.py and by    │
-│  the OS-level sandbox denyWrite rule.                       │
+│  /etc/contained/hooks/*.py  (image layer)                   │
+│  Hook logic. Baked into the image; registered by path in    │
+│  managed-settings.json. Unreachable by the agent —          │
+│  outside the workspace mount. Changing any hook requires    │
+│  contained init --rebuild.                                  │
 ├─────────────────────────────────────────────────────────────┤
 │  Agent process  (untrusted)                                 │
 │  All tool calls pass upward through the layers above        │
@@ -89,7 +91,7 @@ The enforcement layer is ordered by tamper-resistance:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-The critical property is that the agent cannot reach the layers above it. Hook registration lives in the image, not the workspace. The managed-settings path is blocked by Claude Code's own sandbox independently of any hook — the protection holds even before the first hook runs. There is no circular dependency: the enforcement layer does not rely on the agent to protect itself.
+The critical property is that the agent cannot reach the layers above it. Hook registration, hook scripts, and policy parameters all live in the image, not the workspace. The managed-settings path is blocked by Claude Code's own sandbox independently of any hook — the protection holds even before the first hook runs. There is no circular dependency: the enforcement layer does not rely on the agent to protect itself.
 
 The Rekor layer is optional. When enabled at `contAIned init` time, it extends the trust hierarchy upward: the image itself becomes accountable, not just its enforcement behaviour. See [Build-time provenance](#build-time-provenance-optional) below.
 
@@ -289,12 +291,16 @@ After a successful image build, `contAIned init`:
 1. Retrieves the image's SHA256 digest from Docker.
 2. Constructs a JSON blob containing the image digest, mAInlined policy ref, and policy version, then signs that blob using `cosign sign-blob` (keyless, OIDC-based). **Only this JSON blob is signed — not the image layers or any registry artifact.** This triggers a browser or device-flow authentication with the operator's OIDC provider (GitHub, Google, or any supported issuer).
 3. Cosign submits the signature and the short-lived Fulcio certificate (which carries the operator's verified identity) to the Rekor append-only transparency log. The entry cannot be removed or modified.
-4. Writes `.contAIned/provenance.yaml` — a local record with fields ordered by the provenance hierarchy: operator identity and OIDC issuer → host workspace path and mAInlined URL → policy ref and version → image name and digest → Rekor log index, entry URL, signing timestamp, and the signed payload.
-5. Writes `.contAIned/provenance.bundle` — the cosign bundle required for offline verification.
+4. Writes `~/.config/contained/<id>/provenance.yaml` — a local record with fields ordered by the provenance hierarchy: operator identity and OIDC issuer → host workspace path and mAInlined URL → policy ref and version → image name and digest → Rekor log index, entry URL, signing timestamp, and the signed payload. The directory key `<id>` is the first 16 hex characters of `sha256(abs_workspace_path)`, making it per-workspace, collision-resistant, and stable across sessions.
+5. Writes `~/.config/contained/<id>/provenance.bundle` — the cosign bundle required for offline verification.
 
 ### What is verifiable
 
-`contAIned verify` (host-side, run before starting a session) checks:
+`contained` (at every session start) checks:
+
+- **Manifest integrity** — the SHA-256 of the workspace `.contAIned/manifest.yaml` bytes is compared against the `contAIned.manifest_sha256` label baked into the image at build time. If they differ, the session is blocked with a clear error. This prevents a developer from editing the manifest to redirect `contained` to a different, unverified image — an attack that would silently break the Sigstore provenance chain without this check.
+
+`contAIned verify` (host-side, run before starting a session) additionally checks:
 
 - The current `contained:latest` image digest matches the digest in `provenance.yaml`. A mismatch means the image was replaced or rebuilt since init — the session is blocked.
 - The `provenance.bundle` signature is valid against the recorded identity and issuer via `cosign verify-blob`. This confirms the Rekor entry is intact and the certificate chain is valid.
@@ -309,7 +315,7 @@ After a successful image build, `contAIned init`:
 
 **Session-level accountability is partial, not cryptographic.** The signature establishes who built the policy. It does not create a cryptographically signed record of who approved individual escalations. What it does provide, via provenance stamping in the tracer (see above), is a non-repudiable pointer: every task in `tracer.db` carries the image digest and Rekor log index of the signed image that ran it, so the full chain from task to policy author is auditable. What it does not provide is a per-approval signature — the operator's identity is established at build time, not at each escalation decision.
 
-**`provenance.yaml` is a local pointer, not the authoritative record.** The Rekor entry is permanent and independently verifiable. `provenance.yaml` is a convenience file used by `contAIned verify`. It is gitignored alongside the rest of `.contAIned/`.
+**`provenance.yaml` is a local pointer, not the authoritative record.** The Rekor entry is permanent and independently verifiable. `provenance.yaml` is a convenience file used by `contAIned verify`. It lives in `~/.config/contained/<id>/` on the host, outside the workspace bind-mount — the agent cannot read or reach it, and editing it does not affect what enforcement layer runs inside the container.
 
 ---
 

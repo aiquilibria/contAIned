@@ -276,17 +276,20 @@ Creates (in the workspace):
 
 ```
 .contAIned/
-  hooks/
-    restrict_reads.py    ← PreToolUse: read path enforcement
-    restrict_writes.py   ← PreToolUse: write path enforcement
-    restrict_bash.py     ← PreToolUse: bash command restrictions
-    restrict_network.py  ← PreToolUse: WebFetch/WebSearch allowlist enforcement
-    audit.py             ← PostToolUse: append-only audit log
-    qa.py                ← Stop: quality gate
-  manifest.yaml          ← source of truth; baked into the image at build time
   tracer.db              ← SQLite task + diff store (gitignored)
   audit/                 ← audit log (gitignored)
+  manifest.yaml          ← merged manifest used by host-side tooling (gitignored)
 ```
+
+Creates (on the host, outside the workspace):
+
+```
+~/.config/contained/<id>/
+  provenance.yaml        ← Sigstore provenance record (only when sigstore.enabled: true)
+  provenance.bundle      ← cosign bundle for offline verification
+```
+
+The directory key `<id>` is the first 16 hex characters of `sha256(abs_workspace_path)`, so each workspace gets its own slot and parallel sessions of the same workspace share it safely (provenance files are read-only after init).
 
 Baked into the Docker image (not in the workspace):
 
@@ -295,11 +298,12 @@ Baked into the Docker image (not in the workspace):
   managed-settings.json  ← hook registration + sandbox rules (highest-precedence settings level)
   CLAUDE.md              ← contAIned operating instructions (composes with project ./CLAUDE.md)
 /etc/contained/
-  manifest.yaml          ← policy parameters read by hooks at runtime
+  manifest.yaml          ← authoritative policy read by hooks at runtime
+  hooks/                 ← enforcement hook scripts (registered in managed-settings.json)
   statusline.py          ← status bar script
 ```
 
-Re-running `contAIned init` without `--force` refreshes hook files to the latest bundled templates without touching your manifest. Use `--rebuild` or `--manifest` to rebuild the image.
+Re-running `contAIned init` without `--force` is a no-op if the manifest and image are already current. Use `--rebuild` to force a fresh image build, or `--manifest` to provide an updated manifest.
 
 ---
 
@@ -590,7 +594,7 @@ The image is automatically rebuilt when the manifest hash changes — running `c
 
 **Image tagging.** By default, `contAIned init` tags the built image `contained:<workspace-name>` — derived automatically from the directory name. Running `contAIned init` in `~/projects/api-service` produces `contained:api-service`; running it in `~/projects/data-pipeline` produces `contained:data-pipeline`. Both images coexist; neither overwrites the other. To use a fixed name instead, set `runtime.docker.image` in `manifest.yaml` explicitly. The manifest hash and package version are stored as image labels and used to decide whether a rebuild is needed — running `contAIned init` after editing `manifest.yaml` triggers a rebuild automatically.
 
-> **Do not edit hook files directly.** Files under `.contAIned/hooks/` are generated from internal templates and will be overwritten by `contAIned init`. Hook registration, sandbox rules, and permission patterns are managed by `/etc/claude-code/managed-settings.json` baked into the Docker image — they cannot be overridden at runtime. Policy customisation belongs in `manifest.yaml`; structural hook changes should be raised as feature requests.
+> **Hook scripts are baked into the image.** Hook scripts live at `/etc/contained/hooks/` inside the Docker image — they are not written to the workspace. Changing a hook requires editing the template in the contAIned source and running `contained init --rebuild`. Hook registration, sandbox rules, and permission patterns are managed by `/etc/claude-code/managed-settings.json` baked into the image — they cannot be overridden at runtime. Policy customisation belongs in `manifest.yaml`; structural hook changes should be raised as feature requests.
 
 ### Project instructions (CLAUDE.md)
 
