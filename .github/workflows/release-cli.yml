@@ -36,6 +36,10 @@ jobs:
           go-version-file: cli/go.mod
           cache-dependency-path: cli/go.sum
 
+      - name: Generate embedded Python source
+        working-directory: cli
+        run: go generate contained.dev/cli/internal/pysource
+
       - name: Build binary
         working-directory: cli
         env:
