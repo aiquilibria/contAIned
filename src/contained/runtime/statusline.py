@@ -26,6 +26,7 @@ _RED   = "\033[31m"
 _FG_BLACK = "\033[30m"
 _FG_WHITE = "\033[97m"
 
+_BG_WHITE  = "\033[107m"
 _BG_GREEN  = "\033[42m"
 _BG_ORANGE = "\033[43m"  # standard yellow — renders as amber/orange
 _BG_RED    = "\033[41m"
@@ -65,7 +66,7 @@ def main() -> None:
         branch = _git(cwd, "branch", "--show-current") or _git(cwd, "rev-parse", "--short", "HEAD")
         commit = _git(cwd, "rev-parse", "--short", "HEAD")
         branch = _shorten(branch, 20)
-        seg2 = f"{branch} {commit}".strip()
+        seg2 = f"{_BG_WHITE}{_FG_BLACK} ⎇ {branch} {commit} {_RESET}"
 
         shortstat = _git(cwd, "diff", "--shortstat", "HEAD")
         ins = del_ = 0
@@ -84,15 +85,14 @@ def main() -> None:
     if session_id:
         parts3.append(session_id[:8])
 
-    ctx = (data.get("context_window") or {}).get("used_percentage")
-    if ctx is not None:
-        if ctx <= 50:
-            bg, fg = _BG_GREEN, _FG_BLACK
-        elif ctx <= 80:
-            bg, fg = _BG_ORANGE, _FG_BLACK
-        else:
-            bg, fg = _BG_RED, _FG_WHITE
-        parts3.append(f"{bg}{fg} ctx {ctx}% {_RESET}")
+    ctx: float = (data.get("context_window") or {}).get("used_percentage") or 0
+    if ctx <= 50:
+        bg, fg = _BG_GREEN, _FG_BLACK
+    elif ctx <= 80:
+        bg, fg = _BG_ORANGE, _FG_BLACK
+    else:
+        bg, fg = _BG_RED, _FG_WHITE
+    parts3.append(f"{bg}{fg} ctx {ctx:.0f}% {_RESET}")
 
     cost = (data.get("cost") or {}).get("total_cost_usd")
     if cost is not None:
@@ -116,13 +116,15 @@ def main() -> None:
         except Exception:
             pass
 
-    try:
-        from importlib.metadata import version as _pkg_version
-        ver = _pkg_version("contained")
-    except Exception:
-        ver = ""
+    ver = _git(cwd, "describe", "--tags", "--abbrev=0") if cwd else ""
+    if not ver:
+        try:
+            from importlib.metadata import version as _pkg_version
+            ver = _pkg_version("contained")
+        except Exception:
+            ver = ""
 
-    brand = f"{_GREEN}cont[{_RESET}AI{_RED}✦{_RESET}{_GREEN}]ned{_RESET}"
+    brand = f"{_GREEN}cont[{_RESET}{_RED}AI✦{_RESET}{_GREEN}]ned{_RESET}"
     if ver:
         brand += f" v{ver}"
     parts4.append(brand)
