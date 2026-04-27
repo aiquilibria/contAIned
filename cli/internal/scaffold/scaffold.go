@@ -94,46 +94,6 @@ func TemplateContent(path string) (string, error) {
 	return string(data), nil
 }
 
-// ManagedFile describes a file written by `contained init` that is always
-// refreshed on re-runs (managed by contAIned, not the operator).
-type ManagedFile struct {
-	// RelPath is the path relative to the workspace root.
-	RelPath string
-	// Template is the path within the embedded templates/ FS.
-	Template string
-	// Executable marks the file as chmod +x.
-	Executable bool
-}
-
-// ManagedFiles returns the list of files that contained init writes (and
-// refreshes on every re-run). User-owned files (manifest, .env) are excluded.
-func ManagedFiles() []ManagedFile {
-	hook := func(name string) ManagedFile {
-		return ManagedFile{
-			RelPath:    filepath.Join(".contAIned", "hooks", name),
-			Template:   "templates/hooks/" + name,
-			Executable: name != "_policy.py",
-		}
-	}
-	return []ManagedFile{
-		hook("_policy.py"),
-		hook("restrict_reads.py"),
-		hook("restrict_writes.py"),
-		hook("restrict_bash.py"),
-		hook("restrict_network.py"),
-		hook("audit.py"),
-		hook("permission_request.py"),
-		hook("tracer_pre.py"),
-		hook("tracer_post.py"),
-		hook("subagent_start.py"),
-		hook("subagent_stop.py"),
-		hook("summarizer.py"),
-		hook("qa.py"),
-		hook("user_prompt_submit.py"),
-		hook("push_hook.py"),
-	}
-}
-
 func fileMode(executable bool) os.FileMode {
 	if executable {
 		return 0o755

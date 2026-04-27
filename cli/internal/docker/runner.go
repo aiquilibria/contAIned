@@ -14,6 +14,7 @@ import (
 	"contained.dev/cli/internal/oidc"
 	"contained.dev/cli/internal/pty"
 	"contained.dev/cli/internal/watch"
+	"contained.dev/cli/internal/workspace"
 	"gopkg.in/yaml.v3"
 )
 
@@ -265,20 +266,19 @@ func (r *Runner) stageSessionKey() (sessionDir string, volumeArgs []string) {
 	return sessionDir, []string{"--volume", keyFile + ":/run/contained/secrets/mainlined_api_key:ro"}
 }
 
-// reRegister obtains a fresh mAInlined API key by loading the on-disk manifest,
-// hashing it, running the OIDC flow, calling Register, and persisting the new
-// key to .contAIned/mainlined_api_key for subsequent sessions.
+// reRegister obtains a fresh mAInlined API key by reading the manifest SHA-256
+// from the image label, running the OIDC flow, calling Register, and persisting
+// the new key to .contAIned/mainlined_api_key for subsequent sessions.
 func (r *Runner) reRegister() (string, error) {
 	p, err := mainlined.ParseURL(r.mainlinedURL)
 	if err != nil {
 		return "", fmt.Errorf("parsing mainlined URL: %w", err)
 	}
 
-	manifestBytes, err := os.ReadFile(filepath.Join(r.workspace, ".contAIned", "manifest.yaml"))
+	manifestHash, err := r.imageManifestSHA256()
 	if err != nil {
-		return "", fmt.Errorf("reading manifest for re-registration: %w", err)
+		return "", fmt.Errorf("reading manifest hash from image: %w", err)
 	}
-	manifestHash := mainlined.HashManifest(string(manifestBytes))
 
 	fmt.Fprintf(os.Stderr, "[contAIned] mAInlined API key expired — re-registering…\n")
 
@@ -323,20 +323,25 @@ type provenanceDoc struct {
 // result to a temp directory, and returns docker volume mount args for a
 // read-only bind-mount into the container. The optional provenance.bundle is
 // copied unchanged alongside it when present.
-func provenance(workspace, image, mainlinedURL string) (tmpDir string, args []string, err error) {
+func provenance(workspaceRoot, image, mainlinedURL string) (tmpDir string, args []string, err error) {
 	tmp, err := os.MkdirTemp("", "contained-prov-")
 	if err != nil {
 		return "", nil, fmt.Errorf("creating provenance temp dir: %w", err)
 	}
 
+	hostCfgDir, cfgErr := workspace.HostConfigDir(workspaceRoot)
+	if cfgErr != nil {
+		return "", nil, fmt.Errorf("resolving host config dir: %w", cfgErr)
+	}
+
 	var doc provenanceDoc
-	provYAML := filepath.Join(workspace, ".contAIned", "provenance.yaml")
+	provYAML := hostCfgDir + "/provenance.yaml"
 	if data, readErr := os.ReadFile(provYAML); readErr == nil {
 		_ = yaml.Unmarshal(data, &doc)
 	} else {
 		doc.SchemaVersion = 1
 	}
-	doc.HostWorkspace = workspace
+	doc.HostWorkspace = workspaceRoot
 	doc.MainlinedURL = mainlinedURL
 	doc.ImageName = image
 
@@ -353,7 +358,7 @@ func provenance(workspace, image, mainlinedURL string) (tmpDir string, args []st
 		"--volume", tmp+"/provenance.yaml:/run/contained/provenance.yaml:ro",
 	)
 
-	provBundle := filepath.Join(workspace, ".contAIned", "provenance.bundle")
+	provBundle := hostCfgDir + "/provenance.bundle"
 	if _, err := os.Stat(provBundle); err == nil {
 		if err := fileutil.CopyFile(provBundle, filepath.Join(tmp, "provenance.bundle")); err != nil {
 			os.RemoveAll(tmp)
@@ -365,6 +370,30 @@ func provenance(workspace, image, mainlinedURL string) (tmpDir string, args []st
 	}
 
 	return tmp, args, nil
+}
+
+// imageManifestSHA256 reads the contAIned.manifest_sha256 label from the
+// workspace image. This is the full SHA-256 of the manifest content in the
+// same format used by mAInlined registration, stored as an image label at
+// build time so the workspace manifest file is no longer needed at runtime.
+func (r *Runner) imageManifestSHA256() (string, error) {
+	dockerBin, err := findDocker()
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.Command(
+		dockerBin, "image", "inspect",
+		"--format", `{{index .Config.Labels "contAIned.manifest_sha256"}}`,
+		r.cfg.Image,
+	).Output()
+	if err != nil {
+		return "", fmt.Errorf("docker image inspect %s: %w", r.cfg.Image, err)
+	}
+	hash := strings.TrimSpace(string(out))
+	if hash == "" {
+		return "", fmt.Errorf("image %s has no contAIned.manifest_sha256 label — rebuild with contained init", r.cfg.Image)
+	}
+	return hash, nil
 }
 
 // ensureGitignore appends entry to <workspace>/.gitignore if not already

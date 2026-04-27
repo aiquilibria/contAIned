@@ -414,7 +414,7 @@ try:
             if _payload:
                 try:
                     _mAInlined_url = None
-                    _manifest_path = Path(cwd) / ".contAIned" / "manifest.yaml"
+                    _manifest_path = Path("/etc/contained/manifest.yaml")
                     if _manifest_path.exists():
                         import yaml as _yaml  # noqa: PLC0415
                         from urllib.parse import urlparse, urlunparse  # noqa: PLC0415

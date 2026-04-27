@@ -120,7 +120,7 @@ if _primary:
     if _in_cp:
         reason = (
             f"Write denied: '{_primary}' is inside the .contAIned/ control-plane directory.\n"
-            "Hook and policy files are managed by contAIned and must not be edited directly."
+            "Audit logs and policy state are managed by contAIned and must not be edited directly."
         )
         _log(event, _primary, {"outcome": "deny", "reason": reason})
         _deny(reason)

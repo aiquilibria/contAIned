@@ -16,6 +16,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"contained.dev/cli/internal/workspace"
 )
 
 // Provenance is the contents of .contAIned/provenance.yaml.
@@ -45,10 +47,14 @@ type Provenance struct {
 	SignedPayload string `yaml:"signed_payload,omitempty"`
 }
 
-// LoadProvenance reads and parses .contAIned/provenance.yaml.
+// LoadProvenance reads and parses provenance.yaml from the operator-side host
+// config directory (~/.config/contained/<id>/provenance.yaml).
 func LoadProvenance(root string) (*Provenance, error) {
-	path := root + "/.contAIned/provenance.yaml"
-	data, err := os.ReadFile(path)
+	dir, err := workspace.HostConfigDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolving host config dir: %w", err)
+	}
+	data, err := os.ReadFile(dir + "/provenance.yaml")
 	if err != nil {
 		return nil, fmt.Errorf("reading provenance.yaml: %w", err)
 	}
@@ -59,14 +65,22 @@ func LoadProvenance(root string) (*Provenance, error) {
 	return &p, nil
 }
 
-// WriteProvenance writes a Provenance struct to .contAIned/provenance.yaml.
+// WriteProvenance writes a Provenance struct to the operator-side host config
+// directory (~/.config/contained/<id>/provenance.yaml). The directory is
+// created if it does not exist.
 func WriteProvenance(root string, p *Provenance) error {
-	path := root + "/.contAIned/provenance.yaml"
+	dir, err := workspace.HostConfigDir(root)
+	if err != nil {
+		return fmt.Errorf("resolving host config dir: %w", err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("creating host config dir: %w", err)
+	}
 	out, err := yaml.Marshal(p)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, out, 0o644)
+	return os.WriteFile(dir+"/provenance.yaml", out, 0o600)
 }
 
 var cosignSearchPaths = []string{

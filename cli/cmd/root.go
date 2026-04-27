@@ -3,12 +3,15 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
 	"contained.dev/cli/internal/docker"
+	"contained.dev/cli/internal/mainlined"
 	"contained.dev/cli/internal/manifest"
 	"contained.dev/cli/internal/sigstore"
 	ver "contained.dev/cli/internal/version"
@@ -58,8 +61,15 @@ func runRepl(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("manifest validation: %w", err)
 	}
 
+	dim := color.New(color.Faint)
+	dim.Print("[contAIned] verifying manifest integrity … ")
+	if err := checkManifestIntegrity(root, m.Init.Container.Image); err != nil {
+		fmt.Printf("\n")
+		return fmt.Errorf("manifest integrity check failed — session blocked\n  %w", err)
+	}
+	dim.Println("✓")
+
 	if m.Init.Sigstore.Enabled {
-		dim := color.New(color.Faint)
 		dim.Print("[contAIned] verifying provenance … ")
 		if _, err := sigstore.VerifyWorkspace(root); err != nil {
 			fmt.Printf("\n")
@@ -77,6 +87,52 @@ func runRepl(_ *cobra.Command, _ []string) error {
 
 	runner := docker.New(m.Init.Container, root, m.Runtime, m.Init.Mainlined.URL)
 	return runner.RunRepl()
+}
+
+// checkManifestIntegrity verifies that the workspace manifest has not been
+// tampered with since the image was built. It computes the SHA-256 of the
+// raw manifest bytes and compares them to the contAIned.manifest_sha256 label
+// on the image. A mismatch means the workspace manifest was edited after the
+// last contained init, which would silently redirect sessions to an unverified
+// image, breaking the Sigstore provenance chain without detection.
+func checkManifestIntegrity(root, image string) error {
+	manifestPath := filepath.Join(root, ".contAIned", "manifest.yaml")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fmt.Errorf("reading manifest: %w", err)
+	}
+	localHash := mainlined.HashManifest(string(data))
+
+	dockerBin, err := docker.FindDockerBin()
+	if err != nil {
+		return err
+	}
+	out, err := exec.Command(
+		dockerBin, "image", "inspect",
+		"--format", `{{index .Config.Labels "contAIned.manifest_sha256"}}`,
+		image,
+	).Output()
+	if err != nil {
+		return fmt.Errorf("docker image inspect %s: %w", image, err)
+	}
+	imageHash := strings.TrimSpace(string(out))
+	if imageHash == "" {
+		return fmt.Errorf(
+			"image %s has no contAIned.manifest_sha256 label\n"+
+				"  Run 'contained init --rebuild' to re-bake the image with manifest integrity tracking",
+			image,
+		)
+	}
+	if localHash != imageHash {
+		return fmt.Errorf(
+			"workspace manifest has been modified since the image was built\n"+
+				"  workspace hash: %s\n"+
+				"  image hash:     %s\n"+
+				"  Run 'contained init --rebuild' to rebuild the image from the current manifest",
+			localHash, imageHash,
+		)
+	}
+	return nil
 }
 
 func printSplash() {

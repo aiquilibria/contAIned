@@ -360,22 +360,52 @@ def build_bash_command_entity(
         is_compound = any(t in _SHELL_OPERATORS for t in tokens)
     verb = tokens[0] if tokens else ""
 
-    # Subcommand: second token if it is not a flag AND not a filesystem path.
-    # Path-like tokens (starting with / or ~, or containing /) are positional
-    # args to the verb (e.g. "cat /etc/hosts"), not subcommands (e.g. "git push").
+    # Subcommand: first non-flag, non-path token after the verb.
+    #
+    # Scans forward past leading flags and their path-valued arguments so that
+    # patterns like `go -C /workspace/cli build ./...` and
+    # `git -C /repo push origin main` are correctly decomposed even though
+    # global flags precede the subcommand.
+    #
+    # Heuristic for flag values: a token immediately following a flag that
+    # looks like a filesystem path (starts with /, ~, or contains /) is treated
+    # as the flag's value and skipped (e.g. -C /workspace/cli).  Non-path flag
+    # values (e.g. --jobs 4) are NOT consumed — the scan stops and the
+    # non-path, non-flag token is taken as the subcommand.
+    #
+    # Bound: at most 8 tokens past the verb are examined, preventing false
+    # subcommand identification on long argument lists with no subcommand.
+    _pre_flags: list[str] = []
     subcommand: str | None = None
     rest_start = 1
-    if len(tokens) > 1 and not tokens[1].startswith("-"):
-        _t = tokens[1]
-        _expanded = str(Path(_t).expanduser()) if _t.startswith("~") else _t
-        _is_path = _expanded.startswith("/") or "/" in _t or _t in (".", "..")
-        if not _is_path:
-            subcommand = _t
-            rest_start = 2
+    _scan_limit = min(len(tokens), 9)  # verb + up to 8 tokens
+    i = 1
+    while i < _scan_limit:
+        _t = tokens[i]
+        if _t.startswith("-"):
+            _pre_flags.append(_t)
+            i += 1
+            # If the next token looks like a filesystem path, it is this flag's
+            # value (e.g. -C /workspace/cli) — skip it without recording.
+            if i < len(tokens):
+                _nxt = tokens[i]
+                _nxt_exp = str(Path(_nxt).expanduser()) if _nxt.startswith("~") else _nxt
+                if _nxt_exp.startswith("/") or "/" in _nxt or _nxt.startswith("~"):
+                    i += 1
+        else:
+            # Non-flag candidate — subcommand only if not itself a path.
+            _expanded = str(Path(_t).expanduser()) if _t.startswith("~") else _t
+            _is_path = _expanded.startswith("/") or "/" in _t or _t in (".", "..")
+            if not _is_path:
+                subcommand = _t
+                rest_start = i + 1
+            break
 
     # Partition remaining tokens into flags and positional args.
+    # Pre-subcommand flags (collected above) are included in args so that
+    # policy conditions referencing resource.args see the full flag set.
     rest_tokens = tokens[rest_start:]
-    args: list[str] = []
+    args: list[str] = list(_pre_flags)
     positional_args: list[str] = []
     skip_next = False
     for i, tok in enumerate(rest_tokens):

@@ -101,17 +101,24 @@ RUN if [ -n "$MANIFEST_CONTENT" ]; then \
                /etc/contained/manifest.yaml; \
     fi
 
+# Bake hook scripts into the image at /etc/contained/hooks/.
+# These are the scripts registered in managed-settings.json. They live in the
+# image layer — not the workspace — so they cannot be edited without rebuilding.
+COPY hooks/ /etc/contained/hooks/
+RUN find /etc/contained/hooks -name "*.py" ! -name "_policy.py" -exec chmod +x {} \;
+
 # Write the in-container entrypoint script.
-# Reads agent.model from the workspace manifest and execs claude directly.
+# Reads agent.model from the image-baked manifest and execs claude directly.
 RUN cat <<'ENTRYPOINT_EOF' > /etc/contained/entrypoint.sh
 #!/bin/sh
 # If the workspace ships a src/ tree (e.g. the contAIned repo itself), prefer
-# it over the image-baked package so hook changes take effect without rebuilding.
+# it over the image-baked Python package so engine/tracer changes take effect
+# without rebuilding the image.
 [ -d /workspace/src ] && export PYTHONPATH="/workspace/src${PYTHONPATH:+:$PYTHONPATH}"
 MODEL=$(/opt/contained-venv/bin/python3 -c "
 import yaml, sys
 try:
-    m = yaml.safe_load(open('/workspace/.contAIned/manifest.yaml'))
+    m = yaml.safe_load(open('/etc/contained/manifest.yaml'))
     print(m.get('agent', {}).get('model', ''))
 except Exception:
     pass

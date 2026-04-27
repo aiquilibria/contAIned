@@ -1,7 +1,9 @@
 package docker
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -178,7 +180,7 @@ func BuildManagedSettings(m *manifest.Manifest) (string, error) {
 		allowRules = append(allowRules, "Skill("+skill+")")
 	}
 
-	hookCmd := "/opt/contained-venv/bin/python3 /workspace/.contAIned/hooks/%s.py"
+	hookCmd := "/opt/contained-venv/bin/python3 /etc/contained/hooks/%s.py"
 	h := func(name string) map[string]any {
 		return map[string]any{"type": "command", "command": fmt.Sprintf(hookCmd, name)}
 	}
@@ -333,6 +335,11 @@ func DockerSetup(
 	image := cfg.Image
 	manifestHash := shortHash(manifestContent)
 	manifestB64 := base64.StdEncoding.EncodeToString([]byte(manifestContent))
+	// Full SHA-256 of the manifest content in the same format used by mAInlined
+	// registration. Stored as an image label so reRegister() can retrieve it
+	// without needing a copy of the manifest in the workspace.
+	h := sha256.Sum256([]byte(manifestContent))
+	manifestSHA256 := hex.EncodeToString(h[:])
 	settingsB64 := base64.StdEncoding.EncodeToString([]byte(managedSettingsContent))
 	claudeMdB64 := base64.StdEncoding.EncodeToString([]byte(claudeMdContent))
 
@@ -390,6 +397,7 @@ func DockerSetup(
 			"--build-arg", "HOST_GID=" + gid,
 			"--label", "contAIned.version=" + version,
 			"--label", "contAIned.manifest_hash=" + manifestHash,
+			"--label", "contAIned.manifest_sha256=" + manifestSHA256,
 			"--build-arg", "MANIFEST_CONTENT=" + manifestB64,
 			"--build-arg", "MANAGED_SETTINGS_CONTENT=" + settingsB64,
 			"--build-arg", "CLAUDE_MD_CONTENT=" + claudeMdB64,
@@ -582,6 +590,30 @@ func prepareBuildContext(toolchains map[string]string, deps []string, marketplac
 	if err := os.WriteFile(filepath.Join(tmp, "deps.sh"), []byte(depsScript), 0o755); err != nil {
 		os.RemoveAll(tmp)
 		return "", err
+	}
+
+	// Write hook scripts to the build context so the Dockerfile can COPY them
+	// into /etc/contained/hooks/ in the image. Only .py files are included;
+	// __pycache__ bytecode and other artefacts are excluded.
+	if err := os.MkdirAll(filepath.Join(tmp, "hooks"), 0o755); err != nil {
+		os.RemoveAll(tmp)
+		return "", fmt.Errorf("creating hooks dir in build context: %w", err)
+	}
+	if err := fs.WalkDir(scaffold.Templates, "templates/hooks", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || filepath.Ext(path) != ".py" {
+			return nil
+		}
+		data, err := fs.ReadFile(scaffold.Templates, path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(tmp, "hooks", filepath.Base(path)), data, 0o644)
+	}); err != nil {
+		os.RemoveAll(tmp)
+		return "", fmt.Errorf("writing hook scripts to build context: %w", err)
 	}
 
 	// Marketplace repos: clone on the host so Docker build needs no network.

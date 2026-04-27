@@ -20,6 +20,7 @@ import (
 	"contained.dev/cli/internal/scaffold"
 	"contained.dev/cli/internal/sigstore"
 	"contained.dev/cli/internal/watch"
+	"contained.dev/cli/internal/workspace"
 )
 
 var initCmd = &cobra.Command{
@@ -372,7 +373,14 @@ func runInit(_ *cobra.Command, args []string) error {
 
 	// Sigstore image signing — when enabled and image was (re)built.
 	if m.Init.Sigstore.Enabled && imageRebuilt {
-		bundleDest := filepath.Join(target, ".contAIned", "provenance.bundle")
+		hostCfgDir, err := workspace.HostConfigDir(target)
+		if err != nil {
+			return fmt.Errorf("resolving host config dir: %w", err)
+		}
+		if err := os.MkdirAll(hostCfgDir, 0o700); err != nil {
+			return fmt.Errorf("creating host config dir: %w", err)
+		}
+		bundleDest := filepath.Join(hostCfgDir, "provenance.bundle")
 		fmt.Print("  Signing image with Sigstore …")
 		prov, err := sigstore.SignImage(
 			m.Init.Container.Image,
@@ -425,6 +433,22 @@ func runInit(_ *cobra.Command, args []string) error {
 		}
 	}
 
+	// Migration: remove legacy workspace files written by older versions.
+	// These are now stored outside the workspace bind-mount and must not remain
+	// in .contAIned/ where they could be mistaken for active files.
+	legacyPaths := []string{
+		filepath.Join(target, ".contAIned", "hooks"),             // now baked into image at /etc/contained/hooks/
+		filepath.Join(target, ".contAIned", "provenance.yaml"),   // now in ~/.config/contained/<id>/
+		filepath.Join(target, ".contAIned", "provenance.bundle"), // now in ~/.config/contained/<id>/
+	}
+	for _, p := range legacyPaths {
+		if _, statErr := os.Stat(p); statErr == nil {
+			if rmErr := os.RemoveAll(p); rmErr != nil {
+				dim.Printf("  Warning: could not remove legacy file %s: %v\n", p, rmErr)
+			}
+		}
+	}
+
 	var results []result
 
 	// Git repo.
@@ -435,21 +459,6 @@ func runInit(_ *cobra.Command, args []string) error {
 	results = append(results, result{".git/", gitStatus})
 
 	gitRoot := findGitRoot(target)
-	alreadyInit := isAlreadyInit(target)
-
-	// Managed files (hooks) — always overwritten on re-run.
-	for _, mf := range scaffold.ManagedFiles() {
-		content, err := scaffold.TemplateContent(mf.Template)
-		if err != nil {
-			return err
-		}
-		absPath := filepath.Join(target, mf.RelPath)
-		status, err := scaffold.WriteFile(absPath, content, mf.Executable, alreadyInit || initForce)
-		if err != nil {
-			return fmt.Errorf("writing %s: %w", mf.RelPath, err)
-		}
-		results = append(results, result{mf.RelPath, status})
-	}
 
 	// Report merged ecosystems and QA checks in the results table.
 	if repoManifest != nil {
@@ -621,18 +630,6 @@ See docs/policy-reference.md for full schema documentation.
 `, label, starter)
 	os.Exit(0)
 	return nil
-}
-
-func isAlreadyInit(target string) bool {
-	for _, p := range []string{
-		filepath.Join(target, ".contAIned", "manifest.yaml"),
-		filepath.Join(target, ".contAIned", "policy", "manifest.yaml"),
-	} {
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 func ensureGitRepo(path string) (string, error) {

@@ -59,12 +59,12 @@ contained init --rebuild
 ### Execution flow
 
 1. `contained` CLI (`cli/cmd/root.go`) checks for `.contAIned/` workspace, then starts a Docker container running Claude Code.
-2. `contained init` (`cli/cmd/init.go`) scaffolds `.contAIned/hooks/`, merges `manifest.yaml` from the workspace and any repo `.contAIned_manifest.yaml`, and builds the Docker image with policy baked in.
+2. `contained init` (`cli/cmd/init.go`) merges `manifest.yaml` from the workspace and any repo `.contAIned_manifest.yaml`, and builds the Docker image with policy baked in — including hook scripts at `/etc/contained/hooks/`.
 3. Inside the container, Claude Code runs with hooks registered in `/etc/claude-code/managed-settings.json` (highest precedence, immutable from the agent's perspective).
 
 ### Policy enforcement
 
-Hooks in `.contAIned/hooks/` run on every tool call:
+Hook scripts baked into the image at `/etc/contained/hooks/` run on every tool call:
 - `restrict_reads/writes/bash.py` — block out-of-scope operations
 - `tracer_pre/post.py` — capture file baselines and snapshots into SQLite
 - `audit.py` — append every tool call to the audit log

@@ -106,6 +106,9 @@ func validateRepoEcosystemDef(name string, def EcosystemDef) error {
 	if len(def.Plugins) > 0 {
 		return fmt.Errorf("ecosystems.%s: plugins is operator-only and may not be set in a repo manifest", name)
 	}
+	if len(def.Rules) > 0 {
+		return fmt.Errorf("ecosystems.%s: rules is operator-only and may not be set in a repo manifest", name)
+	}
 	return nil
 }
 
@@ -235,6 +238,27 @@ func MergeRepoManifest(operator *Manifest, repo *RepoManifest) (*Manifest, error
 			}
 		}
 	}
+
+	// Merge ecosystem-specific policy rules for active ecosystems.
+	// Operator rules come first; ecosystem rules are appended, deduplicated by ID.
+	// This auto-permits each ecosystem's standard toolchain commands (e.g.
+	// go build/test/vet) without requiring operators to repeat them per manifest.
+	existingRuleIDs := make(map[string]bool, len(operator.Runtime.Rules))
+	mergedRules := append([]PolicyRule{}, operator.Runtime.Rules...)
+	for _, r := range operator.Runtime.Rules {
+		existingRuleIDs[r.ID] = true
+	}
+	for ecoName := range repo.Ecosystems {
+		if def, ok := operator.Ecosystems[ecoName]; ok {
+			for _, rule := range def.Rules {
+				if !existingRuleIDs[rule.ID] {
+					mergedRules = append(mergedRules, rule)
+					existingRuleIDs[rule.ID] = true
+				}
+			}
+		}
+	}
+	merged.Runtime.Rules = mergedRules
 
 	// Concatenate QA checks: operator first, then repo.
 	merged.Runtime.QA.Checks = append(

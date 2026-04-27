@@ -3,7 +3,6 @@ package sigstore
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	sgbundle "github.com/sigstore/sigstore-go/pkg/bundle"
@@ -12,6 +11,7 @@ import (
 
 	"contained.dev/cli/internal/docker"
 	"contained.dev/cli/internal/manifest"
+	"contained.dev/cli/internal/workspace"
 )
 
 // VerifyWorkspace checks that the local Docker image still matches the signed
@@ -30,7 +30,11 @@ func VerifyWorkspace(root_ string) (*Provenance, error) {
 		return nil, nil // disabled — not an error
 	}
 
-	provPath := filepath.Join(root_, ".contAIned", "provenance.yaml")
+	hostCfgDir, err := workspace.HostConfigDir(root_)
+	if err != nil {
+		return nil, fmt.Errorf("resolving host config dir: %w", err)
+	}
+	provPath := hostCfgDir + "/provenance.yaml"
 	if _, err := os.Stat(provPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf(
 			"provenance.yaml not found despite Sigstore being enabled — " +
@@ -64,7 +68,7 @@ func VerifyWorkspace(root_ string) (*Provenance, error) {
 		)
 	}
 
-	bundlePath := filepath.Join(root_, ".contAIned", "provenance.bundle")
+	bundlePath := hostCfgDir + "/provenance.bundle"
 	if _, err := os.Stat(bundlePath); os.IsNotExist(err) {
 		return nil, fmt.Errorf(
 			"provenance.bundle not found — re-run 'contained init' to regenerate",

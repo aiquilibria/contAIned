@@ -76,9 +76,9 @@ Edit, build, test as normal. If you change a hook template under `cli/internal/s
 
 Edit the source under `src/contained/`. Run `pytest tests/` to verify. If your change is logic that also ships embedded in the CLI binary, run `go generate` in `cli/` and then `go test ./...` to confirm the embedding round-trips correctly.
 
-### Hook scripts (`.contAIned/hooks/`)
+### Hook scripts (`cli/internal/scaffold/templates/hooks/`)
 
-These are the **active** hooks for this workspace — generated from `cli/internal/scaffold/templates/hooks/`. Edit the templates, not the `.contAIned/hooks/` copies. After editing a template, run `go generate` to re-embed, then `contAIned init` in a test workspace to verify the generated output.
+Hook scripts are baked into the Docker image at `/etc/contained/hooks/` — they are not written to the workspace. Edit the templates in `cli/internal/scaffold/templates/hooks/`. After editing a template, run `go generate` in `cli/` to re-embed, then `contained init --rebuild` in a test workspace to verify the hooks take effect.
 
 ### Policy manifest (`manifest.yaml` / `.contAIned_manifest.yaml`)
 

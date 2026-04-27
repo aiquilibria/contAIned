@@ -217,30 +217,35 @@ func TestTemplateContent_UnknownFile_ReturnsError(t *testing.T) {
 	}
 }
 
-// ── ManagedFiles ──────────────────────────────────────────────────────────────
+// ── Hook templates ────────────────────────────────────────────────────────────
 
-func TestManagedFiles_PolicyNotExecutable(t *testing.T) {
-	for _, f := range ManagedFiles() {
-		if strings.HasSuffix(f.RelPath, "_policy.py") && f.Executable {
-			t.Error("_policy.py should not be executable")
-		}
+// TestHookTemplates_AllPresentInEmbeddedFS verifies that every expected hook
+// script is present in the embedded templates/hooks/ directory. These files are
+// written into the Docker build context by prepareBuildContext() and COPYed
+// into /etc/contained/hooks/ in the image — they must be embedded to build.
+func TestHookTemplates_AllPresentInEmbeddedFS(t *testing.T) {
+	expected := []string{
+		"_policy.py",
+		"restrict_reads.py",
+		"restrict_writes.py",
+		"restrict_bash.py",
+		"restrict_network.py",
+		"audit.py",
+		"permission_request.py",
+		"tracer_pre.py",
+		"tracer_post.py",
+		"subagent_start.py",
+		"subagent_stop.py",
+		"summarizer.py",
+		"qa.py",
+		"user_prompt_submit.py",
+		"push_hook.py",
+		"pre_compact.py",
 	}
-}
-
-func TestManagedFiles_HooksAreExecutable(t *testing.T) {
-	for _, f := range ManagedFiles() {
-		if strings.HasPrefix(f.RelPath, ".contAIned/hooks/") &&
-			!strings.HasSuffix(f.RelPath, "_policy.py") &&
-			!f.Executable {
-			t.Errorf("hook %q should be executable", f.RelPath)
-		}
-	}
-}
-
-func TestManagedFiles_AllTemplatesEmbedded(t *testing.T) {
-	for _, f := range ManagedFiles() {
-		if _, err := TemplateContent(f.Template); err != nil {
-			t.Errorf("template %q not found in embedded FS: %v", f.Template, err)
+	for _, name := range expected {
+		path := "templates/hooks/" + name
+		if _, err := TemplateContent(path); err != nil {
+			t.Errorf("hook template %q not found in embedded FS: %v", path, err)
 		}
 	}
 }

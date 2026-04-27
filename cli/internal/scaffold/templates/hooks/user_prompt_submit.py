@@ -65,7 +65,7 @@ if session_id and not agent_id:
                     tracer.record_policy_snapshot(
                         work_unit_id=_work_unit_id,
                         session_id=session_id,
-                        manifest_path=str(Path(cwd) / ".contAIned" / "manifest.yaml"),
+                        manifest_path="/etc/contained/manifest.yaml",
                         provenance_path="/run/contained/provenance.yaml",
                     )
             except Exception:
