@@ -1,0 +1,63 @@
+name: Update Claude Code Version
+
+on:
+  schedule:
+    - cron: '30 7 * * 1'  # Every Monday at 07:30 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    name: Check and update Claude Code version
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Fetch stable version
+        id: stable
+        run: |
+          STABLE=$(curl -fsSL --retry 3 --retry-delay 5 \
+            "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/stable")
+          echo "version=${STABLE}" >> "$GITHUB_OUTPUT"
+
+      - name: Read current version from Dockerfile
+        id: current
+        run: |
+          CURRENT=$(grep -oP 'ARG CLAUDE_CODE_VERSION=\K[^\s]+' \
+            cli/internal/scaffold/templates/Dockerfile)
+          echo "version=${CURRENT}" >> "$GITHUB_OUTPUT"
+
+      - name: Update Dockerfile if version changed
+        if: steps.stable.outputs.version != steps.current.outputs.version
+        run: |
+          sed -i \
+            "s/ARG CLAUDE_CODE_VERSION=${CURRENT}/ARG CLAUDE_CODE_VERSION=${STABLE}/" \
+            cli/internal/scaffold/templates/Dockerfile
+        env:
+          CURRENT: ${{ steps.current.outputs.version }}
+          STABLE: ${{ steps.stable.outputs.version }}
+
+      - name: Open pull request
+        if: steps.stable.outputs.version != steps.current.outputs.version
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: chore/update-claude-code-${{ steps.stable.outputs.version }}
+          commit-message: "chore: update Claude Code to ${{ steps.stable.outputs.version }}"
+          title: "chore: update Claude Code ${{ steps.current.outputs.version }} → ${{ steps.stable.outputs.version }}"
+          body: |
+            Automated update of the pinned Claude Code version in the Dockerfile.
+
+            | | Version |
+            |---|---|
+            | Previous | `${{ steps.current.outputs.version }}` |
+            | New | `${{ steps.stable.outputs.version }}` |
+
+            Source: [`stable` channel](https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/stable)
+
+            After merging, run `contained init --rebuild` to apply the updated version to the Docker image.
+          labels: dependencies
+          delete-branch: true
