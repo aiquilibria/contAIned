@@ -16,7 +16,7 @@ RUN npm install -g @anthropic-ai/sandbox-runtime@0.0.42
 # argument, so we bypass it and fetch from the versioned GCS path directly.
 # Update CLAUDE_CODE_VERSION here to upgrade; override at build time with
 #   --build-arg CLAUDE_CODE_VERSION=x.y.z
-ARG CLAUDE_CODE_VERSION=2.1.89
+ARG CLAUDE_CODE_VERSION=2.1.112
 RUN set -eux; \
     ARCH=$(uname -m); \
     [ "$ARCH" = "x86_64" ] && ARCH=x64; \
