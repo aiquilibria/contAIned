@@ -123,6 +123,7 @@ def main() -> None:
             ver = _pkg_version("contained")
         except Exception:
             ver = ""
+    ver = ver.lstrip("v")
 
     brand = f"{_GREEN}cont[{_RESET}{_RED}AI✦{_RESET}{_GREEN}]ned{_RESET}"
     if ver:
