@@ -178,6 +178,19 @@ CREATE TABLE IF NOT EXISTS actions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_actions_session ON actions(session_id);
+
+-- Diff boundary markers.
+-- A row is inserted (by record_diff_boundary) each time a work unit is pushed
+-- while the session continues.  diff_task / list_touched_files ignore any
+-- baselines or snapshots older than the latest boundary so that diffs shown
+-- in the stop hook only cover changes made after the most recent push.
+CREATE TABLE IF NOT EXISTS diff_boundaries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id  TEXT    NOT NULL REFERENCES tasks(session_id),
+    recorded_at INTEGER NOT NULL   -- Unix ms
+);
+CREATE INDEX IF NOT EXISTS idx_diff_boundaries_session
+    ON diff_boundaries(session_id, recorded_at DESC);
 """
 
 # Tools whose content is fully captured in the blobs/snapshots tables.
@@ -1058,6 +1071,27 @@ class contAInedTracer:
                 (now_ms, head_commit, head_branch, work_unit_id),
             )
 
+    def record_diff_boundary(self, session_id: str) -> None:
+        """Record a diff boundary for *session_id* at the current time.
+
+        Called after a work unit is pushed so that subsequent stop-hook diff
+        computations only reflect changes made since this point.
+        """
+        now_ms = int(time.time() * 1000)
+        with self.conn:
+            self.conn.execute(
+                "INSERT INTO diff_boundaries (session_id, recorded_at) VALUES (?, ?)",
+                (session_id, now_ms),
+            )
+
+    def _diff_boundary_ms(self, session_id: str) -> int:
+        """Return the latest diff boundary timestamp for *session_id*, or 0."""
+        row = self.conn.execute(
+            "SELECT MAX(recorded_at) FROM diff_boundaries WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return row[0] if row and row[0] is not None else 0
+
     # ------------------------------------------------------------------
     # Actions timeline builder
     # ------------------------------------------------------------------
@@ -1859,18 +1893,24 @@ class contAInedTracer:
         """
         Return distinct file paths touched by the agent tree rooted at
         *root_session_id*, sorted alphabetically.
+
+        Only files with a snapshot written after the latest diff boundary are
+        included so that files last changed in a previously pushed work unit
+        are excluded from the current stop-hook summary.
         """
         session_ids = self.tree_session_ids(root_session_id)
         if not session_ids:
             return []
+        boundary_ms = self._diff_boundary_ms(root_session_id)
         placeholders = ",".join("?" * len(session_ids))
         rows = self.conn.execute(
             f"""
             SELECT DISTINCT file_path FROM snapshots
             WHERE session_id IN ({placeholders})
+              AND written_at > ?
             ORDER BY file_path
             """,
-            session_ids,
+            [*session_ids, boundary_ms],
         ).fetchall()
         return [r[0] for r in rows]
 
@@ -1879,34 +1919,53 @@ class contAInedTracer:
         Compute a unified diff for *file_path* across the whole agent tree.
 
         Uses the earliest captured baseline for the file (MIN captured_at)
-        across all sessions in the tree as the "before" state, and the most
-        recently written snapshot as the "after" state.
+        after the latest diff boundary as the "before" state, and the most
+        recently written snapshot after that boundary as the "after" state.
 
-        Returns an empty string if the file was not touched by this task tree
-        or if no snapshot exists for it.
+        Returns an empty string if the file was not touched since the last
+        boundary or if no snapshot exists for it.
         """
         session_ids = self.tree_session_ids(root_session_id)
         if not session_ids:
             return ""
 
+        boundary_ms = self._diff_boundary_ms(root_session_id)
         placeholders = ",".join("?" * len(session_ids))
 
-        # Earliest baseline for this file across the whole tree.
+        # Earliest baseline for this file after the diff boundary.
+        # Falls back to the file's state at boundary time when no new baseline
+        # was captured (i.e. the file was not pre-read in this work unit yet).
         baseline_row = self.conn.execute(
             f"""
             SELECT pre_hash FROM baselines
             WHERE file_path = ? AND session_id IN ({placeholders})
+              AND captured_at > ?
             ORDER BY captured_at ASC LIMIT 1
             """,
-            [file_path, *session_ids],
+            [file_path, *session_ids, boundary_ms],
         ).fetchone()
 
         if baseline_row is None:
-            return ""  # file not touched by this task tree
+            # No baseline after the boundary — use the latest snapshot before
+            # the boundary as the "before" state (the file as left by the
+            # previous work unit).
+            baseline_row = self.conn.execute(
+                f"""
+                SELECT b.hash FROM snapshots s
+                JOIN blobs b ON s.blob_hash = b.hash
+                WHERE s.file_path = ? AND s.session_id IN ({placeholders})
+                  AND s.written_at <= ?
+                ORDER BY s.written_at DESC, s.id DESC LIMIT 1
+                """,
+                [file_path, *session_ids, boundary_ms],
+            ).fetchone()
+            if baseline_row is None:
+                return ""  # file not touched by this task tree at all
+            pre_hash = baseline_row[0]
+        else:
+            pre_hash = baseline_row[0]  # may be None (new file)
 
-        pre_hash = baseline_row[0]  # may be None (new file)
-
-        # Most recent snapshot for this file across the whole tree.
+        # Most recent snapshot for this file after the diff boundary.
         # Use s.id DESC as a tiebreaker when written_at timestamps collide
         # (possible within a single millisecond on fast machines).
         final_row = self.conn.execute(
@@ -1914,9 +1973,10 @@ class contAInedTracer:
             SELECT b.content FROM snapshots s
             JOIN blobs b ON s.blob_hash = b.hash
             WHERE s.file_path = ? AND s.session_id IN ({placeholders})
+              AND s.written_at > ?
             ORDER BY s.written_at DESC, s.id DESC LIMIT 1
             """,
-            [file_path, *session_ids],
+            [file_path, *session_ids, boundary_ms],
         ).fetchone()
 
         if final_row is None:
