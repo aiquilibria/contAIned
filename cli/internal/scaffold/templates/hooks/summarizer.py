@@ -58,7 +58,11 @@ _sentinel_file = Path("/tmp/claude") / f".stop_done_{session_id[:16]}"
 # This guarantees QA always completes first regardless of whether the SDK
 # executes Stop hooks sequentially or in parallel.
 _qa_checks: list = []
-_qa_script = Path(cwd) / ".contAIned" / "hooks" / "qa.py"
+# Hooks are baked into the image at /etc/contained/hooks/; fall back to the
+# legacy workspace path for older workspaces that haven't been rebuilt yet.
+_qa_script = Path(__file__).parent / "qa.py"
+if not _qa_script.exists():
+    _qa_script = Path(cwd) / ".contAIned" / "hooks" / "qa.py"
 if _qa_script.exists():
     try:
         _qa_proc = subprocess.run(
@@ -495,6 +499,10 @@ try:
 
             if _head_commit and _submitted:
                 tracer.complete_work_unit(_wu_id, _head_commit, head_branch=_head_branch)
+                try:
+                    tracer.record_diff_boundary(session_id)
+                except Exception:
+                    pass
                 try:
                     _wu_row = tracer.conn.execute(
                         "SELECT repo_url FROM work_units WHERE id = ?",
