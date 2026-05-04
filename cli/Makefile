@@ -1,6 +1,6 @@
 MODULE  := contained.dev/cli
 BINARY  := contained
-VERSION := $(shell grep 'Version = ' internal/version/version.go | sed 's/.*"\(.*\)".*/\1/')
+VERSION := $(shell git describe --tags --exact-match 2>/dev/null | sed 's/^v//' || grep 'Version = ' internal/version/version.go | sed 's/.*"\(.*\)".*/\1/')
 LDFLAGS := -ldflags "-s -w -X $(MODULE)/internal/version.Version=$(VERSION)"
 DIST    := dist
 
