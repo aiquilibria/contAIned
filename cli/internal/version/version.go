@@ -3,4 +3,4 @@ package version
 
 // Version is the current CLI version, used to label Docker images so
 // contained init can detect stale images and trigger a rebuild.
-const Version = "0.1.0"
+var Version = "dev"
