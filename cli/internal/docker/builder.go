@@ -398,6 +398,7 @@ func DockerSetup(
 			"--label", "contAIned.version=" + version,
 			"--label", "contAIned.manifest_hash=" + manifestHash,
 			"--label", "contAIned.manifest_sha256=" + manifestSHA256,
+			"--build-arg", "CONTAINED_VERSION=" + version,
 			"--build-arg", "MANIFEST_CONTENT=" + manifestB64,
 			"--build-arg", "MANAGED_SETTINGS_CONTENT=" + settingsB64,
 			"--build-arg", "CLAUDE_MD_CONTENT=" + claudeMdB64,
