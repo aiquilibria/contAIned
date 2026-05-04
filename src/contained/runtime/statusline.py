@@ -116,14 +116,17 @@ def main() -> None:
         except Exception:
             pass
 
-    ver = _git(cwd, "describe", "--tags", "--abbrev=0") if cwd else ""
+    ver = ""
+    try:
+        ver = open("/etc/contained/version").read().strip().lstrip("v")
+    except Exception:
+        pass
     if not ver:
         try:
             from importlib.metadata import version as _pkg_version
-            ver = _pkg_version("contained")
+            ver = _pkg_version("contained").lstrip("v")
         except Exception:
-            ver = ""
-    ver = ver.lstrip("v")
+            pass
 
     brand = f"{_GREEN}cont[{_RESET}{_RED}AI✦{_RESET}{_GREEN}]ned{_RESET}"
     if ver:

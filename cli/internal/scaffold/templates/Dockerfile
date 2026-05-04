@@ -72,6 +72,10 @@ shutil.copy(os.path.join(pkg, 'runtime', 'statusline.py'), '/etc/contained/statu
 shutil.copytree(os.path.join(pkg, 'runtime', 'plugin'), '/etc/contained/plugin') \
 "
 
+# Bake the contAIned CLI version into the image so statusline.py can display it.
+ARG CONTAINED_VERSION=""
+RUN echo "$CONTAINED_VERSION" > /etc/contained/version
+
 # Bake managed-settings.json into the image.
 # MANAGED_SETTINGS_CONTENT must be passed as a base64-encoded build arg by
 # contained init — direct docker build invocations are not supported.
