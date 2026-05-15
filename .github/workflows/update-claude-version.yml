@@ -45,6 +45,7 @@ jobs:
         if: steps.stable.outputs.version != steps.current.outputs.version
         uses: peter-evans/create-pull-request@v7
         with:
+          token: ${{ secrets.WORKFLOW_PAT }}
           branch: chore/update-claude-code-${{ steps.stable.outputs.version }}
           commit-message: "chore: update Claude Code to ${{ steps.stable.outputs.version }}"
           title: "chore: update Claude Code ${{ steps.current.outputs.version }} → ${{ steps.stable.outputs.version }}"
